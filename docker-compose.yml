@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  app:
+    build: .
+    container_name: boiled-claw
+    ports:
+      - "18789:18789"
+    environment:
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=18789
+      - REDIS_URL=redis://redis:6379
+    volumes:
+      - ./data:/app/data
+      - ./skills:/app/skills
+    depends_on:
+      - redis
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: boiled-claw-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:

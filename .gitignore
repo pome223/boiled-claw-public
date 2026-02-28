@@ -6,13 +6,18 @@
 __pycache__/
 *.py[cod]
 *.pyo
+*.so
 .venv/
 venv/
+ENV/
+env/
 *.egg-info/
 dist/
 build/
 .ruff_cache/
 .pytest_cache/
+.coverage
+htmlcov/
 
 # macOS
 .DS_Store
@@ -21,6 +26,7 @@ build/
 .vscode/
 .idea/
 *.swp
+*.swo
 
 # Logs
 *.log
@@ -29,3 +35,17 @@ logs/
 # ADK sessions
 .adk/
 sessions/
+
+# Data
+data/
+*.db
+*.sqlite
+
+# Screenshots
+screenshots/
+
+# Playwright
+playwright/.cache/
+
+# Docker
+docker-compose.override.yml
