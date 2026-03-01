@@ -23,6 +23,7 @@
         <button class="nav-item" data-tab="sessions">Sessions</button>
         <button class="nav-item" data-tab="channels">Channels</button>
         <button class="nav-item" data-tab="skills">Skills</button>
+        <button class="nav-item" data-tab="memory">Memory</button>
         <button class="nav-item" data-tab="cron">Cron Jobs</button>
         <button class="nav-item" data-tab="logs">Live Logs</button>
         <button class="nav-item" data-tab="settings">Settings</button>
@@ -110,6 +111,24 @@
             <button id="runSkillBtn" class="btn primary" type="button">Run Skill</button>
           </div>
           <pre id="skillResult" class="raw-log"></pre>
+        </div>
+      </section>
+
+      <section id="tab-memory" class="tab">
+        <div class="panel skills-panel">
+          <div class="skills-toolbar">
+            <h3>Memory</h3>
+            <button id="refreshMemoryBtn" class="btn" type="button">Refresh</button>
+          </div>
+          <p class="muted">SQLite + vector memory browser. <span id="memoryStats"></span></p>
+
+          <div class="memory-search-row">
+            <input id="memoryQueryInput" class="text-input mono" placeholder="search query..." style="flex:1" />
+            <input id="memoryTagsInput" class="text-input mono" placeholder="tags (comma)" style="width:160px" />
+            <button id="searchMemoryBtn" class="btn primary" type="button">Search</button>
+          </div>
+
+          <ul id="memoryList" class="list"></ul>
         </div>
       </section>
 

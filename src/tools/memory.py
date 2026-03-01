@@ -459,3 +459,21 @@ async def memory_stats() -> Dict[str, Any]:
             "error": str(e),
             "success": False,
         }
+
+
+async def memory_delete(memory_id: int) -> Dict[str, Any]:
+    """
+    指定IDのメモリを削除する
+
+    Args:
+        memory_id: 削除するメモリのID
+
+    Returns:
+        削除結果
+    """
+    try:
+        store = get_memory_store()
+        deleted = store.delete(memory_id)
+        return {"memory_id": memory_id, "deleted": deleted, "success": True}
+    except Exception as e:
+        return {"error": str(e), "success": False}

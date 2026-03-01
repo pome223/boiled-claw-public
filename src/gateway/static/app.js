@@ -3,6 +3,7 @@ const NAV_META = {
   sessions: { title: "Sessions", subtitle: "Current browser sessions" },
   channels: { title: "Channels", subtitle: "Channel status overview" },
   skills: { title: "Skills", subtitle: "OpenClaw-style skill catalog and run" },
+  memory: { title: "Memory", subtitle: "SQLite vector memory browser" },
   cron: { title: "Cron Jobs", subtitle: "Scheduled tasks overview" },
   logs: { title: "Live Logs", subtitle: "Raw client-side event mirror" },
   settings: { title: "Settings", subtitle: "Gateway connection options" }
@@ -40,6 +41,12 @@ const userIdEl = document.getElementById("userId");
 const saveSettingsBtn = document.getElementById("saveSettingsBtn");
 const resetSettingsBtn = document.getElementById("resetSettingsBtn");
 const refreshSkillsBtn = document.getElementById("refreshSkillsBtn");
+const refreshMemoryBtn = document.getElementById("refreshMemoryBtn");
+const searchMemoryBtn = document.getElementById("searchMemoryBtn");
+const memoryQueryInputEl = document.getElementById("memoryQueryInput");
+const memoryTagsInputEl = document.getElementById("memoryTagsInput");
+const memoryListEl = document.getElementById("memoryList");
+const memoryStatsEl = document.getElementById("memoryStats");
 const skillsListEl = document.getElementById("skillsList");
 const skillNameInputEl = document.getElementById("skillNameInput");
 const skillParamsInputEl = document.getElementById("skillParamsInput");
@@ -50,6 +57,7 @@ let socket = null;
 let waitingIndicator = null;
 const sessions = [];
 let pendingMessage = null;
+const messageHistory = [];
 
 function parseStoredSettings() {
   try {
@@ -158,7 +166,8 @@ function setStatus(online, text) {
   disconnectBtn.disabled = !online;
 }
 
-function appendBubble(kind, text) {
+function appendBubble(kind, text, { persist = true } = {}) {
+  if (persist) messageHistory.push({ kind, text });
   const bubble = document.createElement("div");
   bubble.className = `bubble ${kind}`;
   bubble.textContent = text;
@@ -169,6 +178,17 @@ function appendBubble(kind, text) {
 
 function addSystemMessage(text) {
   return appendBubble("system", text);
+}
+
+function restoreMessages() {
+  messagesEl.innerHTML = "";
+  messageHistory.forEach(({ kind, text }) => {
+    const b = document.createElement("div");
+    b.className = `bubble ${kind}`;
+    b.textContent = text;
+    messagesEl.appendChild(b);
+  });
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function clearWaiting() {
@@ -215,8 +235,14 @@ function activateTab(tabKey) {
   const meta = NAV_META[tabKey] || NAV_META.chat;
   tabTitle.textContent = meta.title;
   tabSubtitle.textContent = meta.subtitle;
+  if (tabKey === "chat") {
+    restoreMessages();
+  }
   if (tabKey === "skills") {
     void fetchSkills();
+  }
+  if (tabKey === "memory") {
+    void fetchMemory();
   }
 }
 
@@ -307,6 +333,85 @@ async function executeSkill() {
   }
 }
 
+async function fetchMemory() {
+  const base = toHttpBaseUrl(currentSettings());
+  const query = (memoryQueryInputEl.value || "").trim();
+  const tags = (memoryTagsInputEl.value || "").trim();
+
+  // stats
+  try {
+    const res = await fetch(`${base}/memory/stats`);
+    if (res.ok) {
+      const data = await res.json();
+      const s = data.stats || {};
+      memoryStatsEl.textContent = `${s.total_memories ?? "-"}件 / embeddings: ${s.with_embedding ?? "-"}件`;
+    }
+  } catch (_) {
+    memoryStatsEl.textContent = "(stats unavailable)";
+  }
+
+  // search / list
+  const params = new URLSearchParams({ limit: "50" });
+  if (query) params.set("query", query);
+  if (tags) params.set("tags", tags);
+
+  try {
+    logEvent("memory.fetch.start", { query, tags });
+    const res = await fetch(`${base}/memory?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    renderMemory(data.results || []);
+    logEvent("memory.fetch.ok", { count: data.count });
+  } catch (err) {
+    memoryListEl.innerHTML = `<li class="muted">${err}</li>`;
+    logEvent("memory.fetch.error", { error: String(err) });
+  }
+}
+
+function renderMemory(items) {
+  if (!items.length) {
+    memoryListEl.innerHTML = "<li class='muted'>No memories found.</li>";
+    return;
+  }
+  memoryListEl.innerHTML = items.map((m) => {
+    const tags = Array.isArray(m.tags) && m.tags.length ? m.tags.map((t) => `<span class="tag">${t}</span>`).join(" ") : "";
+    const date = m.created_at ? new Date(m.created_at * 1000).toLocaleString() : "-";
+    const score = m.score != null ? ` <span class="muted mono">score=${m.score.toFixed(3)}</span>` : "";
+    return [
+      `<li data-memory-id="${m.id}">`,
+      `<div class="memory-meta"><span class="mono">#${m.id}</span> ${date} ${tags}${score}</div>`,
+      `<div class="memory-content">${escapeHtml(m.content)}</div>`,
+      `<div class="memory-actions"><button class="btn btn-sm delete-memory-btn" data-id="${m.id}">Delete</button></div>`,
+      "</li>"
+    ].join("");
+  }).join("");
+
+  memoryListEl.querySelectorAll(".delete-memory-btn").forEach((btn) => {
+    btn.addEventListener("click", () => void deleteMemory(Number(btn.dataset.id)));
+  });
+}
+
+async function deleteMemory(id) {
+  const base = toHttpBaseUrl(currentSettings());
+  try {
+    logEvent("memory.delete.start", { id });
+    const res = await fetch(`${base}/memory/${id}`, { method: "DELETE" });
+    if (res.status === 404) throw new Error("not found");
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    logEvent("memory.delete.ok", { id });
+    void fetchMemory();
+  } catch (err) {
+    logEvent("memory.delete.error", { id, error: String(err) });
+  }
+}
+
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function connect() {
   if (socket && socket.readyState === WebSocket.OPEN) {
     addSystemMessage("already connected");
@@ -394,7 +499,7 @@ function sendMessage(text) {
   socket.send(JSON.stringify(payload));
   logEvent("socket.send", payload);
   appendBubble("user", text);
-  waitingIndicator = addSystemMessage("thinking...");
+  waitingIndicator = appendBubble("system", "thinking...", { persist: false });
 }
 
 navButtons.forEach((btn) => {
@@ -410,6 +515,15 @@ refreshSkillsBtn.addEventListener("click", () => {
 });
 runSkillBtn.addEventListener("click", () => {
   void executeSkill();
+});
+refreshMemoryBtn.addEventListener("click", () => {
+  void fetchMemory();
+});
+searchMemoryBtn.addEventListener("click", () => {
+  void fetchMemory();
+});
+memoryQueryInputEl.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") void fetchMemory();
 });
 
 gatewayUrlEl.addEventListener("input", () => {

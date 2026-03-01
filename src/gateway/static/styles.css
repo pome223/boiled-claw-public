@@ -444,3 +444,51 @@ textarea {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
+
+/* Memory tab */
+.memory-search-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  align-items: center;
+}
+
+#memoryList li {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.memory-meta {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.memory-content {
+  font-size: 0.9rem;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.tag {
+  display: inline-block;
+  background: var(--panel2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 0.72rem;
+  color: var(--blue);
+  margin-right: 4px;
+}
+
+.btn-sm {
+  padding: 2px 10px;
+  font-size: 0.78rem;
+}

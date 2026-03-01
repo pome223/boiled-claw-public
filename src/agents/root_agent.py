@@ -9,7 +9,7 @@ from src.tools.web_search import web_search
 from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
 from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
-from src.tools.memory import memory_store, memory_search
+from src.tools.memory import memory_store, memory_search, memory_stats, memory_delete
 from src.tools.finance import stock_price
 from src.tools.skills import skill_list, skill_execute
 
@@ -56,8 +56,15 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - 全ての重要な操作は監査ログに記録される
 - セキュリティポリシーに違反する操作はブロックされる
 
-## メモリ活用
-- 重要な情報は memory_store で保存する
+## メモリ活用（厳守）
+以下の情報を検出したら、**返答する前に必ず `memory_store` を呼ぶこと**:
+- ユーザーの好き嫌い・趣味・嗜好（「〜が好き」「〜が嫌い」など）
+- ユーザーが「これは重要」「覚えておいて」と明示した情報
+- ユーザーの個人的な事実（ペット、職業、居住地、家族など）
+
+**禁止事項**: `memory_store` を実際に呼ばずに「覚えました」「記憶しました」と言ってはならない。
+必ずツール呼び出しを先に完了させてから、保存完了を報告すること。
+
 - 過去の会話や情報は memory_search で検索できる
 - ユーザーの嗜好や文脈を記憶して、パーソナライズされた応答を行う
 
@@ -78,6 +85,8 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         write_file,
         memory_store,
         memory_search,
+        memory_stats,
+        memory_delete,
         skill_list,
         skill_execute,
     ],

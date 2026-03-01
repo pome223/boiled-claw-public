@@ -21,6 +21,7 @@ from src.security.audit import get_audit_logger, AuditEventType
 from src.tools.finance import stock_price
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
 from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
+from src.tools.memory import memory_search, memory_stats, memory_delete
 
 
 class ConnectionManager:
@@ -127,6 +128,27 @@ class GatewayServer:
             result = await tool_skill_execute(skill_name, json.dumps(params, ensure_ascii=False))
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result.get("message", "Skill execution failed"))
+            return result
+
+        @self.app.get("/memory/stats")
+        async def memory_stats_endpoint():
+            return await memory_stats()
+
+        @self.app.get("/memory")
+        async def memory_search_endpoint(
+            query: Optional[str] = None,
+            tags: Optional[str] = None,
+            limit: int = 10,
+        ):
+            return await memory_search(query=query, tags=tags, limit=limit)
+
+        @self.app.delete("/memory/{memory_id}")
+        async def memory_delete_endpoint(memory_id: int):
+            result = await memory_delete(memory_id)
+            if not result.get("success"):
+                raise HTTPException(status_code=500, detail=result.get("error", "Delete failed"))
+            if not result.get("deleted"):
+                raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
             return result
 
         @self.app.get("/chat")
