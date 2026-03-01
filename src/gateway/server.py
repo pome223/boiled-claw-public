@@ -6,7 +6,7 @@ OpenClaw のゲートウェイアーキテクチャを参考
 import asyncio
 import json
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -130,6 +130,14 @@ class GatewayServer:
                 raise HTTPException(status_code=400, detail=result.get("message", "Skill execution failed"))
             return result
 
+        @self.app.get("/sessions/{user_id}")
+        async def list_sessions(user_id: str):
+            response = await self.session_service.list_sessions(
+                app_name="boiled-claw", user_id=user_id
+            )
+            sessions = response.sessions or []
+            return {"sessions": [{"id": s.id} for s in sessions]}
+
         @self.app.get("/memory/stats")
         async def memory_stats_endpoint():
             return await memory_stats()
@@ -156,12 +164,24 @@ class GatewayServer:
             return FileResponse(self.static_dir / "index.html")
 
         @self.app.websocket("/ws/{user_id}")
-        async def websocket_endpoint(websocket: WebSocket, user_id: str):
-            # セッション作成
-            session = await self.session_service.create_session(
-                app_name="boiled-claw",
-                user_id=user_id,
-            )
+        async def websocket_endpoint(
+            websocket: WebSocket,
+            user_id: str,
+            session_id: Optional[str] = Query(default=None),
+        ):
+            # 既存セッションの再利用または新規作成
+            session = None
+            if session_id:
+                session = await self.session_service.get_session(
+                    app_name="boiled-claw",
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+            if session is None:
+                session = await self.session_service.create_session(
+                    app_name="boiled-claw",
+                    user_id=user_id,
+                )
             session_id = session.id
 
             await self.manager.connect(websocket, session_id)

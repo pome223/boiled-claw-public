@@ -58,6 +58,8 @@ let waitingIndicator = null;
 const sessions = [];
 let pendingMessage = null;
 const messageHistory = [];
+let currentSessionId = null;
+const SESSION_HISTORY_KEY = "boiled_claw_msg_history_v1";
 
 function parseStoredSettings() {
   try {
@@ -112,7 +114,7 @@ function resetSettings() {
   logEvent("settings.reset", DEFAULTS);
 }
 
-function toWebSocketUrl(settings) {
+function toWebSocketUrl(settings, sessionId = null) {
   let base = settings.gatewayUrl || DEFAULTS.gatewayUrl;
   if (base.startsWith("http://")) base = "ws://" + base.slice(7);
   if (base.startsWith("https://")) base = "wss://" + base.slice(8);
@@ -145,6 +147,9 @@ function toWebSocketUrl(settings) {
   if (settings.token) {
     wsUrl.searchParams.set("token", settings.token);
   }
+  if (sessionId) {
+    wsUrl.searchParams.set("session_id", sessionId);
+  }
   return wsUrl.toString();
 }
 
@@ -166,8 +171,29 @@ function setStatus(online, text) {
   disconnectBtn.disabled = !online;
 }
 
+function saveSessionHistory() {
+  if (!currentSessionId) return;
+  try {
+    const stored = JSON.parse(localStorage.getItem(SESSION_HISTORY_KEY) || "{}");
+    stored[currentSessionId] = messageHistory;
+    localStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(stored));
+  } catch (_) {}
+}
+
+function loadSessionHistory(sessionId) {
+  try {
+    const stored = JSON.parse(localStorage.getItem(SESSION_HISTORY_KEY) || "{}");
+    return stored[sessionId] || [];
+  } catch (_) {
+    return [];
+  }
+}
+
 function appendBubble(kind, text, { persist = true } = {}) {
-  if (persist) messageHistory.push({ kind, text });
+  if (persist) {
+    messageHistory.push({ kind, text });
+    saveSessionHistory();
+  }
   const bubble = document.createElement("div");
   bubble.className = `bubble ${kind}`;
   bubble.textContent = text;
@@ -209,19 +235,55 @@ function logEvent(name, payload) {
   rawLogEl.textContent = `${line}\n${rawLogEl.textContent}`.slice(0, 12000);
 }
 
+function getSessionSummary(sessionId) {
+  const history = loadSessionHistory(sessionId);
+  const firstUser = history.find((m) => m.kind === "user");
+  if (!firstUser) return null;
+  const text = firstUser.text.trim().replace(/\n+/g, " ");
+  return text.length > 60 ? text.slice(0, 60) + "…" : text;
+}
+
 function renderSessions() {
   if (!sessions.length) {
     sessionListEl.innerHTML = "<li>No sessions yet.</li>";
     return;
   }
+  const isOnline = socket && socket.readyState === WebSocket.OPEN;
   sessionListEl.innerHTML = sessions
-    .map((s) => `<li><div class=\"mono\">${s.id}</div><div class=\"muted\">user: ${s.userId} / ${s.when}</div></li>`)
+    .map((s) => {
+      const isActive = isOnline && s.id === currentSessionId;
+      const activeTag = isActive ? " <span class=\"tag\">active</span>" : "";
+      const summary = getSessionSummary(s.id);
+      const summaryHtml = summary
+        ? `<div class="session-summary">${escapeHtml(summary)}</div>`
+        : "";
+      return [
+        `<li class="session-item${isActive ? " session-active" : ""}" data-session-id="${s.id}">`,
+        `<div class="mono">${s.id}${activeTag}</div>`,
+        `<div class="muted">${s.userId} / ${s.when}</div>`,
+        summaryHtml,
+        "</li>"
+      ].join("");
+    })
     .join("");
+
+  sessionListEl.querySelectorAll(".session-item").forEach((li) => {
+    li.addEventListener("click", () => switchSession(li.dataset.sessionId, li.querySelector(".muted").textContent));
+  });
 }
 
 function addSession(sessionId, userId) {
-  sessions.unshift({ id: sessionId, userId, when: new Date().toLocaleString() });
-  if (sessions.length > 15) sessions.length = 15;
+  const existing = sessions.find((s) => s.id === sessionId);
+  if (existing) {
+    existing.when = new Date().toLocaleString();
+    existing.userId = userId;
+    // 先頭に移動
+    sessions.splice(sessions.indexOf(existing), 1);
+    sessions.unshift(existing);
+  } else {
+    sessions.unshift({ id: sessionId, userId, when: new Date().toLocaleString() });
+    if (sessions.length > 15) sessions.length = 15;
+  }
   renderSessions();
 }
 
@@ -237,6 +299,9 @@ function activateTab(tabKey) {
   tabSubtitle.textContent = meta.subtitle;
   if (tabKey === "chat") {
     restoreMessages();
+  }
+  if (tabKey === "sessions") {
+    void syncServerSessions();
   }
   if (tabKey === "skills") {
     void fetchSkills();
@@ -333,6 +398,28 @@ async function executeSkill() {
   }
 }
 
+async function syncServerSessions() {
+  const settings = currentSettings();
+  const base = toHttpBaseUrl(settings);
+  const userId = (settings.userId || "web_user").trim();
+  try {
+    const res = await fetch(`${base}/sessions/${encodeURIComponent(userId)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    const serverIds = new Set((data.sessions || []).map((s) => s.id));
+    // サーバーに存在するセッションのみ残し、ローカルにないものを追加
+    (data.sessions || []).forEach((s) => {
+      if (!sessions.find((x) => x.id === s.id)) {
+        sessions.push({ id: s.id, userId, when: "(server)" });
+      }
+    });
+    // サーバーに存在しないローカルエントリを削除
+    const toRemove = sessions.filter((s) => !serverIds.has(s.id));
+    toRemove.forEach((s) => sessions.splice(sessions.indexOf(s), 1));
+    renderSessions();
+  } catch (_) {}
+}
+
 async function fetchMemory() {
   const base = toHttpBaseUrl(currentSettings());
   const query = (memoryQueryInputEl.value || "").trim();
@@ -412,14 +499,23 @@ function escapeHtml(str) {
     .replace(/>/g, "&gt;");
 }
 
-function connect() {
+function switchSession(targetSessionId) {
+  if (socket) socket.close();
+  messageHistory.length = 0;
+  const saved = loadSessionHistory(targetSessionId);
+  saved.forEach((m) => messageHistory.push(m));
+  restoreMessages();
+  connect(targetSessionId);
+}
+
+function connect(targetSessionId = null) {
   if (socket && socket.readyState === WebSocket.OPEN) {
     addSystemMessage("already connected");
     return;
   }
 
   const settings = currentSettings();
-  const wsUrl = toWebSocketUrl(settings);
+  const wsUrl = toWebSocketUrl(settings, targetSessionId);
 
   logEvent("socket.connecting", { wsUrl });
   setStatus(false, "connecting...");
@@ -439,6 +535,7 @@ function connect() {
 
   socket.onclose = (event) => {
     setStatus(false, "offline");
+    currentSessionId = null;
     sessionBadgeEl.textContent = "-";
     clearWaiting();
     addSystemMessage(`disconnected (code=${event.code})`);
@@ -457,8 +554,9 @@ function connect() {
       const payload = JSON.parse(event.data);
       logEvent("socket.message", payload);
       if (payload.type === "connected") {
-        sessionBadgeEl.textContent = payload.session_id || "-";
-        addSession(payload.session_id || "unknown", payload.user_id || settings.userId);
+        currentSessionId = payload.session_id || null;
+        sessionBadgeEl.textContent = currentSessionId || "-";
+        addSession(currentSessionId || "unknown", payload.user_id || settings.userId);
         return;
       }
       if (payload.type === "agent_message") {

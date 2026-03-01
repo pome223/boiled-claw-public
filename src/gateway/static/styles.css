@@ -492,3 +492,29 @@ textarea {
   padding: 2px 10px;
   font-size: 0.78rem;
 }
+
+/* Sessions tab */
+.session-item {
+  cursor: pointer;
+  border-radius: 6px;
+  padding: 8px 10px !important;
+  transition: background 0.15s;
+}
+
+.session-item:hover {
+  background: var(--panel2);
+}
+
+.session-active {
+  background: var(--panel2);
+  border-left: 3px solid var(--ok) !important;
+}
+
+.session-summary {
+  font-size: 0.85rem;
+  color: var(--text);
+  margin-top: 2px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
