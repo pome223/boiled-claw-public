@@ -384,6 +384,23 @@ textarea {
   max-width: 560px;
 }
 
+.skills-panel {
+  max-width: 900px;
+}
+
+.skills-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+#skillResult {
+  margin-top: 12px;
+  min-height: 160px;
+  max-height: 320px;
+}
+
 @keyframes rise {
   from {
     opacity: 0;

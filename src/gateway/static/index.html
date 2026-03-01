@@ -22,6 +22,7 @@
         <button class="nav-item active" data-tab="chat">Chat</button>
         <button class="nav-item" data-tab="sessions">Sessions</button>
         <button class="nav-item" data-tab="channels">Channels</button>
+        <button class="nav-item" data-tab="skills">Skills</button>
         <button class="nav-item" data-tab="cron">Cron Jobs</button>
         <button class="nav-item" data-tab="logs">Live Logs</button>
         <button class="nav-item" data-tab="settings">Settings</button>
@@ -86,6 +87,29 @@
             <li>Discord: unknown</li>
             <li>Slack: unknown</li>
           </ul>
+        </div>
+      </section>
+
+      <section id="tab-skills" class="tab">
+        <div class="panel skills-panel">
+          <div class="skills-toolbar">
+            <h3>Skills</h3>
+            <button id="refreshSkillsBtn" class="btn" type="button">Refresh</button>
+          </div>
+          <p class="muted">OpenClaw-style <code>skills/&lt;name&gt;/SKILL.md</code> を一覧し、直接実行できます。</p>
+
+          <ul id="skillsList" class="list"></ul>
+
+          <label for="skillNameInput" class="field-label">skill name</label>
+          <input id="skillNameInput" class="text-input mono" placeholder="coding-agent" />
+
+          <label for="skillParamsInput" class="field-label">params (JSON object)</label>
+          <textarea id="skillParamsInput" class="mono" rows="4" placeholder='{"task":"Fix websocket timeout"}'></textarea>
+
+          <div class="actions">
+            <button id="runSkillBtn" class="btn primary" type="button">Run Skill</button>
+          </div>
+          <pre id="skillResult" class="raw-log"></pre>
         </div>
       </section>
 

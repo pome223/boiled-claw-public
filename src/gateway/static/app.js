@@ -2,6 +2,7 @@ const NAV_META = {
   chat: { title: "Chat", subtitle: "Gateway WebSocket chat" },
   sessions: { title: "Sessions", subtitle: "Current browser sessions" },
   channels: { title: "Channels", subtitle: "Channel status overview" },
+  skills: { title: "Skills", subtitle: "OpenClaw-style skill catalog and run" },
   cron: { title: "Cron Jobs", subtitle: "Scheduled tasks overview" },
   logs: { title: "Live Logs", subtitle: "Raw client-side event mirror" },
   settings: { title: "Settings", subtitle: "Gateway connection options" }
@@ -38,6 +39,12 @@ const tokenEl = document.getElementById("token");
 const userIdEl = document.getElementById("userId");
 const saveSettingsBtn = document.getElementById("saveSettingsBtn");
 const resetSettingsBtn = document.getElementById("resetSettingsBtn");
+const refreshSkillsBtn = document.getElementById("refreshSkillsBtn");
+const skillsListEl = document.getElementById("skillsList");
+const skillNameInputEl = document.getElementById("skillNameInput");
+const skillParamsInputEl = document.getElementById("skillParamsInput");
+const runSkillBtn = document.getElementById("runSkillBtn");
+const skillResultEl = document.getElementById("skillResult");
 
 let socket = null;
 let waitingIndicator = null;
@@ -133,6 +140,16 @@ function toWebSocketUrl(settings) {
   return wsUrl.toString();
 }
 
+function toHttpBaseUrl(settings) {
+  let base = settings.gatewayUrl || DEFAULTS.gatewayUrl;
+  if (base.startsWith("ws://")) base = "http://" + base.slice(5);
+  if (base.startsWith("wss://")) base = "https://" + base.slice(6);
+  if (!base.startsWith("http://") && !base.startsWith("https://")) {
+    base = `${window.location.protocol}//${base}`;
+  }
+  return base.replace(/\/+$/, "");
+}
+
 function setStatus(online, text) {
   statusDotEl.classList.toggle("online", online);
   statusDotEl.classList.toggle("offline", !online);
@@ -198,6 +215,96 @@ function activateTab(tabKey) {
   const meta = NAV_META[tabKey] || NAV_META.chat;
   tabTitle.textContent = meta.title;
   tabSubtitle.textContent = meta.subtitle;
+  if (tabKey === "skills") {
+    void fetchSkills();
+  }
+}
+
+function renderSkills(items) {
+  if (!items.length) {
+    skillsListEl.innerHTML = "<li>No skills loaded.</li>";
+    return;
+  }
+  skillsListEl.innerHTML = items
+    .map((s) => {
+      const tags = Array.isArray(s.tags) && s.tags.length ? s.tags.join(", ") : "-";
+      return [
+        "<li>",
+        `<div><strong>${s.name || "-"}</strong></div>`,
+        `<div class="muted">${s.description || ""}</div>`,
+        `<div class="muted mono">version=${s.version || "-"} author=${s.author || "-"}</div>`,
+        `<div class="muted mono">tags=${tags}</div>`,
+        "</li>"
+      ].join("");
+    })
+    .join("");
+}
+
+async function fetchSkills() {
+  const base = toHttpBaseUrl(currentSettings());
+  const url = `${base}/skills`;
+  try {
+    logEvent("skills.fetch.start", { url });
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const items = Array.isArray(data.details) ? data.details : [];
+    renderSkills(items);
+    if (!skillNameInputEl.value && items.length > 0 && items[0].name) {
+      skillNameInputEl.value = items[0].name;
+    }
+    skillResultEl.textContent = JSON.stringify(data, null, 2);
+    logEvent("skills.fetch.ok", { count: items.length });
+  } catch (err) {
+    renderSkills([]);
+    skillResultEl.textContent = String(err);
+    logEvent("skills.fetch.error", { error: String(err) });
+  }
+}
+
+async function executeSkill() {
+  const base = toHttpBaseUrl(currentSettings());
+  const skillName = (skillNameInputEl.value || "").trim();
+  if (!skillName) {
+    skillResultEl.textContent = "skill name is required";
+    return;
+  }
+
+  let params = {};
+  const rawParams = (skillParamsInputEl.value || "").trim();
+  if (rawParams) {
+    try {
+      params = JSON.parse(rawParams);
+      if (!params || typeof params !== "object" || Array.isArray(params)) {
+        skillResultEl.textContent = "params must be a JSON object";
+        return;
+      }
+    } catch (err) {
+      skillResultEl.textContent = `invalid JSON: ${err}`;
+      return;
+    }
+  }
+
+  const url = `${base}/skills/${encodeURIComponent(skillName)}/execute`;
+  try {
+    logEvent("skills.exec.start", { skillName });
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ params })
+    });
+    const data = await res.json();
+    if (!res.ok) {
+      throw new Error(data?.detail || `HTTP ${res.status}`);
+    }
+    skillResultEl.textContent = JSON.stringify(data, null, 2);
+    logEvent("skills.exec.ok", { skillName });
+  } catch (err) {
+    skillResultEl.textContent = String(err);
+    logEvent("skills.exec.error", { skillName, error: String(err) });
+  }
 }
 
 function connect() {
@@ -298,6 +405,12 @@ connectBtn.addEventListener("click", connect);
 disconnectBtn.addEventListener("click", disconnect);
 saveSettingsBtn.addEventListener("click", persistSettings);
 resetSettingsBtn.addEventListener("click", resetSettings);
+refreshSkillsBtn.addEventListener("click", () => {
+  void fetchSkills();
+});
+runSkillBtn.addEventListener("click", () => {
+  void executeSkill();
+});
 
 gatewayUrlEl.addEventListener("input", () => {
   gatewayHostLabelEl.textContent = gatewayUrlEl.value.trim() || DEFAULTS.gatewayUrl;

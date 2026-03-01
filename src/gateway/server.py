@@ -5,8 +5,8 @@ OpenClaw のゲートウェイアーキテクチャを参考
 
 import asyncio
 import json
-from typing import Dict, Optional, Set
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import Any, Dict, Optional
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -20,6 +20,7 @@ from src.agents.root_agent import root_agent
 from src.security.audit import get_audit_logger, AuditEventType
 from src.tools.finance import stock_price
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
+from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
 
 
 class ConnectionManager:
@@ -111,7 +112,22 @@ class GatewayServer:
         @self.app.get("/skills")
         async def skills():
             await ensure_skills_loaded()
-            return get_skills_report()
+            detail = await tool_skill_list()
+            report = get_skills_report()
+            return {
+                **report,
+                "details": detail.get("skills", []),
+            }
+
+        @self.app.post("/skills/{skill_name}/execute")
+        async def execute_skill(skill_name: str, payload: Dict[str, Any] | None = None):
+            params = {}
+            if payload and isinstance(payload.get("params"), dict):
+                params = payload.get("params", {})
+            result = await tool_skill_execute(skill_name, json.dumps(params, ensure_ascii=False))
+            if not result.get("ok"):
+                raise HTTPException(status_code=400, detail=result.get("message", "Skill execution failed"))
+            return result
 
         @self.app.get("/chat")
         async def chat_ui():
