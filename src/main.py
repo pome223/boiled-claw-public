@@ -25,8 +25,10 @@ async def run_cli():
     from google.genai import types
     from src.agents.root_agent import root_agent
     from src.config.settings import get_settings
+    from src.skills.runtime import ensure_skills_loaded
 
     settings = get_settings()
+    await ensure_skills_loaded()
 
     session_service = InMemorySessionService()
     runner = Runner(
@@ -108,8 +110,10 @@ async def run_channels():
     from google.adk.sessions import InMemorySessionService
     from src.agents.root_agent import root_agent
     from google.genai import types
+    from src.skills.runtime import ensure_skills_loaded
 
     settings = get_settings()
+    await ensure_skills_loaded()
     registry = get_channel_registry()
 
     # セッションとランナー

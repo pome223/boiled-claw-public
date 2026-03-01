@@ -19,6 +19,7 @@ from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
 from src.security.audit import get_audit_logger, AuditEventType
 from src.tools.finance import stock_price
+from src.skills.runtime import ensure_skills_loaded, get_skills_report
 
 
 class ConnectionManager:
@@ -88,6 +89,10 @@ class GatewayServer:
     def _setup_routes(self):
         """ルート設定"""
 
+        @self.app.on_event("startup")
+        async def startup_event():
+            await ensure_skills_loaded()
+
         @self.app.get("/")
         async def root():
             return {
@@ -95,11 +100,18 @@ class GatewayServer:
                 "version": "0.1.0",
                 "status": "running",
                 "active_sessions": len(self.manager.active_connections),
+                "skills_loaded": get_skills_report().get("loaded", False),
+                "skills_count": get_skills_report().get("count", 0),
             }
 
         @self.app.get("/health")
         async def health():
             return {"status": "healthy"}
+
+        @self.app.get("/skills")
+        async def skills():
+            await ensure_skills_loaded()
+            return get_skills_report()
 
         @self.app.get("/chat")
         async def chat_ui():

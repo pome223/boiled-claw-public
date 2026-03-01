@@ -11,6 +11,7 @@ from src.tools.file_manager import read_file, write_file
 from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
 from src.tools.memory import memory_store, memory_search
 from src.tools.finance import stock_price
+from src.tools.skills import skill_list, skill_execute
 
 root_agent = Agent(
     name="boiled_claw",
@@ -32,6 +33,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - **メモリシステム** - 重要な情報の保存と検索（ベクトル検索対応）
 - **マルチチャネル** - Telegram, Discord, WebSocket経由のアクセス
 - **タスク自動化** - 複雑なタスクを段階的に実行
+- **Skills** - ローカル skills ディレクトリのプラグイン実行
 
 ## アーキテクチャ
 - Gateway: WebSocketベースの制御プレーン (ws://127.0.0.1:18789)
@@ -76,5 +78,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         write_file,
         memory_store,
         memory_search,
+        skill_list,
+        skill_execute,
     ],
 )

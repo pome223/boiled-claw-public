@@ -207,6 +207,15 @@ asyncio.run(chat())
 - **write_file** - ファイル書き込み
 - **memory_store** - メモリに保存
 - **memory_search** - メモリから検索
+- **skill_list** - ロード済みスキル一覧を取得
+- **skill_execute** - 指定スキルを実行
+
+### Skills の使い方
+
+- `skills/<name>/SKILL.md` を追加すると起動時に自動ロードされます（OpenClaw 形式）。
+- 互換性のために `skills/*.py` の旧形式も引き続きロードされます。
+- ゲートウェイ起動後に `GET /skills` でロード状況を確認できます。
+- サンプルとして `skills/coding-agent/SKILL.md` を同梱しています。
 
 ### セキュリティ
 
