@@ -3,19 +3,101 @@
 OpenClaw のメモリシステムを参考
 """
 
-import sqlite3
 import json
+import sqlite3
 import time
 from typing import List, Dict, Any, Optional
 from pathlib import Path
 import numpy as np
 
+from google import genai
+from google.genai import types as genai_types
+from src.config.settings import get_settings
+
+DEFAULT_VECTOR_DIM = 768
+
+
+def _safe_json_loads(value: Optional[str], fallback: Any) -> Any:
+    """JSON文字列を安全にデコードする"""
+    if value is None:
+        return fallback
+    try:
+        return json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return fallback
+
+
+_embedding_client: Optional[genai.Client] = None
+
+
+def _get_embedding_client() -> genai.Client:
+    """Google GenAI クライアントを取得する"""
+    global _embedding_client
+    if _embedding_client is None:
+        settings = get_settings()
+        _embedding_client = genai.Client(
+            api_key=settings.google_api_key,
+            vertexai=settings.google_genai_use_vertexai,
+        )
+    return _embedding_client
+
+
+async def _embed_with_google(
+    text: str,
+    *,
+    task_type: str,
+    output_dimensionality: int,
+) -> List[float]:
+    """Google 埋め込みモデルでテキストをベクトル化する"""
+    if output_dimensionality <= 0:
+        raise ValueError("Embedding dimension must be positive")
+
+    cleaned = text.strip()
+    if not cleaned:
+        return [0.0] * output_dimensionality
+
+    settings = get_settings()
+    client = _get_embedding_client()
+    response = await client.aio.models.embed_content(
+        model=settings.memory_embedding_model,
+        contents=cleaned,
+        config=genai_types.EmbedContentConfig(
+            task_type=task_type,
+            output_dimensionality=output_dimensionality,
+        ),
+    )
+
+    if not response.embeddings or not response.embeddings[0].values:
+        raise RuntimeError("Google embedding response is empty")
+
+    values = response.embeddings[0].values
+    return [float(v) for v in values]
+
+
+def _cosine_similarity(vec_a: List[float], vec_b: List[float]) -> float:
+    """コサイン類似度を計算する"""
+    if not vec_a or not vec_b:
+        return 0.0
+
+    a = np.array(vec_a, dtype=np.float32)
+    b = np.array(vec_b, dtype=np.float32)
+
+    if a.shape != b.shape:
+        return 0.0
+
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom == 0.0:
+        return 0.0
+
+    return float(np.dot(a, b) / denom)
+
 
 class MemoryStore:
     """シンプルなメモリストア (SQLite + ベクトル検索)"""
 
-    def __init__(self, db_path: str = "data/memory.db"):
+    def __init__(self, db_path: str = "data/memory.db", vector_dim: int = DEFAULT_VECTOR_DIM):
         self.db_path = Path(db_path)
+        self.vector_dim = vector_dim
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
@@ -88,67 +170,115 @@ class MemoryStore:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # タグフィルタ
+        tag_params: List[Any] = []
+        where_clause = ""
         if tags:
-            # タグの部分一致検索
-            tag_conditions = " OR ".join([f"tags LIKE ?" for _ in tags])
-            query_sql = f"""
-                SELECT id, content, metadata, tags, created_at
-                FROM memories
-                WHERE {tag_conditions}
-                ORDER BY created_at DESC
-                LIMIT ?
-            """
-            params = [f'%"{tag}"%' for tag in tags] + [limit]
-        elif query:
-            # テキスト検索
-            query_sql = """
-                SELECT id, content, metadata, tags, created_at
-                FROM memories
-                WHERE content LIKE ?
-                ORDER BY created_at DESC
-                LIMIT ?
-            """
-            params = [f"%{query}%", limit]
-        else:
-            # 全件取得 (最新順)
-            query_sql = """
-                SELECT id, content, metadata, tags, created_at
-                FROM memories
-                ORDER BY created_at DESC
-                LIMIT ?
-            """
-            params = [limit]
+            tag_conditions = " OR ".join(["tags LIKE ?" for _ in tags])
+            where_clause = f"WHERE ({tag_conditions})"
+            tag_params = [f'%"{tag}"%' for tag in tags]
 
-        cursor.execute(query_sql, params)
+        # クエリ埋め込みがある場合は、候補集合に対してコサイン類似度でランキング
+        if embedding:
+            candidate_limit = max(limit * 25, 200)
+            vector_sql = f"""
+                SELECT id, content, embedding, metadata, tags, created_at
+                FROM memories
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            cursor.execute(vector_sql, [*tag_params, candidate_limit])
+            rows = cursor.fetchall()
+            conn.close()
+
+            scored_results: List[Dict[str, Any]] = []
+            for row in rows:
+                row_embedding = _safe_json_loads(row[2], None)
+                if not row_embedding:
+                    continue
+                if not isinstance(row_embedding, list):
+                    continue
+
+                score = _cosine_similarity(embedding, row_embedding)
+                scored_results.append({
+                    "id": row[0],
+                    "content": row[1],
+                    "metadata": _safe_json_loads(row[3], {}),
+                    "tags": _safe_json_loads(row[4], []),
+                    "created_at": row[5],
+                    "score": round(score, 6),
+                })
+
+            # クエリ指定時は0未満の結果を落としてノイズを減らす
+            if query:
+                scored_results = [r for r in scored_results if r["score"] > 0]
+
+            scored_results.sort(key=lambda x: (x["score"], x["created_at"]), reverse=True)
+            if scored_results:
+                return scored_results[:limit]
+
+            # 既存データに埋め込みが無いケース向けフォールバック
+            if query:
+                text_sql = f"""
+                    SELECT id, content, metadata, tags, created_at
+                    FROM memories
+                    {where_clause}
+                    {"AND" if where_clause else "WHERE"} content LIKE ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                """
+                cursor = sqlite3.connect(self.db_path).cursor()
+                cursor.execute(text_sql, [*tag_params, f"%{query}%", limit])
+                text_rows = cursor.fetchall()
+                cursor.connection.close()
+                return [
+                    {
+                        "id": row[0],
+                        "content": row[1],
+                        "metadata": _safe_json_loads(row[2], {}),
+                        "tags": _safe_json_loads(row[3], []),
+                        "created_at": row[4],
+                        "score": 0.0,
+                    }
+                    for row in text_rows
+                ]
+
+            return []
+
+        # 埋め込み検索なし: 従来のテキスト/タグ検索
+        if query:
+            text_sql = f"""
+                SELECT id, content, metadata, tags, created_at
+                FROM memories
+                {where_clause}
+                {"AND" if where_clause else "WHERE"} content LIKE ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            cursor.execute(text_sql, [*tag_params, f"%{query}%", limit])
+        else:
+            list_sql = f"""
+                SELECT id, content, metadata, tags, created_at
+                FROM memories
+                {where_clause}
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            cursor.execute(list_sql, [*tag_params, limit])
+
         rows = cursor.fetchall()
         conn.close()
 
-        results = []
-        for row in rows:
-            results.append({
+        return [
+            {
                 "id": row[0],
                 "content": row[1],
-                "metadata": json.loads(row[2]),
-                "tags": json.loads(row[3]),
+                "metadata": _safe_json_loads(row[2], {}),
+                "tags": _safe_json_loads(row[3], []),
                 "created_at": row[4],
-            })
-
-        # ベクトル検索 (簡易版 - 全件取得してコサイン類似度計算)
-        if embedding and results:
-            query_vec = np.array(embedding)
-            scored_results = []
-
-            for result in results:
-                # 仮のスコア (実装時はembeddingを使って計算)
-                result["score"] = 1.0
-                scored_results.append(result)
-
-            # スコア順にソート
-            scored_results.sort(key=lambda x: x["score"], reverse=True)
-            return scored_results[:limit]
-
-        return results
+            }
+            for row in rows
+        ]
 
     def delete(self, memory_id: int) -> bool:
         """メモリを削除"""
@@ -171,6 +301,9 @@ class MemoryStore:
         cursor.execute("SELECT COUNT(*) FROM memories")
         total = cursor.fetchone()[0]
 
+        cursor.execute("SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL")
+        with_embedding = cursor.fetchone()[0]
+
         cursor.execute("SELECT created_at FROM memories ORDER BY created_at ASC LIMIT 1")
         oldest = cursor.fetchone()
 
@@ -181,6 +314,7 @@ class MemoryStore:
 
         return {
             "total_memories": total,
+            "with_embedding": with_embedding,
             "oldest": oldest[0] if oldest else None,
             "newest": newest[0] if newest else None,
         }
@@ -194,7 +328,11 @@ def get_memory_store() -> MemoryStore:
     """メモリストアインスタンスを取得"""
     global _memory_store
     if _memory_store is None:
-        _memory_store = MemoryStore()
+        settings = get_settings()
+        _memory_store = MemoryStore(
+            db_path=str(settings.memory_db_path),
+            vector_dim=settings.memory_vector_dim,
+        )
     return _memory_store
 
 
@@ -222,11 +360,17 @@ async def memory_store(
 
         tags_list = [t.strip() for t in tags.split(",")] if tags else None
         metadata_dict = json.loads(metadata) if metadata else None
+        embedding = await _embed_with_google(
+            content,
+            task_type="RETRIEVAL_DOCUMENT",
+            output_dimensionality=store.vector_dim,
+        )
 
         memory_id = store.store(
             content=content,
             tags=tags_list,
             metadata=metadata_dict,
+            embedding=embedding,
         )
 
         return {
@@ -263,11 +407,20 @@ async def memory_search(
         store = get_memory_store()
 
         tags_list = [t.strip() for t in tags.split(",")] if tags else None
+        query_embedding = (
+            await _embed_with_google(
+                query,
+                task_type="RETRIEVAL_QUERY",
+                output_dimensionality=store.vector_dim,
+            )
+            if query else None
+        )
 
         results = store.search(
             query=query,
             tags=tags_list,
             limit=limit,
+            embedding=query_embedding,
         )
 
         return {

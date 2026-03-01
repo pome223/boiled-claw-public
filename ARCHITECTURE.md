@@ -165,18 +165,18 @@ src/
 - `memory_store()` - メモリ保存
 - `memory_search()` - メモリ検索
 - タグベース検索
-- ベクトル検索準備済み
+- コサイン類似度によるベクトル検索
 
 ### 5. Memory (メモリシステム)
 
 #### MemoryStore
 - **バックエンド**: SQLite
-- **検索**: テキスト検索 + ベクトル検索準備済み
+- **検索**: テキスト検索 + ベクトル検索
 - **機能**:
   - タグベース分類
   - メタデータ保存
   - タイムスタンプ管理
-  - 類似度検索 (将来実装)
+  - 類似度検索 (Google埋め込みモデル + コサイン類似度)
 
 ### 6. Security (セキュリティ)
 
@@ -360,7 +360,7 @@ Security Policy Check
 
 ### Docker
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
 
 ### 手動

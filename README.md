@@ -15,7 +15,7 @@ OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベ
 - 💬 **マルチチャネル** - Telegram, Discord, WebSocket 対応
 - 🔒 **セキュリティ** - 監査ログ、コマンドポリシー
 - 🔌 **拡張可能** - スキルプラグインシステム
-- 🐳 **Docker対応** - docker-compose で簡単デプロイ
+- 🐳 **Docker対応** - `docker compose` で簡単デプロイ
 
 ## アーキテクチャ
 
@@ -91,13 +91,20 @@ cp .env.example .env
 # GOOGLE_API_KEY を設定
 
 # 起動
-docker-compose up -d
+docker compose up -d --build
 
 # ログ確認
-docker-compose logs -f
+docker compose logs -f app
 
 # 停止
-docker-compose down
+docker compose down
+```
+
+ブラウザ自動化 (Playwright) をコンテナに含めたい場合:
+
+```bash
+docker compose build --build-arg INSTALL_BROWSER=true
+docker compose up -d
 ```
 
 ## プロジェクト構造

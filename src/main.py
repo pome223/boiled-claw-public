@@ -83,7 +83,7 @@ async def run_cli():
             console.print(f"[red]Error: {e}[/red]")
 
 
-async def run_web(host: Optional[str] = None, port: Optional[int] = None):
+def run_web(host: Optional[str] = None, port: Optional[int] = None):
     """Webサーバーモードで実行する"""
     from src.gateway.server import create_gateway
 
@@ -215,7 +215,7 @@ def main():
     if args.mode == "cli":
         asyncio.run(run_cli())
     elif args.mode == "web":
-        asyncio.run(run_web(host=args.host, port=args.port))
+        run_web(host=args.host, port=args.port)
     elif args.mode == "channels":
         asyncio.run(run_channels())
 

@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     # Memory settings
     memory_db_path: Path = Field(default=Path("data/memory.db"), description="Memory DB path")
     memory_vector_dim: int = Field(default=768, description="Vector dimension")
+    memory_embedding_model: str = Field(
+        default="text-embedding-004",
+        description="Embedding model for memory vectors",
+    )
 
     # Security settings
     audit_log_path: Path = Field(default=Path("data/audit.log"), description="Audit log path")

@@ -1,5 +1,9 @@
 # boiled-claw Dockerfile
-FROM python:3.13-slim AS base
+FROM python:3.13-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
 
 # 作業ディレクトリ
 WORKDIR /app
@@ -8,20 +12,21 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     g++ \
-    git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# アプリケーションコピー (先にソースを入れる)
+# アプリケーションコピー
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
-COPY tests/ ./tests/
 
-# Python依存関係
-RUN pip install --no-cache-dir ".[all]"
+# Python依存関係 (Web起動に必要な最小セット)
+RUN pip install .
 
-# Playwrightインストール (ブラウザ自動化)
-RUN playwright install --with-deps chromium
+# オプション: ブラウザ自動化をコンテナイメージに含める場合のみ有効化
+ARG INSTALL_BROWSER=false
+RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
+      pip install ".[browser]" && playwright install --with-deps chromium; \
+    fi
 
 # データディレクトリ
 RUN mkdir -p /app/data /app/skills

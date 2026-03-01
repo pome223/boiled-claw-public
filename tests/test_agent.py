@@ -117,21 +117,85 @@ def test_audit_logger():
 
 
 @pytest.mark.asyncio
-async def test_memory_store():
+async def test_memory_store(monkeypatch):
     """メモリストアのテスト"""
-    from src.tools.memory import memory_store, memory_search
+    import tempfile
+    import os
+    from src.tools import memory as memory_module
 
-    # 保存
-    result = await memory_store(
-        content="テスト情報",
-        tags="test,pytest",
-    )
-    assert result.get("success")
+    async def fake_embed(text: str, *, task_type: str, output_dimensionality: int):
+        vec = [0.0] * output_dimensionality
+        vec[0] = 1.0 if "テスト" in text else 0.2
+        return vec
 
-    # 検索
-    search_result = await memory_search(tags="test", limit=5)
-    assert search_result.get("success")
-    assert "results" in search_result
+    monkeypatch.setattr(memory_module, "_embed_with_google", fake_embed)
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        db_path = f.name
+
+    old_store = memory_module._memory_store
+    memory_module._memory_store = memory_module.MemoryStore(db_path=db_path)
+
+    try:
+        # 保存
+        result = await memory_module.memory_store(
+            content="テスト情報",
+            tags="test,pytest",
+        )
+        assert result.get("success")
+
+        # 検索
+        search_result = await memory_module.memory_search(tags="test", limit=5)
+        assert search_result.get("success")
+        assert "results" in search_result
+    finally:
+        memory_module._memory_store = old_store
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_memory_vector_search_ranks_semantic_match(monkeypatch):
+    """ベクトル検索で関連文が上位に来ることを確認"""
+    from src.tools import memory as memory_module
+    import tempfile
+    import os
+
+    async def fake_embed(text: str, *, task_type: str, output_dimensionality: int):
+        vec = [0.0] * output_dimensionality
+        if "API" in text or "FastAPI" in text or "開発" in text:
+            vec[0] = 1.0
+        if "カレー" in text:
+            vec[1] = 1.0
+        return vec
+
+    monkeypatch.setattr(memory_module, "_embed_with_google", fake_embed)
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        db_path = f.name
+
+    old_store = memory_module._memory_store
+    memory_module._memory_store = memory_module.MemoryStore(db_path=db_path)
+
+    try:
+        await memory_module.memory_store("PythonとFastAPIでWeb APIを実装した", tags="dev")
+        await memory_module.memory_store("週末にカレーを作って食べた", tags="life")
+        await memory_module.memory_store("REST APIのエンドポイント設計メモ", tags="dev")
+
+        result = await memory_module.memory_search(query="API 開発", limit=2)
+
+        assert result.get("success")
+        assert result["count"] >= 1
+        assert "score" in result["results"][0]
+        assert result["results"][0]["score"] >= 0.0
+        assert any(
+            "API" in item["content"] or "FastAPI" in item["content"]
+            for item in result["results"]
+        )
+    finally:
+        memory_module._memory_store = old_store
+        if os.path.exists(db_path):
+            os.unlink(db_path)
 
 
 def test_channel_registry():
