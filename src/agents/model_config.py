@@ -33,20 +33,20 @@ class GeminiModelConfig:
 
 # デフォルトモデル設定
 DEFAULT_MODEL = GeminiModelConfig(
-    name="gemini-3.0-flash",
+    name="gemini-3-flash-preview",
     temperature=0.7,
 )
 
 # 高精度モデル設定
 PRECISE_MODEL = GeminiModelConfig(
-    name="gemini-3.0-flash",
+    name="gemini-3-flash-preview",
     temperature=0.2,
     top_k=20,
 )
 
 # 創造的モデル設定
 CREATIVE_MODEL = GeminiModelConfig(
-    name="gemini-3.0-flash",
+    name="gemini-3-flash-preview",
     temperature=1.2,
 )
 

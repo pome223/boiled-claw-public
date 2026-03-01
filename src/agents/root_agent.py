@@ -10,10 +10,11 @@ from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
 from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
 from src.tools.memory import memory_store, memory_search
+from src.tools.finance import stock_price
 
 root_agent = Agent(
     name="boiled_claw",
-    model="gemini-3.0-flash",
+    model="gemini-3-flash-preview",
     description=(
         "boiled-claw: Your personal AI agent powered by Gemini 3.0 Flash. "
         "Multi-channel support, browser automation, memory system, and extensible architecture."
@@ -24,6 +25,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 
 ## あなたの能力
 - **Web検索** - DuckDuckGo APIを使った情報収集
+- **株価取得** - ティッカー/企業名から日次株価を取得
 - **ブラウザ自動化** - Playwrightによるスクレイピング、スクリーンショット
 - **シェル実行** - 安全なコマンド実行（セキュリティポリシー適用）
 - **ファイル操作** - 読み書き、検索
@@ -44,6 +46,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - 実行した結果を簡潔に報告する
 - 日本語と英語の両方に対応する
 - 複雑なタスクは段階的に分解して実行する
+- 株価の質問では、まず `stock_price` を優先して使う
 
 ## セキュリティ
 - 危険なコマンドや操作は実行前に必ず確認を取る
@@ -64,6 +67,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 """,
     tools=[
         web_search,
+        stock_price,
         browser_navigate,
         browser_screenshot,
         browser_extract_text,

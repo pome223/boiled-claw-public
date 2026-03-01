@@ -8,13 +8,17 @@ import json
 from typing import Dict, Optional, Set
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
+from pathlib import Path
 
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
 from src.security.audit import get_audit_logger, AuditEventType
+from src.tools.finance import stock_price
 
 
 class ConnectionManager:
@@ -54,6 +58,7 @@ class GatewayServer:
     def __init__(self):
         self.app = FastAPI(title="boiled-claw Gateway", version="0.1.0")
         self.settings = get_settings()
+        self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
         self.session_service = InMemorySessionService()
         self.runner = Runner(
@@ -70,6 +75,12 @@ class GatewayServer:
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
+        )
+
+        self.app.mount(
+            "/chat-static",
+            StaticFiles(directory=str(self.static_dir)),
+            name="chat_static",
         )
 
         self._setup_routes()
@@ -89,6 +100,10 @@ class GatewayServer:
         @self.app.get("/health")
         async def health():
             return {"status": "healthy"}
+
+        @self.app.get("/chat")
+        async def chat_ui():
+            return FileResponse(self.static_dir / "index.html")
 
         @self.app.websocket("/ws/{user_id}")
         async def websocket_endpoint(websocket: WebSocket, user_id: str):
@@ -159,6 +174,28 @@ class GatewayServer:
             "message": message,
         })
 
+        # 株価クエリは専用ツールで即時処理（LLMループによる長時間待機を回避）
+        if "株価" in message.lower():
+            quote = await stock_price(message)
+            if quote.get("ok"):
+                text = (
+                    f"{quote.get('symbol')} の最新日次データです。\n"
+                    f"- 日付: {quote.get('date')}\n"
+                    f"- 始値: {quote.get('open')}\n"
+                    f"- 高値: {quote.get('high')}\n"
+                    f"- 安値: {quote.get('low')}\n"
+                    f"- 終値: {quote.get('close')}\n"
+                    f"- 出来高: {quote.get('volume')}"
+                )
+            else:
+                text = quote.get("message", "株価データを取得できませんでした。")
+
+            await self.manager.send_message(session_id, {
+                "type": "agent_message",
+                "message": text,
+            })
+            return
+
         # エージェント実行
         content = types.Content(
             role="user",
@@ -168,16 +205,23 @@ class GatewayServer:
         try:
             # ストリーミングレスポンス
             response_text = ""
-            async for event in self.runner.run_async(
-                user_id=user_id,
-                session_id=session_id,
-                new_message=content,
-            ):
-                if event.is_final_response():
-                    if event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                response_text += part.text
+            # 無限待ち防止: モデル/ツール呼び出しが長時間停止した場合は打ち切る
+            async with asyncio.timeout(45):
+                async for event in self.runner.run_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=content,
+                ):
+                    if event.is_final_response():
+                        if event.content and event.content.parts:
+                            for part in event.content.parts:
+                                if part.text:
+                                    response_text += part.text
+
+            if not response_text.strip():
+                response_text = (
+                    "応答の生成に失敗しました。もう一度試すか、質問を少し具体化してください。"
+                )
 
             # レスポンス送信
             await self.manager.send_message(session_id, {
@@ -193,6 +237,21 @@ class GatewayServer:
                 session_id=session_id,
             )
 
+        except TimeoutError:
+            error_message = (
+                "Agent timed out after 45 seconds. "
+                "Please try again with a more specific query."
+            )
+            await self.manager.send_message(session_id, {
+                "type": "error",
+                "message": error_message,
+            })
+            self.audit_logger.log_error(
+                error=error_message,
+                user_id=user_id,
+                session_id=session_id,
+                context={"message": message, "reason": "timeout"},
+            )
         except Exception as e:
             error_message = f"Error: {str(e)}"
             await self.manager.send_message(session_id, {
