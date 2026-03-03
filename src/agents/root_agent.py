@@ -5,6 +5,7 @@ OpenClaw のマルチエージェントアーキテクチャを参考
 """
 
 from google.adk.agents import Agent
+from google.adk.tools import AgentTool, TransferToAgentTool
 from src.tools.web_search import web_search
 from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
@@ -12,6 +13,17 @@ from src.tools.browser import browser_navigate, browser_screenshot, browser_extr
 from src.tools.memory import memory_store, memory_search, memory_stats, memory_delete
 from src.tools.finance import stock_price
 from src.tools.skills import skill_list, skill_execute
+from src.tools.subagents import (
+    agents_list,
+    sessions_spawn,
+    subagents_kill,
+    subagents_list,
+    subagents_steer,
+)
+from src.agents.sub_agents import SUB_AGENTS
+
+SUB_AGENT_TOOLS = [AgentTool(agent) for agent in SUB_AGENTS]
+TRANSFER_TOOL = TransferToAgentTool(agent_names=[agent.name for agent in SUB_AGENTS])
 
 root_agent = Agent(
     name="boiled_claw",
@@ -73,8 +85,24 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - browser_extract_text でテキスト抽出
 - browser_screenshot でスクリーンショット取得
 - robots.txtとサイトポリシーを尊重する
+
+## マルチエージェント委譲（Google ADK準拠）
+- 専門性が高い作業は、適切なサブエージェントに委譲すること
+- まず AgentTool で委譲し、必要なら transfer_to_agent で会話を引き継ぐ
+- 低コストな単純処理は自分で実行し、委譲しすぎない
+- 最終的なユーザー向け返答は、文脈を統合して明確に返す
+- バックグラウンド実行が必要な場合は `sessions_spawn` を使い、
+  状態確認は `subagents_list`、追加指示は `subagents_steer`、停止は `subagents_kill` を使う
 """,
+    sub_agents=SUB_AGENTS,
     tools=[
+        *SUB_AGENT_TOOLS,
+        TRANSFER_TOOL,
+        agents_list,
+        sessions_spawn,
+        subagents_list,
+        subagents_steer,
+        subagents_kill,
         web_search,
         stock_price,
         browser_navigate,

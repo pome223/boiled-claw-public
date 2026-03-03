@@ -82,9 +82,10 @@ src/
 ### 1. Agents (エージェント)
 
 #### Root Agent
-- **モデル**: gemini-3.0-flash
+- **モデル**: gemini-3-flash-preview
 - **役割**: メインエージェント、全ツールにアクセス可能
-- **ツール**: web_search, browser, shell, file, memory
+- **ツール**: web_search, browser, shell, file, memory, skills, subagents
+- **委譲方式**: ADK `sub_agents` + `AgentTool` + `TransferToAgentTool`
 
 #### Sub Agents
 - **web_agent**: Web検索とブラウジング専門
@@ -92,6 +93,7 @@ src/
 - **system_agent**: システムコマンド実行専門
 - **memory_agent**: メモリ管理専門
 - **browser_agent**: ブラウザ自動化専門
+- **オーケストレーション**: `sessions_spawn` / `subagents_list` / `subagents_steer` / `subagents_kill`
 
 ### 2. Gateway (ゲートウェイ)
 

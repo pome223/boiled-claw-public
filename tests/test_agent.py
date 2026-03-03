@@ -3,7 +3,9 @@
 """
 
 import pytest
+from google.adk.tools import TransferToAgentTool
 from src.agents.root_agent import root_agent
+from src.agents.sub_agents import SUB_AGENTS
 from src.agents.model_config import DEFAULT_MODEL, get_model_config
 
 
@@ -15,26 +17,54 @@ def test_root_agent_exists():
 
 def test_root_agent_model():
     """Root agentのモデルがgemini-3.0-flashであることを確認"""
-    assert root_agent.model == "gemini-3.0-flash"
+    assert root_agent.model == DEFAULT_MODEL.name
 
 
 def test_root_agent_tools():
     """Root agentがツールを持っていることを確認"""
     assert len(root_agent.tools) > 0
-    tool_names = [tool.__name__ for tool in root_agent.tools if hasattr(tool, '__name__')]
-    assert "web_search" in tool_names or any("web" in name for name in tool_names)
+    tool_names = [
+        tool.__name__ if hasattr(tool, "__name__")
+        else getattr(tool, "name", "")
+        for tool in root_agent.tools
+    ]
+    assert "web_search" in tool_names
+
+
+def test_root_agent_sub_agents_connected():
+    """Root agentにサブエージェントが配線されていることを確認"""
+    assert len(root_agent.sub_agents) == len(SUB_AGENTS)
+    assert {agent.name for agent in root_agent.sub_agents} == {agent.name for agent in SUB_AGENTS}
+
+
+def test_root_agent_has_delegation_tools():
+    """AgentTool と transfer tool が配線されていることを確認"""
+    tool_names = [
+        tool.__name__ if hasattr(tool, "__name__")
+        else getattr(tool, "name", "")
+        for tool in root_agent.tools
+    ]
+
+    for sub_agent in SUB_AGENTS:
+        assert sub_agent.name in tool_names
+
+    assert any(isinstance(tool, TransferToAgentTool) for tool in root_agent.tools)
+    assert "sessions_spawn" in tool_names
+    assert "subagents_list" in tool_names
+    assert "subagents_steer" in tool_names
+    assert "subagents_kill" in tool_names
 
 
 def test_model_config():
     """モデル設定が正しいことを確認"""
-    assert DEFAULT_MODEL.name == "gemini-3.0-flash"
+    assert DEFAULT_MODEL.name == "gemini-3-flash-preview"
     assert DEFAULT_MODEL.temperature == 0.7
 
     config = get_model_config("default")
-    assert config.name == "gemini-3.0-flash"
+    assert config.name == DEFAULT_MODEL.name
 
     config = get_model_config("precise")
-    assert config.name == "gemini-3.0-flash"
+    assert config.name == DEFAULT_MODEL.name
     assert config.temperature == 0.2
 
 

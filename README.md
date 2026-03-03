@@ -13,6 +13,7 @@ OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベ
 - 📁 **ファイル操作** - 読み書き対応
 - 🧠 **メモリシステム** - SQLite + ベクトル検索
 - 💬 **マルチチャネル** - Telegram, Discord, WebSocket 対応
+- 🤝 **マルチエージェント委譲** - ADK sub_agents + AgentTool + sessions_spawn
 - 🔒 **セキュリティ** - 監査ログ、コマンドポリシー
 - 🔌 **拡張可能** - スキルプラグインシステム
 - 🐳 **Docker対応** - `docker compose` で簡単デプロイ
@@ -207,6 +208,11 @@ asyncio.run(chat())
 - **write_file** - ファイル書き込み
 - **memory_store** - メモリに保存
 - **memory_search** - メモリから検索
+- **agents_list** - 利用可能なサブエージェント一覧
+- **sessions_spawn** - サブエージェントをバックグラウンド起動
+- **subagents_list** - サブエージェント実行の状態確認
+- **subagents_steer** - mode=session のサブエージェントへ追加入力
+- **subagents_kill** - サブエージェント実行停止
 - **skill_list** - ロード済みスキル一覧を取得
 - **skill_execute** - 指定スキルを実行
 

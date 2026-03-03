@@ -22,6 +22,7 @@ from src.tools.finance import stock_price
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
 from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
 from src.tools.memory import memory_search, memory_stats, memory_delete
+from src.tools.subagents import get_subagent_manager, set_subagent_notifier
 
 
 class ConnectionManager:
@@ -64,6 +65,7 @@ class GatewayServer:
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
         self.session_service = InMemorySessionService()
+        self.subagent_manager = get_subagent_manager()
         self.runner = Runner(
             agent=root_agent,
             app_name="boiled-claw",
@@ -106,6 +108,25 @@ class GatewayServer:
             name="chat_static",
         )
 
+        async def _subagent_notifier(payload: Dict[str, Any]) -> None:
+            session_id = payload.get("requester_session_id")
+            message = payload.get("message")
+            if not session_id or not message:
+                return
+            await self.manager.send_message(
+                session_id,
+                {
+                    "type": "agent_message",
+                    "message": message,
+                    "source": "subagent",
+                    "run_id": payload.get("run_id"),
+                    "status": payload.get("status"),
+                    "agent_name": payload.get("agent_name"),
+                },
+            )
+
+        set_subagent_notifier(_subagent_notifier)
+
         self._setup_routes()
 
     def _setup_routes(self):
@@ -114,6 +135,10 @@ class GatewayServer:
         @self.app.on_event("startup")
         async def startup_event():
             await ensure_skills_loaded()
+
+        @self.app.on_event("shutdown")
+        async def shutdown_event():
+            set_subagent_notifier(None)
 
         @self.app.get("/")
         async def root():
@@ -177,6 +202,29 @@ class GatewayServer:
                 raise HTTPException(status_code=500, detail=result.get("error", "Delete failed"))
             if not result.get("deleted"):
                 raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
+            return result
+
+        @self.app.get("/subagents/{session_id}")
+        async def subagents_list_endpoint(session_id: str):
+            return await self.subagent_manager.list_runs(requester_session_id=session_id)
+
+        @self.app.post("/subagents/{run_id}/steer")
+        async def subagents_steer_endpoint(run_id: str, payload: Dict[str, Any] | None = None):
+            message = ""
+            if payload and isinstance(payload.get("message"), str):
+                message = payload.get("message", "").strip()
+            if not message:
+                raise HTTPException(status_code=400, detail="message is required")
+            result = await self.subagent_manager.steer(run_id=run_id, message=message)
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error", "steer failed"))
+            return result
+
+        @self.app.delete("/subagents/{run_id}")
+        async def subagents_kill_endpoint(run_id: str):
+            result = await self.subagent_manager.kill(run_id=run_id)
+            if not result.get("success"):
+                raise HTTPException(status_code=400, detail=result.get("error", "kill failed"))
             return result
 
         @self.app.get("/chat")
