@@ -6,9 +6,9 @@ OpenClaw のゲートウェイアーキテクチャを参考
 import asyncio
 import json
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -79,6 +79,26 @@ class GatewayServer:
             allow_methods=["*"],
             allow_headers=["*"],
         )
+
+        # 認証ミドルウェア
+        @self.app.middleware("http")
+        async def auth_middleware(request: Request, call_next):
+            api_key = self.settings.gateway_api_key
+            if not api_key:
+                return await call_next(request)
+            # 認証不要のパス
+            public_prefixes = ("/health", "/chat-static", "/chat")
+            if any(request.url.path.startswith(p) for p in public_prefixes) or request.url.path == "/":
+                return await call_next(request)
+            # トークン確認 (ヘッダー or クエリパラメータ)
+            token = (
+                request.headers.get("X-API-Key")
+                or request.headers.get("Authorization", "").removeprefix("Bearer ")
+                or request.query_params.get("token")
+            )
+            if token != api_key:
+                return JSONResponse({"detail": "Unauthorized"}, status_code=401)
+            return await call_next(request)
 
         self.app.mount(
             "/chat-static",
@@ -168,7 +188,14 @@ class GatewayServer:
             websocket: WebSocket,
             user_id: str,
             session_id: Optional[str] = Query(default=None),
+            token: Optional[str] = Query(default=None),
         ):
+            # WebSocket 認証
+            if self.settings.gateway_api_key:
+                if token != self.settings.gateway_api_key:
+                    await websocket.close(code=4401, reason="Unauthorized")
+                    return
+
             # 既存セッションの再利用または新規作成
             session = None
             if session_id:

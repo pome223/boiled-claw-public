@@ -4,8 +4,10 @@ OpenClaw のブラウザ自動化機能を参考
 """
 
 import asyncio
-from typing import Optional, Dict, Any
+import ipaddress
+from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
+from urllib.parse import urlparse
 
 # Playwright は遅延インポート (インストールされていない場合のエラー回避)
 playwright = None
@@ -47,6 +49,47 @@ class BrowserSession:
             await self.playwright.stop()
 
 
+_ALLOWED_SCHEMES = {"http", "https"}
+_PRIVATE_NETWORKS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fc00::/7"),
+]
+_BLOCKED_HOSTS = {"localhost", "localhost.localdomain"}
+
+
+def _validate_url(url: str) -> Tuple[bool, Optional[str]]:
+    """URL の安全性を検証する (SSRF 対策)"""
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Invalid URL"
+
+    if parsed.scheme not in _ALLOWED_SCHEMES:
+        return False, f"Scheme '{parsed.scheme}' is not allowed (only http/https)"
+
+    hostname = parsed.hostname
+    if not hostname:
+        return False, "Missing hostname"
+
+    if hostname.lower() in _BLOCKED_HOSTS:
+        return False, f"Access to '{hostname}' is blocked"
+
+    try:
+        ip = ipaddress.ip_address(hostname)
+        for network in _PRIVATE_NETWORKS:
+            if ip in network:
+                return False, f"Access to private/loopback address {ip} is blocked"
+    except ValueError:
+        pass  # ホスト名（IP でない）は IP チェックをスキップ
+
+    return True, None
+
+
 # グローバルセッション (再利用のため)
 _browser_session: Optional[BrowserSession] = None
 
@@ -76,6 +119,10 @@ async def browser_navigate(url: str, wait_for: str = "load", timeout: int = 3000
         return {
             "error": "Playwright is not installed. Run: pip install playwright && playwright install"
         }
+
+    valid, reason = _validate_url(url)
+    if not valid:
+        return {"error": f"URL blocked: {reason}", "url": url, "success": False}
 
     try:
         session = await get_browser_session()

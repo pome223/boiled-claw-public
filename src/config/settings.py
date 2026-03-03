@@ -49,6 +49,7 @@ class Settings(BaseSettings):
     # Security settings
     audit_log_path: Path = Field(default=Path("data/audit.log"), description="Audit log path")
     shell_enabled: bool = Field(default=True, description="Enable shell execution")
+    gateway_api_key: Optional[str] = Field(default=None, description="API key for gateway auth (empty = auth disabled)")
 
     # Redis settings (for future session store)
     redis_url: Optional[str] = Field(default=None, description="Redis URL")

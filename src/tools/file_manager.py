@@ -4,6 +4,8 @@
 
 from pathlib import Path
 
+from src.security.policy import get_security_policy
+
 
 async def read_file(path: str) -> dict:
     """
@@ -15,6 +17,11 @@ async def read_file(path: str) -> dict:
     Returns:
         ファイルの内容
     """
+    policy = get_security_policy()
+    allowed, reason = policy.is_path_allowed(path, "read")
+    if not allowed:
+        return {"error": f"Access denied: {reason}"}
+
     try:
         file_path = Path(path).expanduser().resolve()
         content = file_path.read_text(encoding="utf-8")
@@ -42,6 +49,11 @@ async def write_file(path: str, content: str) -> dict:
     Returns:
         書き込み結果
     """
+    policy = get_security_policy()
+    allowed, reason = policy.is_path_allowed(path, "write")
+    if not allowed:
+        return {"error": f"Access denied: {reason}"}
+
     try:
         file_path = Path(path).expanduser().resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)

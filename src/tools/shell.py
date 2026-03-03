@@ -5,17 +5,7 @@
 import asyncio
 import shlex
 
-
-# 危険なコマンドのブラックリスト
-DANGEROUS_COMMANDS = [
-    "rm -rf",
-    "sudo rm",
-    "mkfs",
-    "dd if=",
-    "> /dev/",
-    "chmod 777",
-    ":(){ :|:& };:",  # fork bomb
-]
+from src.security.policy import get_security_policy
 
 
 async def run_shell(command: str, timeout: int = 30) -> dict:
@@ -29,11 +19,34 @@ async def run_shell(command: str, timeout: int = 30) -> dict:
     Returns:
         stdout, stderr, return_code を含む辞書
     """
-    # 危険なコマンドチェック
-    for dangerous in DANGEROUS_COMMANDS:
-        if dangerous in command:
+    # ホワイトスペースを正規化してからポリシーチェック（空白2つ等の回避を防ぐ）
+    normalized = " ".join(command.split())
+
+    policy = get_security_policy()
+    allowed, reason = policy.is_command_allowed(normalized)
+    if not allowed:
+        return {
+            "error": f"Command blocked by security policy: {reason}",
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
+        }
+
+    # 先頭トークン（実行ファイル名）による追加チェック
+    try:
+        tokens = shlex.split(normalized)
+    except ValueError:
+        tokens = []
+
+    if tokens:
+        executable = tokens[0].lstrip("./").split("/")[-1]
+        BLOCKED_EXECUTABLES = {
+            "rm", "shred", "mkfs", "fdisk", "dd", "wipefs",
+            "truncate", "srm", "secure-delete",
+        }
+        if executable in BLOCKED_EXECUTABLES:
             return {
-                "error": f"Dangerous command detected: '{dangerous}'. Execution blocked.",
+                "error": f"Executable '{executable}' is blocked for safety.",
                 "stdout": "",
                 "stderr": "",
                 "return_code": -1,
