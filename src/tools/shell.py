@@ -10,10 +10,11 @@ from src.security.policy import get_security_policy
 
 async def run_shell(command: str, timeout: int = 30) -> dict:
     """
-    シェルコマンドを安全に実行する
+    シェルコマンドを安全に実行する。
+    パイプ・リダイレクトは非対応（シェルインジェクション防止のため subprocess_exec を使用）。
 
     Args:
-        command: 実行するコマンド
+        command: 実行するコマンド（単一コマンド + 引数）
         timeout: タイムアウト秒数（デフォルト30秒）
 
     Returns:
@@ -32,29 +33,38 @@ async def run_shell(command: str, timeout: int = 30) -> dict:
             "return_code": -1,
         }
 
-    # 先頭トークン（実行ファイル名）による追加チェック
+    # コマンドをトークンに分解
     try:
         tokens = shlex.split(normalized)
-    except ValueError:
-        tokens = []
-
-    if tokens:
-        executable = tokens[0].lstrip("./").split("/")[-1]
-        BLOCKED_EXECUTABLES = {
-            "rm", "shred", "mkfs", "fdisk", "dd", "wipefs",
-            "truncate", "srm", "secure-delete",
+    except ValueError as e:
+        return {
+            "error": f"Invalid command syntax: {e}",
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
         }
-        if executable in BLOCKED_EXECUTABLES:
-            return {
-                "error": f"Executable '{executable}' is blocked for safety.",
-                "stdout": "",
-                "stderr": "",
-                "return_code": -1,
-            }
+
+    if not tokens:
+        return {"error": "Empty command", "stdout": "", "stderr": "", "return_code": -1}
+
+    # 先頭トークン（実行ファイル名）による追加チェック
+    executable = tokens[0].lstrip("./").split("/")[-1]
+    BLOCKED_EXECUTABLES = {
+        "rm", "shred", "mkfs", "fdisk", "dd", "wipefs",
+        "truncate", "srm", "secure-delete",
+    }
+    if executable in BLOCKED_EXECUTABLES:
+        return {
+            "error": f"Executable '{executable}' is blocked for safety.",
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
+        }
 
     try:
-        process = await asyncio.create_subprocess_shell(
-            command,
+        # shell=False 相当: シェルメタキャラクタ（; | && $() 等）をインジェクションに使えない
+        process = await asyncio.create_subprocess_exec(
+            *tokens,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -72,6 +82,13 @@ async def run_shell(command: str, timeout: int = 30) -> dict:
     except asyncio.TimeoutError:
         return {
             "error": f"Command timed out after {timeout} seconds",
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
+        }
+    except FileNotFoundError:
+        return {
+            "error": f"Command not found: {tokens[0]}",
             "stdout": "",
             "stderr": "",
             "return_code": -1,

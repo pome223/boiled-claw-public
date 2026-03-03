@@ -12,6 +12,7 @@ services:
     environment:
       - GATEWAY_HOST=0.0.0.0
       - GATEWAY_PORT=18789
+      - FILE_WORKSPACE_PATHS=/app/data,/app/skills
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills

@@ -161,5 +161,10 @@ def get_security_policy() -> SecurityPolicy:
     """セキュリティポリシーインスタンスを取得"""
     global _security_policy
     if _security_policy is None:
-        _security_policy = SecurityPolicy()
+        from src.config.settings import get_settings
+        settings = get_settings()
+        allowed_paths = [
+            p.strip() for p in settings.file_workspace_paths.split(",") if p.strip()
+        ]
+        _security_policy = SecurityPolicy(allowed_paths=allowed_paths or None)
     return _security_policy
