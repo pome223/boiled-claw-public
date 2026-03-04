@@ -5,6 +5,7 @@ OpenClaw のゲートウェイアーキテクチャを参考
 
 import asyncio
 import json
+from datetime import datetime
 from typing import Any, Dict, Optional
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -341,10 +342,12 @@ class GatewayServer:
             })
             return
 
-        # エージェント実行
+        # エージェント実行（現在日時をメッセージ先頭に付与してモデルに正確な日付を伝える）
+        now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+        message_with_date = f"[システム情報: 現在の日時は {now} です]\n\n{message}"
         content = types.Content(
             role="user",
-            parts=[types.Part(text=message)]
+            parts=[types.Part(text=message_with_date)]
         )
 
         try:
