@@ -1,84 +1,51 @@
 """
 Web検索ツール
-Google Search API または DuckDuckGo を使って情報を検索する
+duckduckgo-search ライブラリを使って実際のWeb検索結果を返す
 """
 
-import json
-import httpx
-from google.adk.tools import FunctionTool
+import asyncio
+from typing import Any, Dict
 
 
-async def web_search(query: str) -> dict:
+async def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
     """
-    Webを検索して結果を返す
+    Webを検索して結果を返す。
 
     Args:
         query: 検索クエリ
+        max_results: 取得する最大件数（デフォルト5）
 
     Returns:
         検索結果のリスト
     """
-    # DuckDuckGo Instant Answer API (API keyなしで利用可能)
-    url = "https://api.duckduckgo.com/"
-    params = {
-        "q": query,
-        "format": "json",
-        "no_html": 1,
-        "skip_disambig": 1,
-    }
-
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, timeout=10.0)
-    except httpx.TimeoutException:
-        return {"results": [], "query": query, "message": "Search timeout"}
-    except httpx.HTTPError as exc:
-        return {"results": [], "query": query, "message": f"Search request failed: {exc}"}
-
-    if response.status_code >= 400:
-        snippet = response.text[:160].strip().replace("\n", " ")
+        from duckduckgo_search import DDGS
+    except ImportError:
         return {
             "results": [],
             "query": query,
-            "message": f"Search API error: HTTP {response.status_code}",
-            "detail": snippet,
+            "message": "duckduckgo-search library not installed",
         }
 
-    # DuckDuckGoが一時的にHTML/空文字を返すことがあるため、安全にJSONを解釈する
+    def _search() -> list:
+        with DDGS() as ddgs:
+            return list(ddgs.text(query, max_results=max_results))
+
     try:
-        data = response.json()
-    except ValueError:
-        try:
-            data = json.loads(response.text)
-        except ValueError:
-            snippet = response.text[:160].strip().replace("\n", " ")
-            return {
-                "results": [],
-                "query": query,
-                "message": "Search API returned non-JSON response",
-                "detail": snippet,
-            }
+        raw = await asyncio.get_event_loop().run_in_executor(None, _search)
+    except Exception as exc:
+        return {"results": [], "query": query, "message": f"Search failed: {exc}"}
 
-    results = []
+    if not raw:
+        return {"results": [], "query": query, "message": f"No results found for: {query}"}
 
-    # Abstract (要約)
-    if data.get("Abstract"):
-        results.append({
-            "title": data.get("Heading", ""),
-            "snippet": data["Abstract"],
-            "url": data.get("AbstractURL", ""),
-        })
-
-    # Related Topics
-    for topic in data.get("RelatedTopics", [])[:5]:
-        if isinstance(topic, dict) and topic.get("Text"):
-            results.append({
-                "title": topic.get("Text", "")[:50],
-                "snippet": topic.get("Text", ""),
-                "url": topic.get("FirstURL", ""),
-            })
-
-    if not results:
-        return {"results": [], "message": f"No results found for: {query}"}
+    results = [
+        {
+            "title": item.get("title", ""),
+            "snippet": item.get("body", ""),
+            "url": item.get("href", ""),
+        }
+        for item in raw
+    ]
 
     return {"results": results, "query": query}
