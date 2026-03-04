@@ -5,7 +5,6 @@ OpenClaw のマルチエージェントアーキテクチャを参考
 """
 
 from google.adk.agents import Agent
-from google.adk.tools import AgentTool
 from src.tools.web_search import web_search
 from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
@@ -21,8 +20,6 @@ from src.tools.subagents import (
     subagents_steer,
 )
 from src.agents.sub_agents import SUB_AGENTS
-
-SUB_AGENT_TOOLS = [AgentTool(agent) for agent in SUB_AGENTS]
 
 root_agent = Agent(
     name="boiled_claw",
@@ -110,16 +107,15 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - robots.txtとサイトポリシーを尊重する
 
 ## マルチエージェント委譲（Google ADK準拠）
-- 専門性が高い作業は、適切なサブエージェントに委譲すること
-- AgentTool（エージェント名と同名のツール）で委譲し、結果を受け取って返答する
-- 低コストな単純処理は自分で実行し、委譲しすぎない
-- 最終的なユーザー向け返答は、文脈を統合して明確に返す
-- バックグラウンド実行が必要な場合は `sessions_spawn` を使い、
-  状態確認は `subagents_list`、追加指示は `subagents_steer`、停止は `subagents_kill` を使う
+- 単純な検索・ファイル操作・シェル実行は直接ツールを使う（委譲しない）
+- 複雑・長時間のタスクをバックグラウンドで行う場合のみ `sessions_spawn` を使う
+  - 状態確認: `subagents_list`
+  - 追加指示: `subagents_steer`
+  - 停止: `subagents_kill`
+- 同じタスクに対して直接ツールとバックグラウンド実行の両方を使ってはならない
 """,
     sub_agents=SUB_AGENTS,
     tools=[
-        *SUB_AGENT_TOOLS,
         agents_list,
         sessions_spawn,
         subagents_list,
