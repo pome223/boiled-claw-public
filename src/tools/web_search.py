@@ -19,12 +19,12 @@ async def web_search(query: str, max_results: int = 5) -> Dict[str, Any]:
         検索結果のリスト
     """
     try:
-        from duckduckgo_search import DDGS
+        from ddgs import DDGS
     except ImportError:
         return {
             "results": [],
             "query": query,
-            "message": "duckduckgo-search library not installed",
+            "message": "ddgs library not installed",
         }
 
     def _search() -> list:
