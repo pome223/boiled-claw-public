@@ -3,7 +3,6 @@
 """
 
 import pytest
-from google.adk.tools import TransferToAgentTool
 from src.agents.root_agent import root_agent
 from src.agents.sub_agents import SUB_AGENTS
 from src.agents.model_config import DEFAULT_MODEL, get_model_config
@@ -37,8 +36,8 @@ def test_root_agent_sub_agents_connected():
     assert {agent.name for agent in root_agent.sub_agents} == {agent.name for agent in SUB_AGENTS}
 
 
-def test_root_agent_has_delegation_tools():
-    """AgentTool と transfer tool が配線されていることを確認"""
+def test_root_agent_has_orchestration_tools():
+    """sessions_spawn 系のオーケストレーションツールが配線されていることを確認"""
     tool_names = [
         tool.__name__ if hasattr(tool, "__name__")
         else getattr(tool, "name", "")
@@ -46,9 +45,8 @@ def test_root_agent_has_delegation_tools():
     ]
 
     for sub_agent in SUB_AGENTS:
-        assert sub_agent.name in tool_names
+        assert sub_agent.name not in tool_names
 
-    assert any(isinstance(tool, TransferToAgentTool) for tool in root_agent.tools)
     assert "sessions_spawn" in tool_names
     assert "subagents_list" in tool_names
     assert "subagents_steer" in tool_names

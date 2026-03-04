@@ -509,6 +509,10 @@ function switchSession(targetSessionId) {
 }
 
 function connect(targetSessionId = null) {
+  if (targetSessionId && typeof targetSessionId !== "string") {
+    targetSessionId = null;
+  }
+
   if (socket && socket.readyState === WebSocket.OPEN) {
     addSystemMessage("already connected");
     return;
@@ -604,7 +608,7 @@ navButtons.forEach((btn) => {
   btn.addEventListener("click", () => activateTab(btn.dataset.tab));
 });
 
-connectBtn.addEventListener("click", connect);
+connectBtn.addEventListener("click", () => connect());
 disconnectBtn.addEventListener("click", disconnect);
 saveSettingsBtn.addEventListener("click", persistSettings);
 resetSettingsBtn.addEventListener("click", resetSettings);
