@@ -46,6 +46,11 @@ class Settings(BaseSettings):
         description="Embedding model for memory vectors",
     )
 
+    # Subagent settings
+    subagent_max_concurrent: int = Field(default=8, description="Max concurrent subagent runs globally")
+    subagent_max_per_session: int = Field(default=5, description="Max concurrent subagent runs per requester session")
+    subagent_max_spawn_depth: int = Field(default=2, description="Max subagent nesting depth (root agent=0, first subagent=1)")
+
     # Security settings
     audit_log_path: Path = Field(default=Path("data/audit.log"), description="Audit log path")
     shell_enabled: bool = Field(default=True, description="Enable shell execution")

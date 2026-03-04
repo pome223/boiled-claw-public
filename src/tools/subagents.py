@@ -19,6 +19,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from src.agents.sub_agents import SUB_AGENTS
+from src.config.settings import get_settings
 from src.security.audit import AuditEventType, get_audit_logger
 
 _AGENT_MAP = {agent.name: agent for agent in SUB_AGENTS}
@@ -41,6 +42,8 @@ class SubagentRunState:
     ended_at: Optional[float] = None
     session_id: Optional[str] = None
     messages_processed: int = 0
+    parent_run_id: Optional[str] = None
+    spawn_depth: int = 1  # root agent から何段目か (root=0, 直接 spawn=1, ...)
     queue: asyncio.Queue[Optional[str]] = field(default_factory=asyncio.Queue, repr=False)
     worker: Optional[asyncio.Task] = field(default=None, repr=False)
 
@@ -53,6 +56,8 @@ class SubagentRunState:
             "requester_session_id": self.requester_session_id,
             "user_id": self.user_id,
             "session_id": self.session_id,
+            "parent_run_id": self.parent_run_id,
+            "spawn_depth": self.spawn_depth,
             "current_task": self.current_task,
             "messages_processed": self.messages_processed,
             "pending_messages": self.queue.qsize(),
@@ -99,18 +104,68 @@ class SubagentManager:
             return {"status": "error", "error": 'mode must be "run" or "session"'}
 
         run_timeout = max(0, int(run_timeout_seconds or 0))
+        settings = get_settings()
+
         run_id = f"sub_{uuid.uuid4().hex[:12]}"
-        state = SubagentRunState(
-            run_id=run_id,
-            agent_name=agent_name,
-            mode=normalized_mode,
-            requester_session_id=requester_session_id,
-            user_id=user_id,
-            app_name=app_name,
-            current_task=task,
-        )
 
         async with self._lock:
+            # 並行数チェック
+            _active_statuses = {"accepted", "running", "idle"}
+            active_all = [r for r in self._runs.values() if r.status in _active_statuses]
+            if len(active_all) >= settings.subagent_max_concurrent:
+                return {
+                    "status": "error",
+                    "error": (
+                        f"Max concurrent subagents ({settings.subagent_max_concurrent}) reached. "
+                        "Kill or wait for existing runs to complete."
+                    ),
+                    "active_count": len(active_all),
+                }
+            active_session = [r for r in active_all if r.requester_session_id == requester_session_id]
+            if len(active_session) >= settings.subagent_max_per_session:
+                return {
+                    "status": "error",
+                    "error": (
+                        f"Max subagents per session ({settings.subagent_max_per_session}) reached. "
+                        "Kill or wait for existing runs to complete."
+                    ),
+                    "session_active_count": len(active_session),
+                }
+
+            # 親ラン検出: requester_session_id が既存サブエージェントの session_id と一致する場合
+            parent_run_id: Optional[str] = None
+            parent_depth: int = 0
+            for existing in self._runs.values():
+                if existing.session_id == requester_session_id and existing.status in _active_statuses:
+                    parent_run_id = existing.run_id
+                    parent_depth = existing.spawn_depth
+                    break
+
+            # スポーン深度チェック
+            child_depth = parent_depth + 1
+            if child_depth > settings.subagent_max_spawn_depth:
+                return {
+                    "status": "error",
+                    "error": (
+                        f"Spawn depth limit ({settings.subagent_max_spawn_depth}) exceeded. "
+                        f"Current depth would be {child_depth}. "
+                        "Increase SUBAGENT_MAX_SPAWN_DEPTH to allow deeper nesting."
+                    ),
+                    "current_depth": child_depth,
+                    "max_depth": settings.subagent_max_spawn_depth,
+                }
+
+            state = SubagentRunState(
+                run_id=run_id,
+                agent_name=agent_name,
+                mode=normalized_mode,
+                requester_session_id=requester_session_id,
+                user_id=user_id,
+                app_name=app_name,
+                current_task=task,
+                parent_run_id=parent_run_id,
+                spawn_depth=child_depth,
+            )
             self._runs[run_id] = state
 
         await state.queue.put(task)
@@ -189,6 +244,10 @@ class SubagentManager:
         if worker is None or worker.done():
             return {"success": False, "run_id": run_id, "error": "run is not active"}
 
+        # 子孫を深さ優先で再帰的に先にキャンセル
+        killed_children = await self._cascade_kill(run_id)
+
+        # 自身をキャンセル
         worker.cancel()
         try:
             await worker
@@ -205,10 +264,55 @@ class SubagentManager:
             action="subagent_kill",
             resource=state.agent_name,
             result="cancelled",
-            metadata={"run_id": run_id},
+            metadata={"run_id": run_id, "killed_children": killed_children},
         )
 
-        return {"success": True, "run_id": run_id, "status": state.status}
+        return {
+            "success": True,
+            "run_id": run_id,
+            "status": state.status,
+            "killed_children": killed_children,
+        }
+
+    async def _cascade_kill(self, run_id: str) -> List[str]:
+        """run_id の全子孫を深さ優先で再帰的にキャンセルする。
+        キャンセルした子孫の run_id リストを返す（自身は含まない）。"""
+        async with self._lock:
+            children = [
+                r for r in self._runs.values()
+                if r.parent_run_id == run_id
+                and r.worker is not None
+                and not r.worker.done()
+            ]
+
+        killed: List[str] = []
+        for child in children:
+            # 孫以下を先に kill（深さ優先）
+            descendants = await self._cascade_kill(child.run_id)
+            killed.extend(descendants)
+
+            # 子自身をキャンセル
+            if child.worker and not child.worker.done():
+                child.worker.cancel()
+                try:
+                    await child.worker
+                except asyncio.CancelledError:
+                    pass
+                child.status = "cancelled"
+                child.ended_at = time.time()
+                killed.append(child.run_id)
+
+                self._audit_logger.log(
+                    event_type=AuditEventType.AGENT_MESSAGE,
+                    user_id=child.user_id,
+                    session_id=child.requester_session_id,
+                    action="subagent_kill_cascade",
+                    resource=child.agent_name,
+                    result="cancelled",
+                    metadata={"run_id": child.run_id, "killed_by_parent": run_id},
+                )
+
+        return killed
 
     async def shutdown(self) -> None:
         async with self._lock:

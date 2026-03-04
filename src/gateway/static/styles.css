@@ -69,6 +69,20 @@ body {
   padding: 10px 8px 14px;
   border-bottom: 1px solid rgba(160, 181, 229, 0.16);
   display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+
+.brand > div {
+  display: flex;
   flex-direction: column;
   gap: 2px;
 }
