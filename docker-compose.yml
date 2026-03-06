@@ -1,10 +1,10 @@
 services:
-  app:
+  boiled-claw-gateway:
     build:
       context: .
       args:
         INSTALL_BROWSER: "false"
-    container_name: boiled-claw
+    container_name: boiled-claw-gateway
     env_file:
       - .env
     ports:
@@ -17,3 +17,25 @@ services:
       - ./data:/app/data
       - ./skills:/app/skills
     restart: unless-stopped
+
+  boiled-claw-cli:
+    build:
+      context: .
+      args:
+        INSTALL_BROWSER: "false"
+    env_file:
+      - .env
+    environment:
+      - FILE_WORKSPACE_PATHS=/app/data,/app/skills
+    volumes:
+      - ./data:/app/data
+      - ./skills:/app/skills
+    network_mode: "service:boiled-claw-gateway"
+    depends_on:
+      boiled-claw-gateway:
+        condition: service_started
+    entrypoint: ["python", "-m", "src.main"]
+    stdin_open: true
+    tty: true
+    profiles:
+      - cli

@@ -28,6 +28,31 @@ _ALIASES = {
     "meta": "META.US",
 }
 
+_NON_DIRECT_STOCK_QUERY_KEYWORDS = {
+    "news",
+    "api",
+    "ニュース",
+    "記事",
+    "理由",
+    "なぜ",
+    "解説",
+    "分析",
+    "予想",
+    "チャート",
+    "推移",
+    "コード",
+    "実装",
+    "作りたい",
+    "作って",
+    "開発",
+    "ライブラリ",
+    "スクレイピング",
+    "方法",
+    "とは",
+    "意味",
+    "仕組み",
+}
+
 
 def _normalize_symbol(raw: str) -> Optional[str]:
     token = (raw or "").strip().lower()
@@ -50,6 +75,16 @@ def _normalize_symbol(raw: str) -> Optional[str]:
             return v
 
     return None
+
+
+def is_direct_stock_price_query(message: str) -> bool:
+    """現在値/日次OHLCの即時返答に限定して株価ショートカットを有効化する。"""
+    normalized = (message or "").strip().lower()
+    if "株価" not in normalized:
+        return False
+    if any(keyword in normalized for keyword in _NON_DIRECT_STOCK_QUERY_KEYWORDS):
+        return False
+    return _normalize_symbol(normalized) is not None
 
 
 async def stock_price(symbol_or_name: str) -> dict:

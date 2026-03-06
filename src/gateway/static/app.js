@@ -160,7 +160,21 @@ function toHttpBaseUrl(settings) {
   if (!base.startsWith("http://") && !base.startsWith("https://")) {
     base = `${window.location.protocol}//${base}`;
   }
-  return base.replace(/\/+$/, "");
+  base = base.replace(/\/+$/, "");
+
+  const parsed = new URL(base);
+  if (
+    parsed.pathname === "/chat" ||
+    parsed.pathname === "/chat/" ||
+    parsed.pathname === "/ws" ||
+    parsed.pathname === "/ws/" ||
+    /^\/ws\/[^/]+\/?$/.test(parsed.pathname) ||
+    parsed.pathname === "/"
+  ) {
+    parsed.pathname = "";
+  }
+
+  return parsed.toString().replace(/\/+$/, "");
 }
 
 function setStatus(online, text) {
@@ -235,6 +249,15 @@ function logEvent(name, payload) {
   rawLogEl.textContent = `${line}\n${rawLogEl.textContent}`.slice(0, 12000);
 }
 
+function apiFetch(url, init = {}) {
+  const settings = currentSettings();
+  const headers = new Headers(init.headers || {});
+  if (settings.token) {
+    headers.set("Authorization", `Bearer ${settings.token}`);
+  }
+  return fetch(url, { ...init, headers });
+}
+
 function getSessionSummary(sessionId) {
   const history = loadSessionHistory(sessionId);
   const firstUser = history.find((m) => m.kind === "user");
@@ -257,10 +280,12 @@ function renderSessions() {
       const summaryHtml = summary
         ? `<div class="session-summary">${escapeHtml(summary)}</div>`
         : "";
+      const userId = escapeHtml(s.userId || "-");
+      const when = escapeHtml(s.when || "-");
       return [
-        `<li class="session-item${isActive ? " session-active" : ""}" data-session-id="${s.id}">`,
-        `<div class="mono">${s.id}${activeTag}</div>`,
-        `<div class="muted">${s.userId} / ${s.when}</div>`,
+        `<li class="session-item${isActive ? " session-active" : ""}" data-session-id="${escapeAttr(s.id)}">`,
+        `<div class="mono">${escapeHtml(s.id)}${activeTag}</div>`,
+        `<div class="muted">${userId} / ${when}</div>`,
         summaryHtml,
         "</li>"
       ].join("");
@@ -318,12 +343,14 @@ function renderSkills(items) {
   }
   skillsListEl.innerHTML = items
     .map((s) => {
-      const tags = Array.isArray(s.tags) && s.tags.length ? s.tags.join(", ") : "-";
+      const tags = Array.isArray(s.tags) && s.tags.length
+        ? s.tags.map((tag) => escapeHtml(tag)).join(", ")
+        : "-";
       return [
         "<li>",
-        `<div><strong>${s.name || "-"}</strong></div>`,
-        `<div class="muted">${s.description || ""}</div>`,
-        `<div class="muted mono">version=${s.version || "-"} author=${s.author || "-"}</div>`,
+        `<div><strong>${escapeHtml(s.name || "-")}</strong></div>`,
+        `<div class="muted">${escapeHtml(s.description || "")}</div>`,
+        `<div class="muted mono">version=${escapeHtml(s.version || "-")} author=${escapeHtml(s.author || "-")}</div>`,
         `<div class="muted mono">tags=${tags}</div>`,
         "</li>"
       ].join("");
@@ -336,7 +363,7 @@ async function fetchSkills() {
   const url = `${base}/skills`;
   try {
     logEvent("skills.fetch.start", { url });
-    const res = await fetch(url);
+    const res = await apiFetch(url);
     if (!res.ok) {
       throw new Error(`HTTP ${res.status}`);
     }
@@ -381,7 +408,7 @@ async function executeSkill() {
   const url = `${base}/skills/${encodeURIComponent(skillName)}/execute`;
   try {
     logEvent("skills.exec.start", { skillName });
-    const res = await fetch(url, {
+    const res = await apiFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ params })
@@ -403,7 +430,7 @@ async function syncServerSessions() {
   const base = toHttpBaseUrl(settings);
   const userId = (settings.userId || "web_user").trim();
   try {
-    const res = await fetch(`${base}/sessions/${encodeURIComponent(userId)}`);
+    const res = await apiFetch(`${base}/sessions/${encodeURIComponent(userId)}`);
     if (!res.ok) return;
     const data = await res.json();
     const serverIds = new Set((data.sessions || []).map((s) => s.id));
@@ -427,7 +454,7 @@ async function fetchMemory() {
 
   // stats
   try {
-    const res = await fetch(`${base}/memory/stats`);
+    const res = await apiFetch(`${base}/memory/stats`);
     if (res.ok) {
       const data = await res.json();
       const s = data.stats || {};
@@ -444,7 +471,7 @@ async function fetchMemory() {
 
   try {
     logEvent("memory.fetch.start", { query, tags });
-    const res = await fetch(`${base}/memory?${params}`);
+    const res = await apiFetch(`${base}/memory?${params}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     renderMemory(data.results || []);
@@ -461,14 +488,16 @@ function renderMemory(items) {
     return;
   }
   memoryListEl.innerHTML = items.map((m) => {
-    const tags = Array.isArray(m.tags) && m.tags.length ? m.tags.map((t) => `<span class="tag">${t}</span>`).join(" ") : "";
+    const tags = Array.isArray(m.tags) && m.tags.length
+      ? m.tags.map((t) => `<span class="tag">${escapeHtml(t)}</span>`).join(" ")
+      : "";
     const date = m.created_at ? new Date(m.created_at * 1000).toLocaleString() : "-";
     const score = m.score != null ? ` <span class="muted mono">score=${m.score.toFixed(3)}</span>` : "";
     return [
-      `<li data-memory-id="${m.id}">`,
-      `<div class="memory-meta"><span class="mono">#${m.id}</span> ${date} ${tags}${score}</div>`,
+      `<li data-memory-id="${escapeAttr(String(m.id))}">`,
+      `<div class="memory-meta"><span class="mono">#${escapeHtml(String(m.id))}</span> ${escapeHtml(date)} ${tags}${score}</div>`,
       `<div class="memory-content">${escapeHtml(m.content)}</div>`,
-      `<div class="memory-actions"><button class="btn btn-sm delete-memory-btn" data-id="${m.id}">Delete</button></div>`,
+      `<div class="memory-actions"><button class="btn btn-sm delete-memory-btn" data-id="${escapeAttr(String(m.id))}">Delete</button></div>`,
       "</li>"
     ].join("");
   }).join("");
@@ -482,7 +511,7 @@ async function deleteMemory(id) {
   const base = toHttpBaseUrl(currentSettings());
   try {
     logEvent("memory.delete.start", { id });
-    const res = await fetch(`${base}/memory/${id}`, { method: "DELETE" });
+    const res = await apiFetch(`${base}/memory/${id}`, { method: "DELETE" });
     if (res.status === 404) throw new Error("not found");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     logEvent("memory.delete.ok", { id });
@@ -497,6 +526,12 @@ function escapeHtml(str) {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;");
+}
+
+function escapeAttr(str) {
+  return escapeHtml(str)
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function switchSession(targetSessionId) {

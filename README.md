@@ -92,20 +92,27 @@ cp .env.example .env
 # GOOGLE_API_KEY を設定
 
 # 起動
-docker compose up -d --build
+docker compose up -d --build boiled-claw-gateway
 
 # ログ確認
-docker compose logs -f app
+docker compose logs -f boiled-claw-gateway
 
 # 停止
 docker compose down
+```
+
+CLI コンテナを使う場合:
+
+```bash
+# 本家と同様に、Gatewayとは別サービスとしてCLIを起動
+docker compose --profile cli run --rm boiled-claw-cli cli
 ```
 
 ブラウザ自動化 (Playwright) をコンテナに含めたい場合:
 
 ```bash
 docker compose build --build-arg INSTALL_BROWSER=true
-docker compose up -d
+docker compose up -d boiled-claw-gateway
 ```
 
 ## プロジェクト構造
@@ -187,6 +194,19 @@ async def chat():
 
 asyncio.run(chat())
 ```
+
+### HTTP API（curl）で使う
+
+```bash
+curl -sS -X POST http://127.0.0.1:18789/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "curl_user",
+    "message": "NVIDIAの最新ニュースを3つ教えて"
+  }'
+```
+
+`session_id` を指定すれば同一会話を継続できます。
 
 ### Telegramで使う
 

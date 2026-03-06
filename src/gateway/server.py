@@ -7,7 +7,7 @@ import asyncio
 import json
 from datetime import datetime
 from typing import Any, Dict, Optional
-from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -19,7 +19,7 @@ from pathlib import Path
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
 from src.security.audit import get_audit_logger, AuditEventType
-from src.tools.finance import stock_price
+from src.tools.finance import is_direct_stock_price_query, stock_price
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
 from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
 from src.tools.memory import memory_search, memory_stats, memory_delete
@@ -167,7 +167,7 @@ class GatewayServer:
             }
 
         @self.app.post("/skills/{skill_name}/execute")
-        async def execute_skill(skill_name: str, payload: Dict[str, Any] | None = None):
+        async def execute_skill(skill_name: str, payload: Dict[str, Any] | None = Body(default=None)):
             params = {}
             if payload and isinstance(payload.get("params"), dict):
                 params = payload.get("params", {})
@@ -183,6 +183,44 @@ class GatewayServer:
             )
             sessions = response.sessions or []
             return {"sessions": [{"id": s.id} for s in sessions]}
+
+        @self.app.post("/agent/run")
+        async def run_agent_endpoint(payload: Dict[str, Any] | None = Body(default=None)):
+            body = payload or {}
+            user_id = str(body.get("user_id") or "api_user")
+            message = str(body.get("message") or "").strip()
+            session_id = body.get("session_id")
+
+            if not message:
+                raise HTTPException(status_code=400, detail="message is required")
+
+            # 既存セッション再利用 or 新規作成
+            session = None
+            if session_id:
+                session = await self.session_service.get_session(
+                    app_name="boiled-claw",
+                    user_id=user_id,
+                    session_id=str(session_id),
+                )
+            if session is None:
+                session = await self.session_service.create_session(
+                    app_name="boiled-claw",
+                    user_id=user_id,
+                )
+
+            result = await self._run_agent_message(
+                user_id=user_id,
+                session_id=session.id,
+                message=message,
+            )
+
+            return {
+                "ok": result["type"] == "agent_message",
+                "type": result["type"],
+                "response": result["message"],
+                "user_id": user_id,
+                "session_id": session.id,
+            }
 
         @self.app.get("/memory/stats")
         async def memory_stats_endpoint():
@@ -320,8 +358,19 @@ class GatewayServer:
             "message": message,
         })
 
+        result = await self._run_agent_message(
+            user_id=user_id,
+            session_id=session_id,
+            message=message,
+        )
+
+        await self.manager.send_message(session_id, result)
+
+    async def _run_agent_message(self, user_id: str, session_id: str, message: str) -> Dict[str, str]:
+        """Agent応答を生成して返す（WebSocket/HTTP共通ロジック）"""
+
         # 株価クエリは専用ツールで即時処理（LLMループによる長時間待機を回避）
-        if "株価" in message.lower():
+        if is_direct_stock_price_query(message):
             quote = await stock_price(message)
             if quote.get("ok"):
                 text = (
@@ -336,11 +385,10 @@ class GatewayServer:
             else:
                 text = quote.get("message", "株価データを取得できませんでした。")
 
-            await self.manager.send_message(session_id, {
+            return {
                 "type": "agent_message",
                 "message": text,
-            })
-            return
+            }
 
         # エージェント実行（現在日時をメッセージ先頭に付与してモデルに正確な日付を伝える）
         now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
@@ -371,12 +419,6 @@ class GatewayServer:
                     "応答の生成に失敗しました。もう一度試すか、質問を少し具体化してください。"
                 )
 
-            # レスポンス送信
-            await self.manager.send_message(session_id, {
-                "type": "agent_message",
-                "message": response_text,
-            })
-
             # 監査ログ
             self.audit_logger.log_agent_message(
                 agent_name="root_agent",
@@ -385,33 +427,38 @@ class GatewayServer:
                 session_id=session_id,
             )
 
+            return {
+                "type": "agent_message",
+                "message": response_text,
+            }
+
         except TimeoutError:
             error_message = (
                 "Agent timed out after 45 seconds. "
                 "Please try again with a more specific query."
             )
-            await self.manager.send_message(session_id, {
-                "type": "error",
-                "message": error_message,
-            })
             self.audit_logger.log_error(
                 error=error_message,
                 user_id=user_id,
                 session_id=session_id,
                 context={"message": message, "reason": "timeout"},
             )
-        except Exception as e:
-            error_message = f"Error: {str(e)}"
-            await self.manager.send_message(session_id, {
+            return {
                 "type": "error",
                 "message": error_message,
-            })
+            }
+        except Exception as e:
+            error_message = f"Error: {str(e)}"
             self.audit_logger.log_error(
                 error=str(e),
                 user_id=user_id,
                 session_id=session_id,
                 context={"message": message},
             )
+            return {
+                "type": "error",
+                "message": error_message,
+            }
 
     def run(self, host: Optional[str] = None, port: Optional[int] = None):
         """サーバー起動"""
