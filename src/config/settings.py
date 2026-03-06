@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Agent settings
     agent_name: str = Field(default="boiled-claw", description="Agent name")
-    agent_model: str = Field(default="gemini-3.0-flash", description="Default model")
+    agent_model: str = Field(default="gemini-3-flash-preview", description="Default model")
 
     # Gateway settings
     gateway_host: str = Field(default="127.0.0.1", description="Gateway host")
@@ -41,10 +41,24 @@ class Settings(BaseSettings):
     # Memory settings
     memory_db_path: Path = Field(default=Path("data/memory.db"), description="Memory DB path")
     memory_vector_dim: int = Field(default=768, description="Vector dimension")
+    memory_embedding_model: str = Field(
+        default="gemini-embedding-001",
+        description="Embedding model for memory vectors",
+    )
+
+    # Subagent settings
+    subagent_max_concurrent: int = Field(default=8, description="Max concurrent subagent runs globally")
+    subagent_max_per_session: int = Field(default=5, description="Max concurrent subagent runs per requester session")
+    subagent_max_spawn_depth: int = Field(default=2, description="Max subagent nesting depth (root agent=0, first subagent=1)")
 
     # Security settings
     audit_log_path: Path = Field(default=Path("data/audit.log"), description="Audit log path")
     shell_enabled: bool = Field(default=True, description="Enable shell execution")
+    gateway_api_key: Optional[str] = Field(default=None, description="API key for gateway auth (empty = auth disabled)")
+    file_workspace_paths: str = Field(
+        default="",
+        description="Comma-separated allowed file paths. Empty = blocklist only (no whitelist).",
+    )
 
     # Redis settings (for future session store)
     redis_url: Optional[str] = Field(default=None, description="Redis URL")

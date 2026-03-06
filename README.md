@@ -13,9 +13,10 @@ OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベ
 - 📁 **ファイル操作** - 読み書き対応
 - 🧠 **メモリシステム** - SQLite + ベクトル検索
 - 💬 **マルチチャネル** - Telegram, Discord, WebSocket 対応
+- 🤝 **マルチエージェント委譲** - ADK sub_agents + AgentTool + sessions_spawn
 - 🔒 **セキュリティ** - 監査ログ、コマンドポリシー
 - 🔌 **拡張可能** - スキルプラグインシステム
-- 🐳 **Docker対応** - docker-compose で簡単デプロイ
+- 🐳 **Docker対応** - `docker compose` で簡単デプロイ
 
 ## アーキテクチャ
 
@@ -91,13 +92,27 @@ cp .env.example .env
 # GOOGLE_API_KEY を設定
 
 # 起動
-docker-compose up -d
+docker compose up -d --build boiled-claw-gateway
 
 # ログ確認
-docker-compose logs -f
+docker compose logs -f boiled-claw-gateway
 
 # 停止
-docker-compose down
+docker compose down
+```
+
+CLI コンテナを使う場合:
+
+```bash
+# 本家と同様に、Gatewayとは別サービスとしてCLIを起動
+docker compose --profile cli run --rm boiled-claw-cli cli
+```
+
+ブラウザ自動化 (Playwright) をコンテナに含めたい場合:
+
+```bash
+docker compose build --build-arg INSTALL_BROWSER=true
+docker compose up -d boiled-claw-gateway
 ```
 
 ## プロジェクト構造
@@ -180,6 +195,19 @@ async def chat():
 asyncio.run(chat())
 ```
 
+### HTTP API（curl）で使う
+
+```bash
+curl -sS -X POST http://127.0.0.1:18789/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "curl_user",
+    "message": "NVIDIAの最新ニュースを3つ教えて"
+  }'
+```
+
+`session_id` を指定すれば同一会話を継続できます。
+
 ### Telegramで使う
 
 1. BotFather で Telegram Bot を作成
@@ -200,6 +228,20 @@ asyncio.run(chat())
 - **write_file** - ファイル書き込み
 - **memory_store** - メモリに保存
 - **memory_search** - メモリから検索
+- **agents_list** - 利用可能なサブエージェント一覧
+- **sessions_spawn** - サブエージェントをバックグラウンド起動
+- **subagents_list** - サブエージェント実行の状態確認
+- **subagents_steer** - mode=session のサブエージェントへ追加入力
+- **subagents_kill** - サブエージェント実行停止
+- **skill_list** - ロード済みスキル一覧を取得
+- **skill_execute** - 指定スキルを実行
+
+### Skills の使い方
+
+- `skills/<name>/SKILL.md` を追加すると起動時に自動ロードされます（OpenClaw 形式）。
+- 互換性のために `skills/*.py` の旧形式も引き続きロードされます。
+- ゲートウェイ起動後に `GET /skills` でロード状況を確認できます。
+- サンプルとして `skills/coding-agent/SKILL.md` を同梱しています。
 
 ### セキュリティ
 

@@ -14,7 +14,7 @@ from src.tools.memory import memory_store, memory_search
 # Web検索特化エージェント
 web_agent = Agent(
     name="web_researcher",
-    model="gemini-3.0-flash",
+    model="gemini-3-flash-preview",
     description="Web検索と情報収集を専門とするエージェント",
     instruction="""
 あなたはWeb検索のスペシャリストです。
@@ -37,7 +37,7 @@ web_agent = Agent(
 # ファイル操作特化エージェント
 file_agent = Agent(
     name="file_manager",
-    model="gemini-3.0-flash",
+    model="gemini-3-flash-preview",
     description="ファイル操作とコード解析を専門とするエージェント",
     instruction="""
 あなたはファイル操作のスペシャリストです。
@@ -60,7 +60,7 @@ file_agent = Agent(
 # システム操作特化エージェント
 system_agent = Agent(
     name="system_operator",
-    model="gemini-3.0-flash",
+    model="gemini-3-flash-preview",
     description="システムコマンド実行とタスク自動化を専門とするエージェント",
     instruction="""
 あなたはシステム操作のスペシャリストです。
@@ -87,7 +87,7 @@ system_agent = Agent(
 # メモリ管理エージェント
 memory_agent = Agent(
     name="memory_keeper",
-    model="gemini-3.0-flash",
+    model="gemini-3-flash-preview",
     description="会話履歴とメモリ管理を専門とするエージェント",
     instruction="""
 あなたはメモリ管理のスペシャリストです。
@@ -110,7 +110,7 @@ memory_agent = Agent(
 # ブラウザ自動化エージェント
 browser_agent = Agent(
     name="browser_automator",
-    model="gemini-3.0-flash",
+    model="gemini-3-flash-preview",
     description="ブラウザ自動化とスクレイピングを専門とするエージェント",
     instruction="""
 あなたはブラウザ自動化のスペシャリストです。

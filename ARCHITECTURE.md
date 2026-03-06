@@ -82,9 +82,10 @@ src/
 ### 1. Agents (エージェント)
 
 #### Root Agent
-- **モデル**: gemini-3.0-flash
+- **モデル**: gemini-3-flash-preview
 - **役割**: メインエージェント、全ツールにアクセス可能
-- **ツール**: web_search, browser, shell, file, memory
+- **ツール**: web_search, browser, shell, file, memory, skills, subagents
+- **委譲方式**: ADK `sub_agents` + `AgentTool` + `TransferToAgentTool`
 
 #### Sub Agents
 - **web_agent**: Web検索とブラウジング専門
@@ -92,6 +93,7 @@ src/
 - **system_agent**: システムコマンド実行専門
 - **memory_agent**: メモリ管理専門
 - **browser_agent**: ブラウザ自動化専門
+- **オーケストレーション**: `sessions_spawn` / `subagents_list` / `subagents_steer` / `subagents_kill`
 
 ### 2. Gateway (ゲートウェイ)
 
@@ -165,18 +167,18 @@ src/
 - `memory_store()` - メモリ保存
 - `memory_search()` - メモリ検索
 - タグベース検索
-- ベクトル検索準備済み
+- コサイン類似度によるベクトル検索
 
 ### 5. Memory (メモリシステム)
 
 #### MemoryStore
 - **バックエンド**: SQLite
-- **検索**: テキスト検索 + ベクトル検索準備済み
+- **検索**: テキスト検索 + ベクトル検索
 - **機能**:
   - タグベース分類
   - メタデータ保存
   - タイムスタンプ管理
-  - 類似度検索 (将来実装)
+  - 類似度検索 (Google埋め込みモデル + コサイン類似度)
 
 ### 6. Security (セキュリティ)
 
@@ -360,7 +362,7 @@ Security Policy Check
 
 ### Docker
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
 
 ### 手動

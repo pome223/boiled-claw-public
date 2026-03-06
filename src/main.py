@@ -25,8 +25,10 @@ async def run_cli():
     from google.genai import types
     from src.agents.root_agent import root_agent
     from src.config.settings import get_settings
+    from src.skills.runtime import ensure_skills_loaded
 
     settings = get_settings()
+    await ensure_skills_loaded()
 
     session_service = InMemorySessionService()
     runner = Runner(
@@ -83,7 +85,7 @@ async def run_cli():
             console.print(f"[red]Error: {e}[/red]")
 
 
-async def run_web(host: Optional[str] = None, port: Optional[int] = None):
+def run_web(host: Optional[str] = None, port: Optional[int] = None):
     """Webサーバーモードで実行する"""
     from src.gateway.server import create_gateway
 
@@ -108,8 +110,10 @@ async def run_channels():
     from google.adk.sessions import InMemorySessionService
     from src.agents.root_agent import root_agent
     from google.genai import types
+    from src.skills.runtime import ensure_skills_loaded
 
     settings = get_settings()
+    await ensure_skills_loaded()
     registry = get_channel_registry()
 
     # セッションとランナー
@@ -215,7 +219,7 @@ def main():
     if args.mode == "cli":
         asyncio.run(run_cli())
     elif args.mode == "web":
-        asyncio.run(run_web(host=args.host, port=args.port))
+        run_web(host=args.host, port=args.port)
     elif args.mode == "channels":
         asyncio.run(run_channels())
 

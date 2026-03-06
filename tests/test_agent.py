@@ -4,6 +4,7 @@
 
 import pytest
 from src.agents.root_agent import root_agent
+from src.agents.sub_agents import SUB_AGENTS
 from src.agents.model_config import DEFAULT_MODEL, get_model_config
 
 
@@ -15,26 +16,53 @@ def test_root_agent_exists():
 
 def test_root_agent_model():
     """Root agentのモデルがgemini-3.0-flashであることを確認"""
-    assert root_agent.model == "gemini-3.0-flash"
+    assert root_agent.model == DEFAULT_MODEL.name
 
 
 def test_root_agent_tools():
     """Root agentがツールを持っていることを確認"""
     assert len(root_agent.tools) > 0
-    tool_names = [tool.__name__ for tool in root_agent.tools if hasattr(tool, '__name__')]
-    assert "web_search" in tool_names or any("web" in name for name in tool_names)
+    tool_names = [
+        tool.__name__ if hasattr(tool, "__name__")
+        else getattr(tool, "name", "")
+        for tool in root_agent.tools
+    ]
+    assert "web_search" in tool_names
+
+
+def test_root_agent_sub_agents_connected():
+    """Root agentにサブエージェントが配線されていることを確認"""
+    assert len(root_agent.sub_agents) == len(SUB_AGENTS)
+    assert {agent.name for agent in root_agent.sub_agents} == {agent.name for agent in SUB_AGENTS}
+
+
+def test_root_agent_has_orchestration_tools():
+    """sessions_spawn 系のオーケストレーションツールが配線されていることを確認"""
+    tool_names = [
+        tool.__name__ if hasattr(tool, "__name__")
+        else getattr(tool, "name", "")
+        for tool in root_agent.tools
+    ]
+
+    for sub_agent in SUB_AGENTS:
+        assert sub_agent.name not in tool_names
+
+    assert "sessions_spawn" in tool_names
+    assert "subagents_list" in tool_names
+    assert "subagents_steer" in tool_names
+    assert "subagents_kill" in tool_names
 
 
 def test_model_config():
     """モデル設定が正しいことを確認"""
-    assert DEFAULT_MODEL.name == "gemini-3.0-flash"
+    assert DEFAULT_MODEL.name == "gemini-3-flash-preview"
     assert DEFAULT_MODEL.temperature == 0.7
 
     config = get_model_config("default")
-    assert config.name == "gemini-3.0-flash"
+    assert config.name == DEFAULT_MODEL.name
 
     config = get_model_config("precise")
-    assert config.name == "gemini-3.0-flash"
+    assert config.name == DEFAULT_MODEL.name
     assert config.temperature == 0.2
 
 
@@ -117,21 +145,85 @@ def test_audit_logger():
 
 
 @pytest.mark.asyncio
-async def test_memory_store():
+async def test_memory_store(monkeypatch):
     """メモリストアのテスト"""
-    from src.tools.memory import memory_store, memory_search
+    import tempfile
+    import os
+    from src.tools import memory as memory_module
 
-    # 保存
-    result = await memory_store(
-        content="テスト情報",
-        tags="test,pytest",
-    )
-    assert result.get("success")
+    async def fake_embed(text: str, *, task_type: str, output_dimensionality: int):
+        vec = [0.0] * output_dimensionality
+        vec[0] = 1.0 if "テスト" in text else 0.2
+        return vec
 
-    # 検索
-    search_result = await memory_search(tags="test", limit=5)
-    assert search_result.get("success")
-    assert "results" in search_result
+    monkeypatch.setattr(memory_module, "_embed_with_google", fake_embed)
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        db_path = f.name
+
+    old_store = memory_module._memory_store
+    memory_module._memory_store = memory_module.MemoryStore(db_path=db_path)
+
+    try:
+        # 保存
+        result = await memory_module.memory_store(
+            content="テスト情報",
+            tags="test,pytest",
+        )
+        assert result.get("success")
+
+        # 検索
+        search_result = await memory_module.memory_search(tags="test", limit=5)
+        assert search_result.get("success")
+        assert "results" in search_result
+    finally:
+        memory_module._memory_store = old_store
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
+@pytest.mark.asyncio
+async def test_memory_vector_search_ranks_semantic_match(monkeypatch):
+    """ベクトル検索で関連文が上位に来ることを確認"""
+    from src.tools import memory as memory_module
+    import tempfile
+    import os
+
+    async def fake_embed(text: str, *, task_type: str, output_dimensionality: int):
+        vec = [0.0] * output_dimensionality
+        if "API" in text or "FastAPI" in text or "開発" in text:
+            vec[0] = 1.0
+        if "カレー" in text:
+            vec[1] = 1.0
+        return vec
+
+    monkeypatch.setattr(memory_module, "_embed_with_google", fake_embed)
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        db_path = f.name
+
+    old_store = memory_module._memory_store
+    memory_module._memory_store = memory_module.MemoryStore(db_path=db_path)
+
+    try:
+        await memory_module.memory_store("PythonとFastAPIでWeb APIを実装した", tags="dev")
+        await memory_module.memory_store("週末にカレーを作って食べた", tags="life")
+        await memory_module.memory_store("REST APIのエンドポイント設計メモ", tags="dev")
+
+        result = await memory_module.memory_search(query="API 開発", limit=2)
+
+        assert result.get("success")
+        assert result["count"] >= 1
+        assert "score" in result["results"][0]
+        assert result["results"][0]["score"] >= 0.0
+        assert any(
+            "API" in item["content"] or "FastAPI" in item["content"]
+            for item in result["results"]
+        )
+    finally:
+        memory_module._memory_store = old_store
+        if os.path.exists(db_path):
+            os.unlink(db_path)
 
 
 def test_channel_registry():

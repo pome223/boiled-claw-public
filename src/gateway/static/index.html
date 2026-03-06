@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>boiled-claw Control UI</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="icon" type="image/png" href="/chat-static/favicon.png" />
+  <link rel="stylesheet" href="/chat-static/styles.css" />
+</head>
+<body>
+  <div class="grid-overlay"></div>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img src="/chat-static/favicon.png" class="brand-icon" alt="boiled-claw" />
+        <div>
+          <span class="lobster">boiled-claw</span>
+          <span class="role">Control UI</span>
+        </div>
+      </div>
+
+      <nav class="nav">
+        <button class="nav-item active" data-tab="chat">Chat</button>
+        <button class="nav-item" data-tab="sessions">Sessions</button>
+        <button class="nav-item" data-tab="channels">Channels</button>
+        <button class="nav-item" data-tab="skills">Skills</button>
+        <button class="nav-item" data-tab="memory">Memory</button>
+        <button class="nav-item" data-tab="cron">Cron Jobs</button>
+        <button class="nav-item" data-tab="logs">Live Logs</button>
+        <button class="nav-item" data-tab="settings">Settings</button>
+      </nav>
+
+      <div class="side-card">
+        <div class="k">Gateway</div>
+        <div class="v" id="gatewayHostLabel">ws://127.0.0.1:18789</div>
+      </div>
+      <div class="side-card">
+        <div class="k">Connection</div>
+        <div class="v"><span id="statusDot" class="dot offline"></span><span id="statusText">offline</span></div>
+      </div>
+      <div class="side-card">
+        <div class="k">Session</div>
+        <div class="v mono" id="sessionBadge">-</div>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div>
+          <h1 id="tabTitle">Chat</h1>
+          <p id="tabSubtitle">Gateway WebSocket chat</p>
+        </div>
+        <div class="actions">
+          <button id="connectBtn" class="btn primary">Connect</button>
+          <button id="disconnectBtn" class="btn">Disconnect</button>
+        </div>
+      </header>
+
+      <section id="tab-chat" class="tab active">
+        <div class="chat-layout">
+          <div class="chat-pane">
+            <div id="messages" class="messages"></div>
+            <form id="chatForm" class="composer">
+              <textarea id="messageInput" placeholder="Type a message or /status" rows="2"></textarea>
+              <button type="submit" class="btn send">Send</button>
+            </form>
+          </div>
+          <aside class="inspector">
+            <h3>Event Stream</h3>
+            <div id="eventLog" class="event-log"></div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="tab-sessions" class="tab">
+        <div class="panel">
+          <h3>Sessions</h3>
+          <p class="muted">Current and recent sessions in this browser.</p>
+          <ul id="sessionList" class="list"></ul>
+        </div>
+      </section>
+
+      <section id="tab-channels" class="tab">
+        <div class="panel">
+          <h3>Channels</h3>
+          <p class="muted">This lightweight clone does not call channel RPCs yet.</p>
+          <ul class="list placeholder">
+            <li>Telegram: unknown</li>
+            <li>Discord: unknown</li>
+            <li>Slack: unknown</li>
+          </ul>
+        </div>
+      </section>
+
+      <section id="tab-skills" class="tab">
+        <div class="panel skills-panel">
+          <div class="skills-toolbar">
+            <h3>Skills</h3>
+            <button id="refreshSkillsBtn" class="btn" type="button">Refresh</button>
+          </div>
+          <p class="muted">OpenClaw-style <code>skills/&lt;name&gt;/SKILL.md</code> を一覧し、直接実行できます。</p>
+
+          <ul id="skillsList" class="list"></ul>
+
+          <label for="skillNameInput" class="field-label">skill name</label>
+          <input id="skillNameInput" class="text-input mono" placeholder="coding-agent" />
+
+          <label for="skillParamsInput" class="field-label">params (JSON object)</label>
+          <textarea id="skillParamsInput" class="mono" rows="4" placeholder='{"task":"Fix websocket timeout"}'></textarea>
+
+          <div class="actions">
+            <button id="runSkillBtn" class="btn primary" type="button">Run Skill</button>
+          </div>
+          <pre id="skillResult" class="raw-log"></pre>
+        </div>
+      </section>
+
+      <section id="tab-memory" class="tab">
+        <div class="panel skills-panel">
+          <div class="skills-toolbar">
+            <h3>Memory</h3>
+            <button id="refreshMemoryBtn" class="btn" type="button">Refresh</button>
+          </div>
+          <p class="muted">SQLite + vector memory browser. <span id="memoryStats"></span></p>
+
+          <div class="memory-search-row">
+            <input id="memoryQueryInput" class="text-input mono" placeholder="search query..." style="flex:1" />
+            <input id="memoryTagsInput" class="text-input mono" placeholder="tags (comma)" style="width:160px" />
+            <button id="searchMemoryBtn" class="btn primary" type="button">Search</button>
+          </div>
+
+          <ul id="memoryList" class="list"></ul>
+        </div>
+      </section>
+
+      <section id="tab-cron" class="tab">
+        <div class="panel">
+          <h3>Cron Jobs</h3>
+          <p class="muted">UI shell only. Backend cron APIs are not implemented in this repo yet.</p>
+          <div class="placeholder-box">No cron endpoints available.</div>
+        </div>
+      </section>
+
+      <section id="tab-logs" class="tab">
+        <div class="panel">
+          <h3>Live Logs</h3>
+          <p class="muted">Client-side event mirror from this page.</p>
+          <pre id="rawLog" class="raw-log"></pre>
+        </div>
+      </section>
+
+      <section id="tab-settings" class="tab">
+        <div class="panel form-panel">
+          <h3>Gateway Settings</h3>
+          <label for="gatewayUrl" class="field-label">gatewayUrl</label>
+          <input id="gatewayUrl" class="text-input mono" placeholder="ws://127.0.0.1:18789" />
+
+          <label for="token" class="field-label">token (optional)</label>
+          <input id="token" class="text-input mono" placeholder="paste token" />
+
+          <label for="userId" class="field-label">userId</label>
+          <input id="userId" class="text-input mono" value="web_user" />
+
+          <div class="actions">
+            <button id="saveSettingsBtn" class="btn primary" type="button">Save</button>
+            <button id="resetSettingsBtn" class="btn" type="button">Reset</button>
+          </div>
+          <p class="muted">Compatible with the Control UI pattern: <code>?gatewayUrl=...&token=...</code></p>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/chat-static/app.js"></script>
+</body>
+</html>
