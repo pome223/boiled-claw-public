@@ -15,6 +15,7 @@ from src.tools.skills import skill_list, skill_execute
 from src.tools.subagents import (
     agents_list,
     sessions_spawn,
+    sessions_spawn_dynamic,
     subagents_kill,
     subagents_list,
     subagents_steer,
@@ -106,11 +107,18 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
   - 追加指示: `subagents_steer`
   - 停止: `subagents_kill`
 - 同じタスクに対して直接ツールとバックグラウンド実行の両方を使ってはならない
+
+### 動的エージェント生成
+- ユーザーが「カスタムエージェントを作って」「このMCPサーバーを使って」と依頼したら `sessions_spawn_dynamic` を使う
+- `instruction` にシステムプロンプト、`mcp_servers` に JSON 配列文字列でサーバー設定を渡す
+- MCP サーバーなしの純粋なカスタム指示エージェントも `mcp_servers="[]"` で起動できる
+- 結果確認は通常通り `subagents_list` / `subagents_steer` / `subagents_kill` を使う
 """,
     sub_agents=SUB_AGENTS,
     tools=[
         agents_list,
         sessions_spawn,
+        sessions_spawn_dynamic,
         subagents_list,
         subagents_steer,
         subagents_kill,

@@ -3,16 +3,22 @@ Sub-agent orchestration tools.
 
 Google ADK の AgentTool / sub_agents 構成を補完するための
 sessions_spawn / subagents_list / subagents_steer / subagents_kill を提供する。
+
+動的エージェント生成:
+  sessions_spawn_dynamic — 実行時にシステムプロンプトと MCP サーバーを指定して
+  Agent を生成しバックグラウンド実行する。
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from google.adk.agents import Agent
 from google.adk.agents.context import Context as ToolContext
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -23,6 +29,55 @@ from src.config.settings import get_settings
 from src.security.audit import AuditEventType, get_audit_logger
 
 _AGENT_MAP = {agent.name: agent for agent in SUB_AGENTS}
+
+_DEFAULT_DYNAMIC_MODEL = "gemini-3-flash-preview"
+
+
+def _build_mcp_toolsets(mcp_servers: list[dict]) -> list:
+    """MCP サーバー設定リストから McpToolset のリストを生成する。
+
+    各エントリは以下のフォーマット:
+      {"type": "sse",   "url": "http://..."}
+      {"type": "http",  "url": "http://..."}
+      {"type": "stdio", "command": "npx", "args": [...], "env": {...}}
+    """
+    from google.adk.tools.mcp_tool.mcp_toolset import McpToolset
+    from google.adk.tools.mcp_tool.mcp_session_manager import (
+        SseConnectionParams,
+        StdioServerParameters,
+        StreamableHTTPConnectionParams,
+    )
+
+    toolsets: list = []
+    for i, server in enumerate(mcp_servers):
+        t = (server.get("type") or "sse").lower()
+        if t == "sse":
+            if not server.get("url"):
+                raise ValueError(f"mcp_servers[{i}]: 'url' is required for type 'sse'")
+            toolsets.append(McpToolset(
+                connection_params=SseConnectionParams(url=server["url"])
+            ))
+        elif t == "http":
+            if not server.get("url"):
+                raise ValueError(f"mcp_servers[{i}]: 'url' is required for type 'http'")
+            toolsets.append(McpToolset(
+                connection_params=StreamableHTTPConnectionParams(url=server["url"])
+            ))
+        elif t == "stdio":
+            if not server.get("command"):
+                raise ValueError(f"mcp_servers[{i}]: 'command' is required for type 'stdio'")
+            toolsets.append(McpToolset(
+                connection_params=StdioServerParameters(
+                    command=server["command"],
+                    args=server.get("args") or [],
+                    env=server.get("env") or None,
+                )
+            ))
+        else:
+            raise ValueError(
+                f"mcp_servers[{i}]: unknown type {t!r}. Use 'sse', 'http', or 'stdio'."
+            )
+    return toolsets
 
 
 @dataclass
@@ -44,6 +99,7 @@ class SubagentRunState:
     messages_processed: int = 0
     parent_run_id: Optional[str] = None
     spawn_depth: int = 1  # root agent から何段目か (root=0, 直接 spawn=1, ...)
+    dynamic_instruction: Optional[str] = None  # 動的生成エージェントのシステムプロンプト
     queue: asyncio.Queue[Optional[str]] = field(default_factory=asyncio.Queue, repr=False)
     worker: Optional[asyncio.Task] = field(default=None, repr=False)
 
@@ -58,6 +114,7 @@ class SubagentRunState:
             "session_id": self.session_id,
             "parent_run_id": self.parent_run_id,
             "spawn_depth": self.spawn_depth,
+            "dynamic": self.dynamic_instruction is not None,
             "current_task": self.current_task,
             "messages_processed": self.messages_processed,
             "pending_messages": self.queue.qsize(),
@@ -91,8 +148,10 @@ class SubagentManager:
         app_name: str,
         mode: str = "run",
         run_timeout_seconds: int = 0,
+        _agent: Optional[Agent] = None,  # 動的生成エージェント（内部使用）
+        _dynamic_instruction: Optional[str] = None,
     ) -> Dict[str, Any]:
-        if agent_name not in _AGENT_MAP:
+        if _agent is None and agent_name not in _AGENT_MAP:
             return {
                 "status": "error",
                 "error": f"Unknown agent: {agent_name}",
@@ -106,7 +165,8 @@ class SubagentManager:
         run_timeout = max(0, int(run_timeout_seconds or 0))
         settings = get_settings()
 
-        run_id = f"sub_{uuid.uuid4().hex[:12]}"
+        prefix = "dyn" if _agent is not None else "sub"
+        run_id = f"{prefix}_{uuid.uuid4().hex[:12]}"
 
         async with self._lock:
             # 並行数チェック
@@ -165,12 +225,13 @@ class SubagentManager:
                 current_task=task,
                 parent_run_id=parent_run_id,
                 spawn_depth=child_depth,
+                dynamic_instruction=_dynamic_instruction,
             )
             self._runs[run_id] = state
 
         await state.queue.put(task)
         state.worker = asyncio.create_task(
-            self._worker_loop(state, run_timeout),
+            self._worker_loop(state, run_timeout, _agent),
             name=f"subagent:{run_id}",
         )
 
@@ -327,10 +388,56 @@ class SubagentManager:
         async with self._lock:
             return self._runs.get(run_id)
 
-    async def _worker_loop(self, state: SubagentRunState, run_timeout_seconds: int) -> None:
+    async def spawn_dynamic(
+        self,
+        *,
+        task: str,
+        instruction: str,
+        mcp_servers: list[dict],
+        model: str = _DEFAULT_DYNAMIC_MODEL,
+        requester_session_id: str,
+        user_id: str,
+        app_name: str,
+        mode: str = "run",
+        run_timeout_seconds: int = 0,
+    ) -> Dict[str, Any]:
+        """システムプロンプトと MCP サーバーを指定して動的にエージェントを生成・実行する。"""
+        try:
+            toolsets = _build_mcp_toolsets(mcp_servers)
+        except ValueError as e:
+            return {"status": "error", "error": str(e)}
+
+        run_id = f"dyn_{uuid.uuid4().hex[:12]}"
+        agent = Agent(
+            name=run_id,
+            model=model,
+            instruction=instruction,
+            tools=toolsets,
+        )
+
+        return await self.spawn(
+            task=task,
+            agent_name=run_id,
+            requester_session_id=requester_session_id,
+            user_id=user_id,
+            app_name=app_name,
+            mode=mode,
+            run_timeout_seconds=run_timeout_seconds,
+            _agent=agent,
+            _dynamic_instruction=instruction,
+        )
+
+    async def _worker_loop(self, state: SubagentRunState, run_timeout_seconds: int, agent: Optional[Agent] = None) -> None:
+        resolved_agent = agent if agent is not None else _AGENT_MAP.get(state.agent_name)
+        if resolved_agent is None:
+            state.status = "failed"
+            state.error = f"Agent not found: {state.agent_name}"
+            state.ended_at = time.time()
+            return
+
         session_service = InMemorySessionService()
         runner = Runner(
-            agent=_AGENT_MAP[state.agent_name],
+            agent=resolved_agent,
             app_name=state.app_name,
             session_service=session_service,
         )
@@ -491,6 +598,54 @@ async def agents_list() -> Dict[str, Any]:
             for agent in SUB_AGENTS
         ],
     }
+
+
+async def sessions_spawn_dynamic(
+    task: str,
+    instruction: str,
+    mcp_servers: str = "[]",
+    model: str = _DEFAULT_DYNAMIC_MODEL,
+    mode: str = "run",
+    run_timeout_seconds: int = 0,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    """
+    システムプロンプトと MCP サーバーを指定してエージェントを動的に生成しバックグラウンド実行する。
+
+    Args:
+        task: エージェントに与える最初のタスク
+        instruction: エージェントのシステムプロンプト
+        mcp_servers: MCP サーバー設定の JSON 配列文字列。
+            各要素は以下のいずれか:
+            {"type": "sse",   "url": "http://..."}
+            {"type": "http",  "url": "http://..."}
+            {"type": "stdio", "command": "npx", "args": [...], "env": {...}}
+        model: 使用モデル（デフォルト: gemini-3-flash-preview）
+        mode: "run"（1回実行）/ "session"（継続セッション）
+        run_timeout_seconds: タイムアウト秒数（0 = 無制限）
+    """
+    ctx = _resolve_context(tool_context)
+
+    try:
+        servers: list[dict] = json.loads(mcp_servers) if mcp_servers.strip() else []
+    except json.JSONDecodeError as e:
+        return {"status": "error", "error": f"mcp_servers is not valid JSON: {e}"}
+
+    if not isinstance(servers, list):
+        return {"status": "error", "error": "mcp_servers must be a JSON array"}
+
+    manager = get_subagent_manager()
+    return await manager.spawn_dynamic(
+        task=task,
+        instruction=instruction,
+        mcp_servers=servers,
+        model=model,
+        requester_session_id=ctx["session_id"],
+        user_id=ctx["user_id"],
+        app_name=ctx["app_name"],
+        mode=mode,
+        run_timeout_seconds=run_timeout_seconds,
+    )
 
 
 async def sessions_spawn(
