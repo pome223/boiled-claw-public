@@ -18,6 +18,24 @@ services:
       - ./skills:/app/skills
     restart: unless-stopped
 
+  boiled-claw-mcp-sample:
+    build:
+      context: .
+      args:
+        INSTALL_BROWSER: "false"
+    container_name: boiled-claw-mcp-sample
+    env_file:
+      - .env
+    ports:
+      - "8765:8765"
+    entrypoint: ["python", "-m", "src.mcp_servers.sample_server", "--sse", "--host", "0.0.0.0", "--port", "8765"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/sse', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
   boiled-claw-cli:
     build:
       context: .
