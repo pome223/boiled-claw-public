@@ -14,8 +14,10 @@ OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベ
 - 🧠 **メモリシステム** - SQLite + ベクトル検索
 - 💬 **マルチチャネル** - Telegram, Discord, WebSocket 対応
 - 🤝 **マルチエージェント委譲** - ADK sub_agents + AgentTool + sessions_spawn
+- 🔧 **動的エージェント生成** - 実行時に MCP サーバーをアタッチしてエージェントを生成
+- 🔌 **MCP サポート** - SSE / HTTP / stdio 接続に対応したサンプル MCP サーバー同梱
 - 🔒 **セキュリティ** - 監査ログ、コマンドポリシー
-- 🔌 **拡張可能** - スキルプラグインシステム
+- 📦 **拡張可能** - スキルプラグインシステム
 - 🐳 **Docker対応** - `docker compose` で簡単デプロイ
 
 ## アーキテクチャ
@@ -27,7 +29,10 @@ boiled-claw/
 ├── Gateway (WebSocket制御プレーン: ws://127.0.0.1:18789)
 ├── Agents (Gemini 3.0 Flash ベース)
 │   ├── Root Agent (メイン)
-│   └── Sub Agents (Web, File, System, Memory, Browser)
+│   ├── Sub Agents (Web, File, System, Memory, Browser)
+│   └── Dynamic Agents (実行時生成 + MCP ツールアタッチ)
+├── MCP Servers
+│   └── Sample Server (echo, add, current_time, reverse_text)
 ├── Channels (12+ 統合可能)
 │   ├── Telegram
 │   ├── Discord
@@ -91,8 +96,11 @@ python -m src.main channels
 cp .env.example .env
 # GOOGLE_API_KEY を設定
 
-# 起動
+# Gateway のみ起動
 docker compose up -d --build boiled-claw-gateway
+
+# Gateway + サンプル MCP サーバーを起動
+docker compose up -d --build boiled-claw-gateway boiled-claw-mcp-sample
 
 # ログ確認
 docker compose logs -f boiled-claw-gateway
@@ -104,7 +112,6 @@ docker compose down
 CLI コンテナを使う場合:
 
 ```bash
-# 本家と同様に、Gatewayとは別サービスとしてCLIを起動
 docker compose --profile cli run --rm boiled-claw-cli cli
 ```
 
@@ -133,7 +140,10 @@ boiled-claw/
 │   │   ├── shell.py            # シェル実行
 │   │   ├── file_manager.py     # ファイル操作
 │   │   ├── browser.py          # ブラウザ自動化
-│   │   └── memory.py           # メモリツール
+│   │   ├── memory.py           # メモリツール
+│   │   └── subagents.py        # サブエージェント・動的エージェント管理
+│   ├── mcp_servers/
+│   │   └── sample_server.py    # サンプル MCP サーバー (FastMCP)
 │   ├── channels/
 │   │   ├── base.py             # チャネル基底クラス
 │   │   ├── registry.py         # チャネルレジストリ
@@ -151,11 +161,13 @@ boiled-claw/
 │   │   ├── loader.py           # スキルローダー
 │   │   └── base.py             # スキル基底クラス
 │   └── main.py                 # エントリーポイント
+├── tests/
+│   ├── test_sample_mcp_server.py  # MCP サーバーテスト
+│   └── ...
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
 ├── .env.example
-├── tests/
 └── README.md
 ```
 
@@ -230,11 +242,66 @@ curl -sS -X POST http://127.0.0.1:18789/agent/run \
 - **memory_search** - メモリから検索
 - **agents_list** - 利用可能なサブエージェント一覧
 - **sessions_spawn** - サブエージェントをバックグラウンド起動
+- **sessions_spawn_dynamic** - MCP サーバー付き動的エージェントを生成・起動
 - **subagents_list** - サブエージェント実行の状態確認
 - **subagents_steer** - mode=session のサブエージェントへ追加入力
 - **subagents_kill** - サブエージェント実行停止
 - **skill_list** - ロード済みスキル一覧を取得
 - **skill_execute** - 指定スキルを実行
+
+### 動的エージェント生成 (sessions_spawn_dynamic)
+
+実行時にシステムプロンプトと MCP サーバーを指定して、カスタムエージェントを動的に生成できます。
+
+```bash
+# エージェントを起動（例: サンプル MCP サーバーをアタッチ）
+curl -sS -X POST http://127.0.0.1:18789/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "my_user",
+    "message": "sessions_spawn_dynamic でエージェントを起動して。instruction=\"あなたは計算エージェントです\"、mcp_servers=[{\"type\":\"sse\",\"url\":\"http://localhost:8765/sse\"}]、task=\"100 + 200 を計算して\""
+  }'
+
+# 実行結果を確認
+curl http://127.0.0.1:18789/subagents/{session_id}
+```
+
+**MCP 接続タイプ:**
+
+| type | 説明 | 設定例 |
+|------|------|--------|
+| `sse` | SSE 接続 | `{"type": "sse", "url": "http://..."}` |
+| `http` | Streamable HTTP 接続 | `{"type": "http", "url": "http://..."}` |
+| `stdio` | サブプロセス起動 | `{"type": "stdio", "command": "npx", "args": [...]}` |
+
+### サンプル MCP サーバー
+
+`src/mcp_servers/sample_server.py` に FastMCP ベースのサンプルサーバーを同梱しています。
+
+**提供ツール:**
+
+| ツール | 説明 |
+|--------|------|
+| `echo(text)` | テキストをそのまま返す |
+| `add(a, b)` | 2数値の加算 |
+| `current_time()` | 現在日時を ISO 8601 で返す |
+| `reverse_text(text)` | テキストを逆順にする |
+
+**起動方法:**
+
+```bash
+# stdio モード（sessions_spawn_dynamic の stdio 接続用）
+python -m src.mcp_servers.sample_server
+
+# SSE モード（常駐サービスとして起動）
+python -m src.mcp_servers.sample_server --sse --port 8765
+
+# Docker で起動（docker-compose.yml に定義済み）
+docker compose up -d boiled-claw-mcp-sample
+# → http://localhost:8765/sse でアクセス可能
+```
+
+Docker ネットワーク内からは `http://boiled-claw-mcp-sample:8765/sse` で接続できます。
 
 ### Skills の使い方
 
@@ -286,6 +353,8 @@ ruff check src/
 - [x] Docker 対応
 - [x] マルチエージェント (サブエージェント)
 - [x] スキルプラグインシステム
+- [x] 動的エージェント生成 (sessions_spawn_dynamic)
+- [x] MCP サポート (SSE / HTTP / stdio) + サンプルサーバー
 - [ ] Redis セッション
 - [ ] Slack チャネル
 - [ ] WhatsApp チャネル
@@ -296,6 +365,7 @@ ruff check src/
 
 - [OpenClaw](https://github.com/openclaw/openclaw) - インスピレーション元 (1,500-2,000 ファイルの大規模TypeScriptプロジェクト)
 - [Google ADK](https://google.github.io/adk-docs/) - エージェントフレームワーク
+- [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) - ツール接続プロトコル
 
 ## ライセンス
 
