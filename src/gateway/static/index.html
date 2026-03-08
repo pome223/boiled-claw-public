@@ -74,6 +74,8 @@
             </form>
           </div>
           <aside class="inspector">
+            <h3>Approvals</h3>
+            <ul id="approvalList" class="list" style="max-height:180px;overflow-y:auto;margin-bottom:.75rem"></ul>
             <h3>Event Stream</h3>
             <div id="eventLog" class="event-log"></div>
           </aside>
@@ -141,7 +143,7 @@
             <h3>Cron Jobs</h3>
             <button id="refreshCronBtn" class="btn" type="button">Refresh</button>
           </div>
-          <p class="muted">SQLite 永続化されたスケジュールタスク。30秒ごとにチェック。</p>
+          <p class="muted">Platform cron: delivery target, retry policy, system event triggers.</p>
 
           <ul id="cronList" class="list"></ul>
 
@@ -152,13 +154,30 @@
 
           <label for="cronExpr" class="field-label">cron expression</label>
           <input id="cronExpr" class="text-input mono" placeholder="0 9 * * *" />
-          <p class="muted" style="font-size:.75rem">例: <code>*/5 * * * *</code> = 5分ごと, <code>0 9 * * *</code> = 毎日9時</p>
+          <p class="muted" style="font-size:.75rem">例: <code>*/5 * * * *</code> = 5分ごと, <code>0 9 * * *</code> = 毎日9時 (system_event 時は空でも可)</p>
 
           <label for="cronTask" class="field-label">task (エージェントへの指示)</label>
           <textarea id="cronTask" class="mono" rows="3" placeholder="最新ニュースを3件まとめて"></textarea>
 
           <label for="cronAgent" class="field-label">agent_id</label>
           <input id="cronAgent" class="text-input mono" value="web_researcher" />
+
+          <label for="cronDelivery" class="field-label">delivery_target</label>
+          <select id="cronDelivery" class="text-input mono">
+            <option value="isolated">isolated (default)</option>
+            <option value="main">main session</option>
+          </select>
+
+          <label for="cronRetries" class="field-label">max_retries</label>
+          <input id="cronRetries" class="text-input mono" type="number" value="0" min="0" max="10" />
+
+          <label for="cronSysEvent" class="field-label">system_event (optional)</label>
+          <select id="cronSysEvent" class="text-input mono">
+            <option value="">none (cron only)</option>
+            <option value="connect">connect</option>
+            <option value="disconnect">disconnect</option>
+            <option value="startup">startup</option>
+          </select>
 
           <div class="actions">
             <button id="addCronBtn" class="btn primary" type="button">Add Job</button>

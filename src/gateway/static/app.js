@@ -4,7 +4,7 @@ const NAV_META = {
   channels: { title: "Channels", subtitle: "Channel status overview" },
   skills: { title: "Skills", subtitle: "OpenClaw-style skill catalog and run" },
   memory: { title: "Memory", subtitle: "SQLite vector memory browser" },
-  cron: { title: "Cron Jobs", subtitle: "Scheduled tasks" },
+  cron: { title: "Cron Jobs", subtitle: "Scheduled tasks (platform)" },
   logs: { title: "Live Logs", subtitle: "Raw client-side event mirror" },
   settings: { title: "Settings", subtitle: "Gateway connection options" }
 };
@@ -61,9 +61,15 @@ const cronNameEl = document.getElementById("cronName");
 const cronExprEl = document.getElementById("cronExpr");
 const cronTaskEl = document.getElementById("cronTask");
 const cronAgentEl = document.getElementById("cronAgent");
+const cronDeliveryEl = document.getElementById("cronDelivery");
+const cronRetriesEl = document.getElementById("cronRetries");
+const cronSysEventEl = document.getElementById("cronSysEvent");
 const addCronBtn = document.getElementById("addCronBtn");
 const refreshCronBtn = document.getElementById("refreshCronBtn");
 const cronResultEl = document.getElementById("cronResult");
+
+// approval elements
+const approvalListEl = document.getElementById("approvalList");
 
 let socket = null;
 let waitingIndicator = null;
@@ -71,7 +77,6 @@ const sessions = [];
 let pendingMessage = null;
 const messageHistory = [];
 let currentSessionId = null;
-const SESSION_HISTORY_KEY = "boiled_claw_msg_history_v1";
 
 // --- streaming state ---
 let _streamingBubble = null;
@@ -195,26 +200,9 @@ function setRunInProgress(inProgress) {
   messageInputEl.disabled = inProgress;
 }
 
-function saveSessionHistory() {
-  if (!currentSessionId) return;
-  try {
-    const stored = JSON.parse(localStorage.getItem(SESSION_HISTORY_KEY) || "{}");
-    stored[currentSessionId] = messageHistory;
-    localStorage.setItem(SESSION_HISTORY_KEY, JSON.stringify(stored));
-  } catch (_) {}
-}
-
-function loadSessionHistory(sessionId) {
-  try {
-    const stored = JSON.parse(localStorage.getItem(SESSION_HISTORY_KEY) || "{}");
-    return stored[sessionId] || [];
-  } catch (_) { return []; }
-}
-
 function appendBubble(kind, text, { persist = true } = {}) {
   if (persist) {
     messageHistory.push({ kind, text });
-    saveSessionHistory();
   }
   const bubble = document.createElement("div");
   bubble.className = `bubble ${kind}`;
@@ -275,15 +263,49 @@ function escapeAttr(str) {
 }
 
 // -----------------------------------------------------------------------
+// Gateway history (source of truth)
+// -----------------------------------------------------------------------
+
+function requestGatewayHistory() {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify({ event: "chat.history", limit: 200 }));
+  logEvent("chat.history.request", { limit: 200 });
+}
+
+function handleChatHistory(payload) {
+  const entries = payload.entries || [];
+  if (!entries.length) {
+    logEvent("chat.history.empty", { session_id: payload.session_id });
+    return;
+  }
+  // Replace local history with Gateway transcript
+  messageHistory.length = 0;
+  entries.forEach((e) => {
+    if (e.role === "user") {
+      messageHistory.push({ kind: "user", text: e.content });
+    } else if (e.role === "assistant") {
+      const suffix = e.aborted ? " (aborted)" : "";
+      messageHistory.push({ kind: "agent", text: e.content + suffix });
+    } else if (e.role === "inject") {
+      messageHistory.push({ kind: "system", text: `[inject] ${e.content}` });
+    }
+  });
+  restoreMessages();
+  logEvent("chat.history.loaded", { count: entries.length });
+}
+
+// -----------------------------------------------------------------------
 // Sessions
 // -----------------------------------------------------------------------
 
 function getSessionSummary(sessionId) {
-  const history = loadSessionHistory(sessionId);
-  const firstUser = history.find((m) => m.kind === "user");
-  if (!firstUser) return null;
-  const text = firstUser.text.trim().replace(/\n+/g, " ");
-  return text.length > 60 ? text.slice(0, 60) + "…" : text;
+  // Try to get summary from in-memory history first
+  const firstUser = messageHistory.find((m) => m.kind === "user");
+  if (currentSessionId === sessionId && firstUser) {
+    const text = firstUser.text.trim().replace(/\n+/g, " ");
+    return text.length > 60 ? text.slice(0, 60) + "\u2026" : text;
+  }
+  return null;
 }
 
 function renderSessions() {
@@ -352,16 +374,19 @@ async function syncServerSessions() {
 function handleConnected(payload) {
   currentSessionId = payload.session_id || null;
   sessionBadgeEl.textContent = currentSessionId || "-";
+  const pv = payload.protocol_version || "?";
   addSession(currentSessionId || "unknown", payload.user_id || currentSettings().userId);
+  logEvent("protocol", { version: pv });
+  // Request history from Gateway (source of truth)
+  requestGatewayHistory();
 }
 
 function handleChatDone(payload) {
   clearWaiting();
-  // ストリーミングバブルが残っていれば確定
+  // Finalize streaming bubble if any
   if (_streamingBubble) {
     if (_streamingText) {
       messageHistory.push({ kind: "agent", text: _streamingText });
-      saveSessionHistory();
     }
     _streamingBubble = null;
     _streamingText = "";
@@ -401,6 +426,50 @@ function handleHealthTick(payload) {
 function handleCronUpdate(payload) {
   logEvent("cron.update", payload);
   addSystemMessage(`[cron] ${payload.message || payload.status}`);
+}
+
+function handleToolsApprovalRequest(payload) {
+  logEvent("tools.approval_request", payload);
+  const reqId = payload.request_id || "?";
+  const tool = payload.tool_name || "?";
+  const agent = payload.agent_name || "?";
+  const reason = payload.reason || "";
+
+  // Add to approval list UI
+  if (approvalListEl) {
+    const li = document.createElement("li");
+    li.className = "approval-item";
+    li.dataset.requestId = reqId;
+    li.innerHTML = [
+      `<div><strong>${escapeHtml(tool)}</strong> by <span class="mono">${escapeHtml(agent)}</span></div>`,
+      reason ? `<div class="muted">${escapeHtml(reason)}</div>` : "",
+      `<div class="muted mono">args: ${escapeHtml(JSON.stringify(payload.args || {}).slice(0, 120))}</div>`,
+      `<div class="memory-actions">`,
+      `<button class="btn btn-sm approve-btn" data-id="${escapeAttr(reqId)}">Approve</button>`,
+      `<button class="btn btn-sm deny-btn" data-id="${escapeAttr(reqId)}">Deny</button>`,
+      `</div>`,
+    ].join("");
+    approvalListEl.prepend(li);
+
+    li.querySelector(".approve-btn").addEventListener("click", () => {
+      sendApproval(reqId, true);
+      li.remove();
+    });
+    li.querySelector(".deny-btn").addEventListener("click", () => {
+      sendApproval(reqId, false);
+      li.remove();
+    });
+  }
+
+  addSystemMessage(`[approval] ${tool} by ${agent}: ${reason || "approval required"}`);
+}
+
+function sendApproval(requestId, approved) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  const payload = { event: "tools.approval", request_id: requestId, approved };
+  socket.send(JSON.stringify(payload));
+  logEvent("tools.approval.sent", { request_id: requestId, approved });
+  addSystemMessage(`[approval] ${requestId}: ${approved ? "approved" : "denied"}`);
 }
 
 // -----------------------------------------------------------------------
@@ -497,7 +566,7 @@ async function fetchMemory() {
     if (res.ok) {
       const data = await res.json();
       const s = data.stats || {};
-      memoryStatsEl.textContent = `${s.total_memories ?? "-"}件 / embeddings: ${s.with_embedding ?? "-"}件`;
+      memoryStatsEl.textContent = `${s.total_memories ?? "-"}\u4ef6 / embeddings: ${s.with_embedding ?? "-"}\u4ef6`;
     }
   } catch (_) { memoryStatsEl.textContent = "(stats unavailable)"; }
 
@@ -558,7 +627,7 @@ async function deleteMemory(id) {
 }
 
 // -----------------------------------------------------------------------
-// Cron
+// Cron (platform)
 // -----------------------------------------------------------------------
 
 function renderCronJobs(jobs) {
@@ -572,10 +641,16 @@ function renderCronJobs(jobs) {
       : `<span class="tag" style="opacity:.5">disabled</span>`;
     const lastRun = j.last_run ? new Date(j.last_run * 1000).toLocaleString() : "-";
     const nextRun = j.next_run ? new Date(j.next_run * 1000).toLocaleString() : "-";
+    const deliveryTag = j.delivery_target && j.delivery_target !== "isolated"
+      ? ` <span class="tag">${escapeHtml(j.delivery_target)}</span>` : "";
+    const retryInfo = j.max_retries > 0
+      ? ` retries: ${j.retry_count || 0}/${j.max_retries}` : "";
+    const sysEvent = j.system_event
+      ? ` <span class="tag">on:${escapeHtml(j.system_event)}</span>` : "";
     return [
       `<li class="cron-item" data-job-id="${escapeAttr(j.id)}">`,
-      `<div><strong>${escapeHtml(j.name)}</strong> ${statusTag}</div>`,
-      `<div class="muted mono">${escapeHtml(j.cron_expr)} | agent: ${escapeHtml(j.agent_id)}</div>`,
+      `<div><strong>${escapeHtml(j.name)}</strong> ${statusTag}${deliveryTag}${sysEvent}</div>`,
+      `<div class="muted mono">${escapeHtml(j.cron_expr)} | agent: ${escapeHtml(j.agent_id)}${retryInfo}</div>`,
       `<div class="muted">${escapeHtml(j.task)}</div>`,
       `<div class="muted mono">last: ${escapeHtml(lastRun)} | next: ${escapeHtml(nextRun)} | runs: ${j.run_count}</div>`,
       j.last_error ? `<div class="muted mono" style="color:#f87171">error: ${escapeHtml(j.last_error)}</div>` : "",
@@ -618,18 +693,27 @@ async function addCronJob() {
   const cron_expr = (cronExprEl.value || "").trim();
   const task = (cronTaskEl.value || "").trim();
   const agent_id = (cronAgentEl.value || "web_researcher").trim();
+  const delivery_target = cronDeliveryEl ? (cronDeliveryEl.value || "isolated").trim() : "isolated";
+  const max_retries = cronRetriesEl ? parseInt(cronRetriesEl.value || "0", 10) : 0;
+  const system_event = cronSysEventEl ? (cronSysEventEl.value || "").trim() || null : null;
 
-  if (!name || !cron_expr || !task) {
-    cronResultEl.textContent = "name, cron_expr, task are required";
+  if (!name || !task) {
+    cronResultEl.textContent = "name and task are required";
+    return;
+  }
+  if (!system_event && !cron_expr) {
+    cronResultEl.textContent = "cron_expr is required (unless system_event is set)";
     return;
   }
 
   try {
-    logEvent("cron.add.start", { name, cron_expr });
+    logEvent("cron.add.start", { name, cron_expr, system_event });
+    const body = { name, cron_expr, task, agent_id, delivery_target, max_retries };
+    if (system_event) body.system_event = system_event;
     const res = await apiFetch(`${base}/cron`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, cron_expr, task, agent_id })
+      body: JSON.stringify(body)
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data?.detail || `HTTP ${res.status}`);
@@ -698,8 +782,6 @@ function activateTab(tabKey) {
 function switchSession(targetSessionId) {
   if (socket) socket.close();
   messageHistory.length = 0;
-  const saved = loadSessionHistory(targetSessionId);
-  saved.forEach((m) => messageHistory.push(m));
   restoreMessages();
   connect(targetSessionId);
 }
@@ -754,13 +836,15 @@ function connect(targetSessionId = null) {
 
       const evName = payload.event || payload.type || "";
 
-      // --- typed new protocol ---
+      // --- typed protocol v1 ---
       if (evName === "connected") { handleConnected(payload); return; }
       if (evName === "chat.done") { handleChatDone(payload); return; }
       if (evName === "chat.token") { handleChatToken(payload); return; }
+      if (evName === "chat.history") { handleChatHistory(payload); return; }
       if (evName === "system.event") { handleSystemEvent(payload); return; }
       if (evName === "health.tick") { handleHealthTick(payload); return; }
       if (evName === "cron.update") { handleCronUpdate(payload); return; }
+      if (evName === "tools.approval_request") { handleToolsApprovalRequest(payload); return; }
 
       // --- backward compat ---
       if (evName === "agent_message") {
@@ -797,7 +881,6 @@ function sendMessage(text) {
     connect();
     return;
   }
-  // 新プロトコル
   const payload = { event: "chat.send", text };
   socket.send(JSON.stringify(payload));
   logEvent("socket.send", payload);

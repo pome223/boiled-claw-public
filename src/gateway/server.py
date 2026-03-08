@@ -1,9 +1,11 @@
 """
-WebSocketゲートウェイサーバー
+WebSocket Gateway Server
 
-Typed event protocol:
-  Client → Server: chat.send / chat.abort / presence.ping
-  Server → Client: connected / chat.done / system.event / health.tick / cron.update
+Typed Gateway Protocol v1:
+  Client -> Server: chat.send / chat.inject / chat.abort / chat.history /
+                    presence.ping / tools.approval
+  Server -> Client: connected / chat.done / chat.token / chat.history /
+                    system.event / health.tick / cron.update / tools.approval_request
 """
 
 import asyncio
@@ -23,15 +25,19 @@ from pathlib import Path
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
 from src.security.audit import get_audit_logger, AuditEventType
+from src.security.tool_policy import get_tool_policy_engine
 from src.tools.finance import is_direct_stock_price_query, stock_price
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
 from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
 from src.tools.memory import memory_search, memory_stats, memory_delete
 from src.tools.subagents import get_subagent_manager, set_subagent_notifier
-from src.gateway.events import (
-    ev_connected, ev_chat_done, ev_system_event,
-    ev_health_tick, ev_cron_update,
+from src.gateway.protocol import (
+    PROTOCOL_VERSION,
+    ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
+    ev_health_tick, ev_cron_update, ev_tools_approval_request,
+    normalize_client_event, make_request_id,
 )
+from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 
 _HEARTBEAT_INTERVAL = 30  # seconds
@@ -39,18 +45,26 @@ _AGENT_TIMEOUT = 120       # seconds
 
 
 class ConnectionManager:
-    """WebSocket 接続 + 実行中タスクの管理"""
+    """WebSocket connection + running task management"""
 
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
+        # session_id -> user_id mapping for system event routing
+        self._session_users: Dict[str, str] = {}
 
-    async def connect(self, websocket: WebSocket, session_id: str) -> None:
+    async def connect(self, websocket: WebSocket, session_id: str, user_id: str = "") -> None:
         await websocket.accept()
         self.active_connections[session_id] = websocket
+        if user_id:
+            self._session_users[session_id] = user_id
 
     def disconnect(self, session_id: str) -> None:
         self.active_connections.pop(session_id, None)
+        self._session_users.pop(session_id, None)
+
+    def get_user_id(self, session_id: str) -> Optional[str]:
+        return self._session_users.get(session_id)
 
     async def send_json(self, session_id: str, data: dict) -> None:
         ws = self.active_connections.get(session_id)
@@ -86,10 +100,10 @@ class ConnectionManager:
 
 
 class GatewayServer:
-    """ゲートウェイサーバー"""
+    """Gateway server with typed protocol, transcript, cron platform, and tool security."""
 
     def __init__(self):
-        self.app = FastAPI(title="boiled-claw Gateway", version="0.2.0")
+        self.app = FastAPI(title="boiled-claw Gateway", version="0.3.0")
         self.settings = get_settings()
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
@@ -101,6 +115,8 @@ class GatewayServer:
             session_service=self.session_service,
         )
         self.audit_logger = get_audit_logger()
+        self.transcript = get_transcript_store()
+        self.tool_policy = get_tool_policy_engine()
         self._heartbeat_task: Optional[asyncio.Task] = None
 
         self.app.add_middleware(
@@ -116,7 +132,7 @@ class GatewayServer:
             api_key = self.settings.gateway_api_key
             if not api_key:
                 return await call_next(request)
-            public_prefixes = ("/health", "/chat-static", "/chat")
+            public_prefixes = ("/health", "/chat-static", "/chat", "/protocol")
             if any(request.url.path.startswith(p) for p in public_prefixes) or request.url.path == "/":
                 return await call_next(request)
             token = (
@@ -134,7 +150,7 @@ class GatewayServer:
             name="chat_static",
         )
 
-        # subagent → WS notifier
+        # subagent -> WS notifier
         async def _subagent_notifier(payload: Dict[str, Any]) -> None:
             session_id = payload.get("requester_session_id")
             if not session_id:
@@ -150,7 +166,7 @@ class GatewayServer:
 
         set_subagent_notifier(_subagent_notifier)
 
-        # cron → WS broadcast notifier
+        # cron -> WS broadcast notifier
         async def _cron_notifier(payload: Dict[str, Any]) -> None:
             event = ev_cron_update(
                 job_id=payload.get("job_id", ""),
@@ -178,6 +194,8 @@ class GatewayServer:
             scheduler.set_spawn_fn(self.subagent_manager.spawn)
             scheduler.set_notifier(self._cron_notifier_fn)
             scheduler.start()
+            # Fire startup system event jobs
+            await scheduler.fire_system_event("startup")
 
         @self.app.on_event("shutdown")
         async def shutdown_event():
@@ -186,13 +204,14 @@ class GatewayServer:
                 self._heartbeat_task.cancel()
             await get_scheduler().shutdown()
 
-        # --- health / root ---
+        # --- health / root / protocol ---
 
         @self.app.get("/")
         async def root():
             return {
                 "name": "boiled-claw Gateway",
-                "version": "0.2.0",
+                "version": "0.3.0",
+                "protocol_version": PROTOCOL_VERSION,
                 "status": "running",
                 "active_sessions": len(self.manager.active_connections),
                 "skills_loaded": get_skills_report().get("loaded", False),
@@ -202,6 +221,15 @@ class GatewayServer:
         @self.app.get("/health")
         async def health():
             return {"status": "healthy"}
+
+        @self.app.get("/protocol")
+        async def protocol_info():
+            from src.gateway.protocol import EVENT_SCHEMAS
+            return {
+                "version": PROTOCOL_VERSION,
+                "events": list(EVENT_SCHEMAS.keys()),
+                "schemas": EVENT_SCHEMAS,
+            }
 
         # --- skills ---
 
@@ -232,6 +260,26 @@ class GatewayServer:
             sessions = response.sessions or []
             return {"sessions": [{"id": s.id} for s in sessions]}
 
+        # --- transcript / history ---
+
+        @self.app.get("/sessions/{user_id}/{session_id}/history")
+        async def get_session_history(
+            user_id: str,
+            session_id: str,
+            limit: int = Query(default=100, ge=1, le=500),
+            before: Optional[float] = Query(default=None),
+        ):
+            entries = self.transcript.get_history(session_id, limit=limit, before=before)
+            return {
+                "session_id": session_id,
+                "entries": [e.to_dict() for e in entries],
+                "count": len(entries),
+            }
+
+        @self.app.get("/transcript/sessions")
+        async def list_transcript_sessions(limit: int = Query(default=50, ge=1, le=200)):
+            return {"sessions": self.transcript.list_sessions(limit=limit)}
+
         # --- agent/run (HTTP) ---
 
         @self.app.post("/agent/run")
@@ -256,7 +304,17 @@ class GatewayServer:
                     app_name="boiled-claw", user_id=user_id,
                 )
 
+            # Record user message in transcript
+            self.transcript.append(session.id, "user", message)
+
             result = await self._run_agent_http(user_id, session.id, message)
+
+            # Record assistant response in transcript
+            self.transcript.append(
+                session.id, "assistant", result["message"],
+                metadata={"type": result["type"]},
+            )
+
             return {
                 "ok": result["type"] == "agent_message",
                 "type": result["type"],
@@ -328,6 +386,10 @@ class GatewayServer:
                     cron_expr=str(body.get("cron_expr") or ""),
                     task=str(body.get("task") or ""),
                     agent_id=str(body.get("agent_id") or "web_researcher"),
+                    delivery_target=str(body.get("delivery_target") or "isolated"),
+                    max_retries=int(body.get("max_retries") or 0),
+                    retry_delay=int(body.get("retry_delay") or 30),
+                    system_event=body.get("system_event") or None,
                 )
                 return {"ok": True, "job": job.to_dict()}
             except ValueError as e:
@@ -347,6 +409,16 @@ class GatewayServer:
             if not job:
                 raise HTTPException(status_code=404, detail="job not found")
             return {"ok": True, "job": job.to_dict()}
+
+        # --- tool policy ---
+
+        @self.app.get("/tools/policy")
+        async def tool_policy_list():
+            return self.tool_policy.list_policies()
+
+        @self.app.get("/tools/approvals")
+        async def tool_approvals_list(session_id: Optional[str] = None):
+            return {"approvals": self.tool_policy.list_pending_approvals(session_id)}
 
         # --- static / chat UI ---
 
@@ -381,7 +453,7 @@ class GatewayServer:
                 )
             session_id = session.id
 
-            await self.manager.connect(websocket, session_id)
+            await self.manager.connect(websocket, session_id, user_id)
             self.audit_logger.log(
                 event_type=AuditEventType.SESSION_START,
                 user_id=user_id,
@@ -391,33 +463,99 @@ class GatewayServer:
             )
 
             try:
+                # Send connected event with protocol version
                 await self.manager.send_json(session_id, ev_connected(session_id, user_id))
 
-                while True:
-                    data = await websocket.receive_json()
-                    # 新プロトコル: "event" フィールド / 旧プロトコル: "type" フィールド
-                    event_name = data.get("event") or data.get("type", "")
+                # Fire connect system event for cron jobs
+                asyncio.create_task(
+                    get_scheduler().fire_system_event("connect", {
+                        "user_id": user_id, "session_id": session_id,
+                    }),
+                    name=f"sys:connect:{session_id}",
+                )
 
-                    if event_name in ("chat.send", "message"):
-                        text = (data.get("text") or data.get("message") or "").strip()
+                while True:
+                    raw_data = await websocket.receive_json()
+                    data = normalize_client_event(raw_data)
+                    event_name = data.get("event", "")
+
+                    if event_name == "chat.send":
+                        text = (data.get("text") or "").strip()
                         request_id = data.get("request_id")
                         if text:
+                            # Record user message in transcript
+                            self.transcript.append(
+                                session_id, "user", text,
+                                request_id=request_id,
+                            )
                             await self._start_agent_run(session_id, user_id, text, request_id)
+
+                    elif event_name == "chat.inject":
+                        text = (data.get("text") or "").strip()
+                        role = data.get("role", "system")
+                        request_id = data.get("request_id")
+                        if text:
+                            self.transcript.append(
+                                session_id, "inject", text,
+                                request_id=request_id,
+                                metadata={"role": role},
+                            )
+                            await self.manager.send_json(
+                                session_id,
+                                ev_system_event(
+                                    source="inject",
+                                    status="ok",
+                                    message=f"Injected {role} message into transcript",
+                                ),
+                            )
 
                     elif event_name == "chat.abort":
                         request_id = data.get("request_id")
                         aborted = await self.manager.abort(session_id)
                         if not aborted:
-                            # 既に完了 or 実行中タスクなし
                             await self.manager.send_json(
                                 session_id,
                                 ev_chat_done("", request_id, aborted=False),
                             )
 
-                    elif event_name in ("presence.ping", "ping"):
+                    elif event_name == "chat.history":
+                        request_id = data.get("request_id")
+                        target_session = data.get("session_id") or session_id
+                        limit = min(int(data.get("limit") or 100), 500)
+                        before = data.get("before")
+                        entries = self.transcript.get_history(
+                            target_session, limit=limit, before=before,
+                        )
+                        await self.manager.send_json(
+                            session_id,
+                            ev_chat_history(
+                                [e.to_dict() for e in entries],
+                                target_session,
+                                request_id,
+                            ),
+                        )
+
+                    elif event_name == "presence.ping":
                         await self.manager.send_json(
                             session_id,
                             ev_health_tick(len(self.manager.active_connections)),
+                        )
+
+                    elif event_name == "tools.approval":
+                        request_id = data.get("request_id", "")
+                        approved = bool(data.get("approved", False))
+                        reason = data.get("reason", "")
+                        result = self.tool_policy.resolve_approval(
+                            request_id, approved, reason,
+                        )
+                        status = "resolved" if result else "not_found"
+                        await self.manager.send_json(
+                            session_id,
+                            ev_system_event(
+                                source="tools.approval",
+                                status=status,
+                                message=f"Approval {request_id}: {'approved' if approved else 'denied'}",
+                            ),
                         )
 
             except WebSocketDisconnect:
@@ -439,6 +577,13 @@ class GatewayServer:
                     action="disconnect",
                     result="success",
                 )
+                # Fire disconnect system event for cron jobs
+                asyncio.create_task(
+                    get_scheduler().fire_system_event("disconnect", {
+                        "user_id": user_id, "session_id": session_id,
+                    }),
+                    name=f"sys:disconnect:{session_id}",
+                )
 
     # ------------------------------------------------------------------
     # agent execution
@@ -451,7 +596,7 @@ class GatewayServer:
         message: str,
         request_id: Optional[str] = None,
     ) -> None:
-        """既存のタスクを abort してから新しいエージェント実行タスクを起動する。"""
+        """Abort existing task then start a new agent run."""
         await self.manager.abort(session_id)
         task = asyncio.create_task(
             self._agent_run_task(session_id, user_id, message, request_id),
@@ -466,10 +611,10 @@ class GatewayServer:
         message: str,
         request_id: Optional[str] = None,
     ) -> None:
-        """エージェントを実行し、結果を chat.done で送信する。abort 時は aborted=True。"""
+        """Run agent and send chat.done. On abort, persist partial + aborted flag."""
         partial = ""
         try:
-            # 株価ショートカット
+            # Stock price shortcut
             if is_direct_stock_price_query(message):
                 quote = await stock_price(message)
                 if quote.get("ok"):
@@ -484,6 +629,11 @@ class GatewayServer:
                     )
                 else:
                     partial = quote.get("message", "株価データを取得できませんでした。")
+
+                self.transcript.append(
+                    session_id, "assistant", partial,
+                    request_id=request_id,
+                )
                 await self.manager.send_json(session_id, ev_chat_done(partial, request_id))
                 return
 
@@ -511,9 +661,20 @@ class GatewayServer:
                 user_id=user_id,
                 session_id=session_id,
             )
+            # Persist to transcript
+            self.transcript.append(
+                session_id, "assistant", partial,
+                request_id=request_id,
+            )
             await self.manager.send_json(session_id, ev_chat_done(partial, request_id, aborted=False))
 
         except asyncio.CancelledError:
+            # Persist partial + aborted flag to transcript
+            self.transcript.append(
+                session_id, "assistant", partial,
+                request_id=request_id,
+                aborted=True,
+            )
             await self.manager.send_json(
                 session_id,
                 ev_chat_done(partial, request_id, aborted=True),
@@ -524,20 +685,31 @@ class GatewayServer:
             msg = f"Agent timed out after {_AGENT_TIMEOUT} seconds."
             self.audit_logger.log_error(error=msg, user_id=user_id, session_id=session_id,
                                         context={"reason": "timeout"})
+            self.transcript.append(
+                session_id, "assistant", msg,
+                request_id=request_id,
+                metadata={"error": "timeout"},
+            )
             await self.manager.send_json(session_id, ev_chat_done(msg, request_id, aborted=False))
 
         except Exception as exc:
             self.audit_logger.log_error(error=str(exc), user_id=user_id, session_id=session_id,
                                         context={"message": message})
+            error_msg = f"Error: {exc}"
+            self.transcript.append(
+                session_id, "assistant", error_msg,
+                request_id=request_id,
+                metadata={"error": str(exc)},
+            )
             await self.manager.send_json(
                 session_id,
-                ev_chat_done(f"Error: {exc}", request_id, aborted=False),
+                ev_chat_done(error_msg, request_id, aborted=False),
             )
 
         finally:
             self.manager.clear_task(session_id)
 
-    # HTTP 用エージェント実行（abort 不要）
+    # HTTP agent execution (no abort support)
     async def _run_agent_http(self, user_id: str, session_id: str, message: str) -> dict:
         if is_direct_stock_price_query(message):
             quote = await stock_price(message)
