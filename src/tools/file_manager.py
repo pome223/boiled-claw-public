@@ -3,8 +3,49 @@
 """
 
 from pathlib import Path
+from typing import Optional
+
+from google.adk.agents.context import Context as ToolContext
 
 from src.security.policy import get_security_policy
+from src.security.tool_policy import get_tool_policy_engine
+
+
+def _resolve_tool_context(tool_context: Optional[ToolContext]) -> dict[str, str]:
+    session = getattr(tool_context, "session", None)
+    return {
+        "agent_name": getattr(tool_context, "agent_name", None) or "unknown_agent",
+        "session_id": getattr(session, "id", None) or "",
+    }
+
+
+async def _check_write_policy(
+    path: str,
+    content: str,
+    tool_context: Optional[ToolContext],
+) -> Optional[str]:
+    if tool_context is None:
+        return None
+
+    ctx = _resolve_tool_context(tool_context)
+    engine = get_tool_policy_engine()
+    action, reason = engine.evaluate(ctx["agent_name"], "write_file")
+    if action == "allow":
+        return None
+    if action == "deny":
+        return f"Tool blocked by policy: {reason}"
+
+    approved, response_reason = await engine.request_approval(
+        tool_name="write_file",
+        agent_name=ctx["agent_name"],
+        args={"path": str(Path(path).expanduser()), "size": len(content)},
+        session_id=ctx["session_id"],
+        reason=reason,
+    )
+    if approved:
+        return None
+    detail = response_reason or reason or "user rejected"
+    return f"Tool approval denied: {detail}"
 
 
 async def read_file(path: str) -> dict:
@@ -38,7 +79,11 @@ async def read_file(path: str) -> dict:
         return {"error": str(e)}
 
 
-async def write_file(path: str, content: str) -> dict:
+async def write_file(
+    path: str,
+    content: str,
+    tool_context: Optional[ToolContext] = None,
+) -> dict:
     """
     ファイルに書き込む
 
@@ -53,6 +98,13 @@ async def write_file(path: str, content: str) -> dict:
     allowed, reason = policy.is_path_allowed(path, "write")
     if not allowed:
         return {"error": f"Access denied: {reason}"}
+    content_allowed, content_reason = policy.validate_file_content(content, path)
+    if not content_allowed:
+        return {"error": f"Content blocked by security policy: {content_reason}"}
+
+    approval_error = await _check_write_policy(path, content, tool_context)
+    if approval_error:
+        return {"error": approval_error}
 
     try:
         file_path = Path(path).expanduser().resolve()

@@ -16,7 +16,7 @@ import json
 import sqlite3
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional
 
@@ -306,13 +306,20 @@ class CronScheduler:
             task_with_ctx = f"[system_event:{event_name}] {job.task}"
             if ctx:
                 task_with_ctx += f"\n[context: {json.dumps(ctx, ensure_ascii=False)[:200]}]"
-            # Create a modified copy for execution
-            job.task = task_with_ctx
-            asyncio.create_task(self._run_job(job), name=f"cron:sys:{row[0]}")
+            runtime_job = replace(job, task=task_with_ctx)
+            asyncio.create_task(
+                self._run_job(runtime_job, trigger_context=ctx),
+                name=f"cron:sys:{row[0]}",
+            )
             count += 1
         return count
 
-    async def _run_job(self, job: CronJob, retry_attempt: int = 0) -> None:
+    async def _run_job(
+        self,
+        job: CronJob,
+        retry_attempt: int = 0,
+        trigger_context: Optional[Dict[str, Any]] = None,
+    ) -> None:
         # 次回実行時刻を先に更新してから実行（重複起動防止）
         if not job.system_event:
             next_run = self._next_ts(job.cron_expr)
@@ -328,18 +335,23 @@ class CronScheduler:
         self._conn.commit()
 
         retry_label = f" (retry {retry_attempt}/{job.max_retries})" if retry_attempt > 0 else ""
-        await self._notify(job.id, "running", f"[cron:{job.name}] started{retry_label}")
+        requester_session_id = f"cron_{job.id}"
+        mode = "run"
+        if job.delivery_target.startswith("session:"):
+            requester_session_id = job.delivery_target.removeprefix("session:")
+        elif job.delivery_target == "main" and trigger_context and trigger_context.get("session_id"):
+            requester_session_id = str(trigger_context["session_id"])
+
+        await self._notify(
+            job.id,
+            "running",
+            f"[cron:{job.name}] started{retry_label}",
+            requester_session_id=requester_session_id,
+            delivery_target=job.delivery_target,
+        )
 
         if self._spawn_fn is None:
             return
-
-        # Determine session routing
-        requester_session_id = f"cron_{job.id}"
-        mode = "run"
-        if job.delivery_target == "main":
-            mode = "run"
-        elif job.delivery_target.startswith("session:"):
-            requester_session_id = job.delivery_target.removeprefix("session:")
 
         try:
             result = await self._spawn_fn(
@@ -357,25 +369,57 @@ class CronScheduler:
             )
             self._conn.commit()
             run_id = result.get("run_id", "?")
-            await self._notify(job.id, "accepted", f"[cron:{job.name}] spawned run_id={run_id}")
+            await self._notify(
+                job.id,
+                "accepted",
+                f"[cron:{job.name}] spawned run_id={run_id}",
+                requester_session_id=requester_session_id,
+                delivery_target=job.delivery_target,
+            )
         except Exception as exc:
             self._conn.execute(
                 "UPDATE cron_jobs SET last_error = ?, retry_count = ? WHERE id = ?",
                 (str(exc), retry_attempt + 1, job.id),
             )
             self._conn.commit()
-            await self._notify(job.id, "failed", f"[cron:{job.name}] error: {exc}")
+            await self._notify(
+                job.id,
+                "failed",
+                f"[cron:{job.name}] error: {exc}",
+                requester_session_id=requester_session_id,
+                delivery_target=job.delivery_target,
+            )
 
             # Retry logic
             if retry_attempt < job.max_retries:
                 await asyncio.sleep(job.retry_delay)
-                await self._run_job(job, retry_attempt + 1)
+                await self._run_job(
+                    job,
+                    retry_attempt + 1,
+                    trigger_context=trigger_context,
+                )
 
-    async def _notify(self, job_id: str, status: str, message: str) -> None:
+    async def _notify(
+        self,
+        job_id: str,
+        status: str,
+        message: str,
+        *,
+        requester_session_id: str = "",
+        delivery_target: str = "isolated",
+    ) -> None:
         if self._notifier is None:
             return
         try:
-            await self._notifier({"job_id": job_id, "status": status, "message": message})
+            await self._notifier(
+                {
+                    "job_id": job_id,
+                    "status": status,
+                    "message": message,
+                    "requester_session_id": requester_session_id,
+                    "delivery_target": delivery_target,
+                }
+            )
         except Exception:
             pass
 

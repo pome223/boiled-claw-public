@@ -4,11 +4,56 @@
 
 import asyncio
 import shlex
+from typing import Any, Optional
+
+from google.adk.agents.context import Context as ToolContext
 
 from src.security.policy import get_security_policy
+from src.security.tool_policy import get_tool_policy_engine
 
 
-async def run_shell(command: str, timeout: int = 30) -> dict:
+def _resolve_tool_context(tool_context: Optional[ToolContext]) -> dict[str, str]:
+    session = getattr(tool_context, "session", None)
+    return {
+        "agent_name": getattr(tool_context, "agent_name", None) or "unknown_agent",
+        "session_id": getattr(session, "id", None) or "",
+    }
+
+
+async def _check_tool_policy(
+    tool_name: str,
+    args: dict[str, Any],
+    tool_context: Optional[ToolContext],
+) -> Optional[str]:
+    if tool_context is None:
+        return None
+
+    ctx = _resolve_tool_context(tool_context)
+    engine = get_tool_policy_engine()
+    action, reason = engine.evaluate(ctx["agent_name"], tool_name)
+    if action == "allow":
+        return None
+    if action == "deny":
+        return f"Tool blocked by policy: {reason}"
+
+    approved, response_reason = await engine.request_approval(
+        tool_name=tool_name,
+        agent_name=ctx["agent_name"],
+        args=args,
+        session_id=ctx["session_id"],
+        reason=reason,
+    )
+    if approved:
+        return None
+    detail = response_reason or reason or "user rejected"
+    return f"Tool approval denied: {detail}"
+
+
+async def run_shell(
+    command: str,
+    timeout: int = 30,
+    tool_context: Optional[ToolContext] = None,
+) -> dict:
     """
     シェルコマンドを安全に実行する。
     パイプ・リダイレクトは非対応（シェルインジェクション防止のため subprocess_exec を使用）。
@@ -28,6 +73,19 @@ async def run_shell(command: str, timeout: int = 30) -> dict:
     if not allowed:
         return {
             "error": f"Command blocked by security policy: {reason}",
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
+        }
+
+    approval_error = await _check_tool_policy(
+        "run_shell",
+        {"command": normalized, "timeout": timeout},
+        tool_context,
+    )
+    if approval_error:
+        return {
+            "error": approval_error,
             "stdout": "",
             "stderr": "",
             "return_code": -1,

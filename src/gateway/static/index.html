@@ -85,7 +85,7 @@
       <section id="tab-sessions" class="tab">
         <div class="panel">
           <h3>Sessions</h3>
-          <p class="muted">Current and recent sessions in this browser.</p>
+          <p class="muted">Gateway-owned transcript sessions for the current user.</p>
           <ul id="sessionList" class="list"></ul>
         </div>
       </section>
@@ -165,7 +165,7 @@
           <label for="cronDelivery" class="field-label">delivery_target</label>
           <select id="cronDelivery" class="text-input mono">
             <option value="isolated">isolated (default)</option>
-            <option value="main">main session</option>
+            <option value="main">current connected session</option>
           </select>
 
           <label for="cronRetries" class="field-label">max_retries</label>
