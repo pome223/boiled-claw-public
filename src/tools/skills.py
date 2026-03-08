@@ -6,10 +6,13 @@ Skills ツール
 from __future__ import annotations
 
 import json
-from typing import Any, Dict
+from typing import Any, Dict, Optional
+
+from google.adk.agents.context import Context as ToolContext
 
 from src.skills.base import get_skill_registry
 from src.skills.runtime import ensure_skills_loaded
+from src.tools.subagents import sessions_spawn_dynamic
 
 
 async def skill_list() -> Dict[str, Any]:
@@ -32,7 +35,7 @@ async def skill_list() -> Dict[str, Any]:
 
 async def skill_execute(name: str, params_json: str = "{}") -> Dict[str, Any]:
     """
-    スキルを実行する
+    スキルを実行する（内容確認・メタ情報取得用）
 
     Args:
         name: スキル名
@@ -58,3 +61,52 @@ async def skill_execute(name: str, params_json: str = "{}") -> Dict[str, Any]:
     result = await skill.execute(**params)
     return {"ok": True, "skill": name, "result": result}
 
+
+async def skill_spawn(
+    name: str,
+    task: str,
+    mcp_servers: str = "[]",
+    mode: str = "run",
+    run_timeout_seconds: int = 0,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    """
+    スキルの内容を instruction とした動的 Agent を生成してタスクを実行する。
+    複雑・長時間のタスクや、スキル特化の動作が必要な場合に使う。
+    この関数は skill_execute() と違い、execute() の返り値 `content` を
+    instruction として取り出して spawn に渡す。
+
+    Args:
+        name: スキル名
+        task: スキル Agent に与えるタスク
+        mcp_servers: 追加 MCP サーバー設定(JSON配列文字列)
+        mode: "run"（1回実行）/ "session"（継続セッション）
+        run_timeout_seconds: タイムアウト秒数（0=無制限）
+    """
+    await ensure_skills_loaded()
+    registry = get_skill_registry()
+    skill = registry.get_skill(name)
+    if not skill:
+        return {"ok": False, "message": f"Skill not found: {name}"}
+
+    # スキルのコンテンツを取得して instruction として使用
+    result = await skill.execute(task=task)
+    instruction = result.get("content", "").strip()
+    if not instruction:
+        return {"ok": False, "message": f"Skill has no content to use as instruction: {name}"}
+
+    spawn = await sessions_spawn_dynamic(
+        task=task,
+        instruction=instruction,
+        mcp_servers=mcp_servers,
+        mode=mode,
+        run_timeout_seconds=run_timeout_seconds,
+        tool_context=tool_context,
+    )
+    ok = spawn.get("status") != "error"
+    return {
+        "ok": ok,
+        "skill": name,
+        "spawn": spawn,
+        **({"message": spawn.get("error")} if not ok else {}),
+    }
