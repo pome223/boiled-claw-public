@@ -274,11 +274,6 @@ function requestGatewayHistory() {
 
 function handleChatHistory(payload) {
   const entries = payload.entries || [];
-  if (!entries.length) {
-    logEvent("chat.history.empty", { session_id: payload.session_id });
-    return;
-  }
-  // Replace local history with Gateway transcript
   messageHistory.length = 0;
   entries.forEach((e) => {
     if (e.role === "user") {
@@ -286,11 +281,18 @@ function handleChatHistory(payload) {
     } else if (e.role === "assistant") {
       const suffix = e.aborted ? " (aborted)" : "";
       messageHistory.push({ kind: "agent", text: e.content + suffix });
+    } else if (e.role === "system") {
+      messageHistory.push({ kind: "system", text: e.content });
     } else if (e.role === "inject") {
-      messageHistory.push({ kind: "system", text: `[inject] ${e.content}` });
+      const role = e.metadata?.role || "system";
+      messageHistory.push({ kind: "system", text: `[inject:${role}] ${e.content}` });
     }
   });
   restoreMessages();
+  if (!entries.length) {
+    logEvent("chat.history.empty", { session_id: payload.session_id });
+    return;
+  }
   logEvent("chat.history.loaded", { count: entries.length });
 }
 
@@ -299,13 +301,8 @@ function handleChatHistory(payload) {
 // -----------------------------------------------------------------------
 
 function getSessionSummary(sessionId) {
-  // Try to get summary from in-memory history first
-  const firstUser = messageHistory.find((m) => m.kind === "user");
-  if (currentSessionId === sessionId && firstUser) {
-    const text = firstUser.text.trim().replace(/\n+/g, " ");
-    return text.length > 60 ? text.slice(0, 60) + "\u2026" : text;
-  }
-  return null;
+  const session = sessions.find((s) => s.id === sessionId);
+  return session?.preview || null;
 }
 
 function renderSessions() {
@@ -338,10 +335,18 @@ function addSession(sessionId, userId) {
   if (existing) {
     existing.when = new Date().toLocaleString();
     existing.userId = userId;
+    existing.lastActivity = Date.now() / 1000;
     sessions.splice(sessions.indexOf(existing), 1);
     sessions.unshift(existing);
   } else {
-    sessions.unshift({ id: sessionId, userId, when: new Date().toLocaleString() });
+    sessions.unshift({
+      id: sessionId,
+      userId,
+      when: new Date().toLocaleString(),
+      preview: "",
+      entryCount: 0,
+      lastActivity: Date.now() / 1000
+    });
     if (sessions.length > 15) sessions.length = 15;
   }
   renderSessions();
@@ -355,14 +360,33 @@ async function syncServerSessions() {
     const res = await apiFetch(`${base}/sessions/${encodeURIComponent(userId)}`);
     if (!res.ok) return;
     const data = await res.json();
-    const serverIds = new Set((data.sessions || []).map((s) => s.id));
-    (data.sessions || []).forEach((s) => {
-      if (!sessions.find((x) => x.id === s.id)) {
-        sessions.push({ id: s.id, userId, when: "(server)" });
+    const serverSessions = Array.isArray(data.sessions) ? data.sessions : [];
+    const serverIds = new Set(serverSessions.map((s) => s.id));
+    serverSessions.forEach((s) => {
+      const existing = sessions.find((x) => x.id === s.id);
+      const when = s.last_activity
+        ? new Date(s.last_activity * 1000).toLocaleString()
+        : "(server)";
+      if (existing) {
+        existing.userId = s.user_id || userId;
+        existing.when = when;
+        existing.preview = s.preview || "";
+        existing.entryCount = s.entry_count || 0;
+        existing.lastActivity = s.last_activity || 0;
+      } else {
+        sessions.push({
+          id: s.id,
+          userId: s.user_id || userId,
+          when,
+          preview: s.preview || "",
+          entryCount: s.entry_count || 0,
+          lastActivity: s.last_activity || 0
+        });
       }
     });
     const toRemove = sessions.filter((s) => !serverIds.has(s.id));
     toRemove.forEach((s) => sessions.splice(sessions.indexOf(s), 1));
+    sessions.sort((a, b) => (b.lastActivity || 0) - (a.lastActivity || 0));
     renderSessions();
   } catch (_) {}
 }
@@ -379,6 +403,7 @@ function handleConnected(payload) {
   logEvent("protocol", { version: pv });
   // Request history from Gateway (source of truth)
   requestGatewayHistory();
+  void syncServerSessions();
 }
 
 function handleChatDone(payload) {
@@ -397,6 +422,7 @@ function handleChatDone(payload) {
   if (payload.aborted) addSystemMessage("request aborted");
   setRunInProgress(false);
   logEvent("chat.done", { aborted: payload.aborted, len: (payload.text || "").length });
+  void syncServerSessions();
 }
 
 function handleChatToken(payload) {
@@ -435,7 +461,7 @@ function handleToolsApprovalRequest(payload) {
   const agent = payload.agent_name || "?";
   const reason = payload.reason || "";
 
-  // Add to approval list UI
+  // Add to approval list UI when available
   if (approvalListEl) {
     const li = document.createElement("li");
     li.className = "approval-item";
@@ -461,12 +487,25 @@ function handleToolsApprovalRequest(payload) {
     });
   }
 
+  if (!approvalListEl) {
+    const details = JSON.stringify(payload.args || {}, null, 2);
+    const approved = window.confirm(
+      `Approve ${tool} for ${agent}?\n\n${reason || "Approval required"}\n\n${details}`
+    );
+    sendApproval(reqId, approved);
+  }
+
   addSystemMessage(`[approval] ${tool} by ${agent}: ${reason || "approval required"}`);
 }
 
 function sendApproval(requestId, approved) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  const payload = { event: "tools.approval", request_id: requestId, approved };
+  const payload = {
+    event: "tools.approval",
+    request_id: requestId,
+    approved,
+    reason: approved ? "Approved in Web UI" : "Denied in Web UI"
+  };
   socket.send(JSON.stringify(payload));
   logEvent("tools.approval.sent", { request_id: requestId, approved });
   addSystemMessage(`[approval] ${requestId}: ${approved ? "approved" : "denied"}`);
@@ -708,7 +747,19 @@ async function addCronJob() {
 
   try {
     logEvent("cron.add.start", { name, cron_expr, system_event });
-    const body = { name, cron_expr, task, agent_id, delivery_target, max_retries };
+    const resolvedDelivery =
+      delivery_target === "main" && currentSessionId
+        ? `session:${currentSessionId}`
+        : delivery_target;
+    const body = {
+      name,
+      cron_expr,
+      task,
+      agent_id,
+      delivery_target: resolvedDelivery,
+      max_retries,
+      session_id: currentSessionId || ""
+    };
     if (system_event) body.system_event = system_event;
     const res = await apiFetch(`${base}/cron`, {
       method: "POST",
@@ -885,6 +936,11 @@ function sendMessage(text) {
   socket.send(JSON.stringify(payload));
   logEvent("socket.send", payload);
   appendBubble("user", text);
+  const currentSession = sessions.find((s) => s.id === currentSessionId);
+  if (currentSession && !currentSession.preview) {
+    currentSession.preview = text.length > 96 ? `${text.slice(0, 95)}…` : text;
+    renderSessions();
+  }
   waitingIndicator = appendBubble("system", "thinking...", { persist: false });
   setRunInProgress(true);
 }

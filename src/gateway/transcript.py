@@ -45,6 +45,30 @@ class TranscriptEntry:
         }
 
 
+@dataclass
+class TranscriptSession:
+    session_id: str
+    user_id: str
+    created_at: float
+    last_activity: float
+    entry_count: int = 0
+    preview: str = ""
+    last_role: str = ""
+    last_preview: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "user_id": self.user_id,
+            "created_at": self.created_at,
+            "last_activity": self.last_activity,
+            "entry_count": self.entry_count,
+            "preview": self.preview,
+            "last_role": self.last_role,
+            "last_preview": self.last_preview,
+        }
+
+
 class TranscriptStore:
     """SQLite-backed transcript storage."""
 
@@ -55,6 +79,18 @@ class TranscriptStore:
         self._init_db()
 
     def _init_db(self) -> None:
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS transcript_sessions (
+                session_id     TEXT PRIMARY KEY,
+                user_id        TEXT NOT NULL,
+                created_at     REAL NOT NULL,
+                last_activity  REAL NOT NULL,
+                entry_count    INTEGER NOT NULL DEFAULT 0,
+                preview        TEXT NOT NULL DEFAULT '',
+                last_role      TEXT NOT NULL DEFAULT '',
+                last_preview   TEXT NOT NULL DEFAULT ''
+            )
+        """)
         self._conn.execute("""
             CREATE TABLE IF NOT EXISTS transcript (
                 id          TEXT PRIMARY KEY,
@@ -71,20 +107,58 @@ class TranscriptStore:
             CREATE INDEX IF NOT EXISTS idx_transcript_session
             ON transcript (session_id, created_at)
         """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_transcript_sessions_user
+            ON transcript_sessions (user_id, last_activity)
+        """)
         self._conn.commit()
+
+    @staticmethod
+    def _summarize(content: str, limit: int = 96) -> str:
+        text = " ".join((content or "").strip().split())
+        if len(text) <= limit:
+            return text
+        return text[: limit - 1] + "…"
+
+    def ensure_session(self, session_id: str, user_id: str) -> TranscriptSession:
+        now = time.time()
+        self._conn.execute(
+            """INSERT OR IGNORE INTO transcript_sessions
+               (session_id, user_id, created_at, last_activity)
+               VALUES (?, ?, ?, ?)""",
+            (session_id, user_id, now, now),
+        )
+        self._conn.execute(
+            """UPDATE transcript_sessions
+               SET user_id = CASE WHEN user_id = '' OR user_id = 'unknown_user'
+                                  THEN ? ELSE user_id END,
+                   last_activity = MAX(last_activity, ?)
+               WHERE session_id = ?""",
+            (user_id, now, session_id),
+        )
+        self._conn.commit()
+        session = self.get_session(session_id)
+        if session is None:
+            raise RuntimeError(f"failed to ensure transcript session: {session_id}")
+        return session
 
     def append(
         self,
         session_id: str,
         role: str,
         content: str,
+        user_id: Optional[str] = None,
         request_id: Optional[str] = None,
         aborted: bool = False,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> TranscriptEntry:
         entry_id = uuid.uuid4().hex[:16]
         now = time.time()
-        meta_json = json.dumps(metadata or {}, ensure_ascii=False)
+        metadata = metadata or {}
+        session = self.get_session(session_id)
+        resolved_user_id = user_id or (session.user_id if session else "") or "unknown_user"
+        self.ensure_session(session_id, resolved_user_id)
+        meta_json = json.dumps(metadata, ensure_ascii=False)
 
         self._conn.execute(
             """INSERT INTO transcript
@@ -92,6 +166,23 @@ class TranscriptStore:
                VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (entry_id, session_id, role, content, request_id, 1 if aborted else 0,
              meta_json, now),
+        )
+        preview = self._summarize(content)
+        existing_preview_row = self._conn.execute(
+            "SELECT preview FROM transcript_sessions WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        existing_preview = existing_preview_row[0] if existing_preview_row else ""
+        session_preview = existing_preview or (preview if role == "user" else "")
+        self._conn.execute(
+            """UPDATE transcript_sessions
+               SET last_activity = ?,
+                   entry_count = entry_count + 1,
+                   preview = ?,
+                   last_role = ?,
+                   last_preview = ?
+               WHERE session_id = ?""",
+            (now, session_preview, role, preview, session_id),
         )
         self._conn.commit()
 
@@ -102,7 +193,7 @@ class TranscriptStore:
             content=content,
             request_id=request_id,
             aborted=aborted,
-            metadata=metadata or {},
+            metadata=metadata,
             created_at=now,
         )
 
@@ -144,18 +235,71 @@ class TranscriptStore:
         ).fetchone()
         return row[0] if row else 0
 
-    def list_sessions(self, limit: int = 50) -> List[Dict[str, Any]]:
-        """Return distinct sessions with their entry counts and last activity."""
-        rows = self._conn.execute(
-            """SELECT session_id, COUNT(*) as cnt, MAX(created_at) as last_at
-               FROM transcript
-               GROUP BY session_id
-               ORDER BY last_at DESC
-               LIMIT ?""",
-            (limit,),
-        ).fetchall()
+    def get_session(self, session_id: str) -> Optional[TranscriptSession]:
+        row = self._conn.execute(
+            """SELECT session_id, user_id, created_at, last_activity,
+                      entry_count, preview, last_role, last_preview
+               FROM transcript_sessions
+               WHERE session_id = ?""",
+            (session_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return TranscriptSession(
+            session_id=row[0],
+            user_id=row[1],
+            created_at=row[2],
+            last_activity=row[3],
+            entry_count=row[4],
+            preview=row[5],
+            last_role=row[6],
+            last_preview=row[7],
+        )
+
+    def has_session(self, session_id: str, user_id: Optional[str] = None) -> bool:
+        session = self.get_session(session_id)
+        if session is None:
+            return False
+        if user_id is None:
+            return True
+        return session.user_id == user_id
+
+    def list_sessions(
+        self,
+        limit: int = 50,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Return transcript-backed sessions ordered by last activity."""
+        if user_id:
+            rows = self._conn.execute(
+                """SELECT session_id, user_id, created_at, last_activity,
+                          entry_count, preview, last_role, last_preview
+                   FROM transcript_sessions
+                   WHERE user_id = ?
+                   ORDER BY last_activity DESC
+                   LIMIT ?""",
+                (user_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                """SELECT session_id, user_id, created_at, last_activity,
+                          entry_count, preview, last_role, last_preview
+                   FROM transcript_sessions
+                   ORDER BY last_activity DESC
+                   LIMIT ?""",
+                (limit,),
+            ).fetchall()
         return [
-            {"session_id": r[0], "entry_count": r[1], "last_activity": r[2]}
+            TranscriptSession(
+                session_id=r[0],
+                user_id=r[1],
+                created_at=r[2],
+                last_activity=r[3],
+                entry_count=r[4],
+                preview=r[5],
+                last_role=r[6],
+                last_preview=r[7],
+            ).to_dict()
             for r in rows
         ]
 

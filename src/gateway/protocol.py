@@ -193,6 +193,85 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
 }
 
 
+def _type_matches(value: Any, expected_type: str) -> bool:
+    if expected_type == "string":
+        return isinstance(value, str)
+    if expected_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if expected_type == "number":
+        return (
+            (isinstance(value, int) and not isinstance(value, bool))
+            or isinstance(value, float)
+        )
+    if expected_type == "boolean":
+        return isinstance(value, bool)
+    if expected_type == "object":
+        return isinstance(value, dict)
+    if expected_type == "array":
+        return isinstance(value, list)
+    return True
+
+
+def validate_event(data: Any, schema: Optional[dict[str, Any]]) -> list[str]:
+    """Validate a payload against a minimal JSON-schema subset.
+
+    The protocol schemas are intentionally simple, so a lightweight validator is
+    enough here and avoids adding a runtime dependency.
+    """
+    if not isinstance(data, dict):
+        return ["payload must be a JSON object"]
+    if schema is None:
+        return [f"unknown event: {data.get('event', '')!r}"]
+
+    errors: list[str] = []
+    if schema.get("type") == "object" and not isinstance(data, dict):
+        return ["payload must be a JSON object"]
+
+    for key in schema.get("required", []):
+        if key not in data:
+            errors.append(f"missing required field: {key}")
+
+    properties = schema.get("properties", {})
+    for key, value in data.items():
+        prop = properties.get(key)
+        if prop is None:
+            continue
+
+        expected_type = prop.get("type")
+        if expected_type and not _type_matches(value, expected_type):
+            errors.append(
+                f"field {key!r} must be of type {expected_type}, "
+                f"got {type(value).__name__}"
+            )
+            continue
+
+        if "const" in prop and value != prop["const"]:
+            errors.append(f"field {key!r} must equal {prop['const']!r}")
+        if "enum" in prop and value not in prop["enum"]:
+            errors.append(
+                f"field {key!r} must be one of {', '.join(map(repr, prop['enum']))}"
+            )
+        if expected_type == "string" and "minLength" in prop and len(value) < prop["minLength"]:
+            errors.append(
+                f"field {key!r} must be at least {prop['minLength']} characters"
+            )
+        if expected_type in {"integer", "number"}:
+            if "minimum" in prop and value < prop["minimum"]:
+                errors.append(f"field {key!r} must be >= {prop['minimum']}")
+            if "maximum" in prop and value > prop["maximum"]:
+                errors.append(f"field {key!r} must be <= {prop['maximum']}")
+
+    return errors
+
+
+def validate_client_event(data: Any) -> list[str]:
+    """Validate an incoming client envelope."""
+    if not isinstance(data, dict):
+        return ["payload must be a JSON object"]
+    event_name = data.get("event", "")
+    return validate_event(data, EVENT_SCHEMAS.get(event_name))
+
+
 def make_request_id() -> str:
     return uuid.uuid4().hex[:12]
 

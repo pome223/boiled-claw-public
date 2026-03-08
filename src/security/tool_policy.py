@@ -14,10 +14,12 @@ Actions:
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import time
+import uuid
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
 
 Action = Literal["allow", "deny", "approve"]
 
@@ -80,6 +82,8 @@ class ToolPolicyEngine:
         )
         self._agent_policies: Dict[str, AgentPolicy] = {}
         self._pending_approvals: Dict[str, _PendingApproval] = {}
+        self._approval_waiters: Dict[str, asyncio.Future[tuple[bool, str]]] = {}
+        self._notifier: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
 
     @property
     def default_policy(self) -> AgentPolicy:
@@ -93,6 +97,12 @@ class ToolPolicyEngine:
 
     def get_agent_policy(self, agent_name: str) -> Optional[AgentPolicy]:
         return self._agent_policies.get(agent_name)
+
+    def set_notifier(
+        self,
+        notifier: Optional[Callable[[Dict[str, Any]], Awaitable[None]]],
+    ) -> None:
+        self._notifier = notifier
 
     def list_policies(self) -> Dict[str, Any]:
         return {
@@ -145,6 +155,7 @@ class ToolPolicyEngine:
         agent_name: str,
         args: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None,
+        reason: str = "",
     ) -> _PendingApproval:
         approval = _PendingApproval(
             request_id=request_id,
@@ -152,6 +163,7 @@ class ToolPolicyEngine:
             agent_name=agent_name,
             args=args or {},
             session_id=session_id or "",
+            reason=reason,
             created_at=time.time(),
         )
         self._pending_approvals[request_id] = approval
@@ -169,6 +181,9 @@ class ToolPolicyEngine:
             approval.approved = approved
             approval.resolve_reason = reason
             approval.resolved_at = time.time()
+            waiter = self._approval_waiters.pop(request_id, None)
+            if waiter and not waiter.done():
+                waiter.set_result((approved, reason))
         return approval
 
     def get_pending_approval(self, request_id: str) -> Optional[_PendingApproval]:
@@ -191,7 +206,60 @@ class ToolPolicyEngine:
         ]
         for rid in expired:
             self._pending_approvals.pop(rid, None)
+            waiter = self._approval_waiters.pop(rid, None)
+            if waiter and not waiter.done():
+                waiter.cancel()
         return len(expired)
+
+    async def request_approval(
+        self,
+        *,
+        tool_name: str,
+        agent_name: str,
+        args: Optional[Dict[str, Any]] = None,
+        session_id: str,
+        reason: str = "",
+        timeout: float = 300.0,
+    ) -> Tuple[bool, str]:
+        """Request approval and wait for a user response."""
+        if not session_id:
+            return False, "approval requires a valid session_id"
+        if self._notifier is None:
+            return False, "approval channel is unavailable"
+
+        request_id = uuid.uuid4().hex[:12]
+        approval = self.create_approval_request(
+            request_id=request_id,
+            tool_name=tool_name,
+            agent_name=agent_name,
+            args=args,
+            session_id=session_id,
+            reason=reason,
+        )
+
+        loop = asyncio.get_running_loop()
+        waiter: asyncio.Future[tuple[bool, str]] = loop.create_future()
+        self._approval_waiters[request_id] = waiter
+
+        try:
+            await self._notifier(approval.to_dict())
+        except Exception as exc:
+            self._pending_approvals.pop(request_id, None)
+            self._approval_waiters.pop(request_id, None)
+            return False, f"failed to deliver approval request: {exc}"
+
+        try:
+            approved, resolve_reason = await asyncio.wait_for(waiter, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._pending_approvals.pop(request_id, None)
+            self._approval_waiters.pop(request_id, None)
+            return False, "approval timed out"
+        except asyncio.CancelledError:
+            self._pending_approvals.pop(request_id, None)
+            self._approval_waiters.pop(request_id, None)
+            raise
+
+        return approved, resolve_reason
 
 
 @dataclass
@@ -201,6 +269,7 @@ class _PendingApproval:
     agent_name: str
     args: Dict[str, Any]
     session_id: str
+    reason: str
     created_at: float
     resolved: bool = False
     approved: bool = False
@@ -214,6 +283,7 @@ class _PendingApproval:
             "agent_name": self.agent_name,
             "args": self.args,
             "session_id": self.session_id,
+            "reason": self.reason,
             "created_at": self.created_at,
             "resolved": self.resolved,
             "approved": self.approved,

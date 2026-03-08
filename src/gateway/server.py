@@ -17,6 +17,7 @@ from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, Web
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from google.adk.events.event import Event
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -35,7 +36,7 @@ from src.gateway.protocol import (
     PROTOCOL_VERSION,
     ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
     ev_health_tick, ev_cron_update, ev_tools_approval_request,
-    normalize_client_event, make_request_id,
+    normalize_client_event, validate_client_event,
 )
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
@@ -52,6 +53,7 @@ class ConnectionManager:
         self._tasks: Dict[str, asyncio.Task] = {}
         # session_id -> user_id mapping for system event routing
         self._session_users: Dict[str, str] = {}
+        self._pending_events: Dict[str, list[dict[str, Any]]] = {}
 
     async def connect(self, websocket: WebSocket, session_id: str, user_id: str = "") -> None:
         await websocket.accept()
@@ -82,6 +84,21 @@ class ConnectionManager:
                 await ws.send_json(data)
             except Exception:
                 pass
+
+    async def send_or_queue_json(self, session_id: str, data: dict) -> None:
+        if session_id in self.active_connections:
+            await self.send_json(session_id, data)
+            return
+        self._pending_events.setdefault(session_id, []).append(data)
+
+    async def flush_pending(self, session_id: str) -> None:
+        pending = self._pending_events.pop(session_id, [])
+        for payload in pending:
+            await self.send_json(session_id, payload)
+
+    async def flush_all_pending(self) -> None:
+        for session_id in list(self.active_connections.keys()):
+            await self.flush_pending(session_id)
 
     # --- task tracking for abort ---
 
@@ -155,18 +172,18 @@ class GatewayServer:
             session_id = payload.get("requester_session_id")
             if not session_id:
                 return
-            event = ev_system_event(
+            await self._emit_session_event(
+                session_id,
                 source="subagent",
                 status=payload.get("status", ""),
                 message=payload.get("message", ""),
                 run_id=payload.get("run_id"),
                 agent_name=payload.get("agent_name"),
             )
-            await self.manager.send_json(session_id, event)
 
         set_subagent_notifier(_subagent_notifier)
 
-        # cron -> WS broadcast notifier
+        # cron -> WS/session notifier
         async def _cron_notifier(payload: Dict[str, Any]) -> None:
             event = ev_cron_update(
                 job_id=payload.get("job_id", ""),
@@ -174,8 +191,33 @@ class GatewayServer:
                 message=payload.get("message", ""),
             )
             await self.manager.broadcast_json(event)
+            requester_session_id = payload.get("requester_session_id")
+            if requester_session_id and self.transcript.has_session(requester_session_id):
+                await self._emit_session_event(
+                    requester_session_id,
+                    source="cron",
+                    status=payload.get("status", ""),
+                    message=payload.get("message", ""),
+                )
 
         self._cron_notifier_fn = _cron_notifier
+
+        async def _approval_notifier(payload: Dict[str, Any]) -> None:
+            session_id = payload.get("session_id", "")
+            if not session_id:
+                return
+            await self.manager.send_or_queue_json(
+                session_id,
+                ev_tools_approval_request(
+                    request_id=payload.get("request_id", ""),
+                    tool_name=payload.get("tool_name", ""),
+                    agent_name=payload.get("agent_name", ""),
+                    args=payload.get("args") or {},
+                    reason=payload.get("reason", ""),
+                ),
+            )
+
+        self.tool_policy.set_notifier(_approval_notifier)
         self._setup_routes()
 
     # ------------------------------------------------------------------
@@ -200,6 +242,7 @@ class GatewayServer:
         @self.app.on_event("shutdown")
         async def shutdown_event():
             set_subagent_notifier(None)
+            self.tool_policy.set_notifier(None)
             if self._heartbeat_task and not self._heartbeat_task.done():
                 self._heartbeat_task.cancel()
             await get_scheduler().shutdown()
@@ -254,11 +297,37 @@ class GatewayServer:
 
         @self.app.get("/sessions/{user_id}")
         async def list_sessions(user_id: str):
-            response = await self.session_service.list_sessions(
-                app_name="boiled-claw", user_id=user_id
-            )
-            sessions = response.sessions or []
-            return {"sessions": [{"id": s.id} for s in sessions]}
+            sessions = self.transcript.list_sessions(user_id=user_id)
+            if not sessions:
+                response = await self.session_service.list_sessions(
+                    app_name="boiled-claw", user_id=user_id
+                )
+                hydrated = response.sessions or []
+                return {
+                    "sessions": [
+                        {
+                            "id": s.id,
+                            "user_id": user_id,
+                            "last_activity": getattr(s, "last_update_time", 0.0),
+                            "preview": "",
+                            "entry_count": len(getattr(s, "events", []) or []),
+                        }
+                        for s in hydrated
+                    ]
+                }
+
+            return {
+                "sessions": [
+                    {
+                        "id": item["session_id"],
+                        "user_id": item["user_id"],
+                        "last_activity": item["last_activity"],
+                        "preview": item["preview"],
+                        "entry_count": item["entry_count"],
+                    }
+                    for item in sessions
+                ]
+            }
 
         # --- transcript / history ---
 
@@ -269,6 +338,8 @@ class GatewayServer:
             limit: int = Query(default=100, ge=1, le=500),
             before: Optional[float] = Query(default=None),
         ):
+            if not self.transcript.has_session(session_id, user_id):
+                raise HTTPException(status_code=404, detail="session not found")
             entries = self.transcript.get_history(session_id, limit=limit, before=before)
             return {
                 "session_id": session_id,
@@ -292,26 +363,20 @@ class GatewayServer:
             if not message:
                 raise HTTPException(status_code=400, detail="message is required")
 
-            session = None
-            if session_id:
-                session = await self.session_service.get_session(
-                    app_name="boiled-claw",
-                    user_id=user_id,
-                    session_id=str(session_id),
-                )
-            if session is None:
-                session = await self.session_service.create_session(
-                    app_name="boiled-claw", user_id=user_id,
-                )
+            session = await self._get_or_create_gateway_session(
+                user_id=user_id,
+                session_id=str(session_id) if session_id else None,
+            )
 
             # Record user message in transcript
-            self.transcript.append(session.id, "user", message)
+            self.transcript.append(session.id, "user", message, user_id=user_id)
 
             result = await self._run_agent_http(user_id, session.id, message)
 
             # Record assistant response in transcript
             self.transcript.append(
                 session.id, "assistant", result["message"],
+                user_id=user_id,
                 metadata={"type": result["type"]},
             )
 
@@ -386,7 +451,7 @@ class GatewayServer:
                     cron_expr=str(body.get("cron_expr") or ""),
                     task=str(body.get("task") or ""),
                     agent_id=str(body.get("agent_id") or "web_researcher"),
-                    delivery_target=str(body.get("delivery_target") or "isolated"),
+                    delivery_target=self._resolve_cron_delivery_target(body),
                     max_retries=int(body.get("max_retries") or 0),
                     retry_delay=int(body.get("retry_delay") or 30),
                     system_event=body.get("system_event") or None,
@@ -440,17 +505,10 @@ class GatewayServer:
                     await websocket.close(code=4401, reason="Unauthorized")
                     return
 
-            session = None
-            if session_id:
-                session = await self.session_service.get_session(
-                    app_name="boiled-claw",
-                    user_id=user_id,
-                    session_id=session_id,
-                )
-            if session is None:
-                session = await self.session_service.create_session(
-                    app_name="boiled-claw", user_id=user_id,
-                )
+            session = await self._get_or_create_gateway_session(
+                user_id=user_id,
+                session_id=session_id,
+            )
             session_id = session.id
 
             await self.manager.connect(websocket, session_id, user_id)
@@ -465,6 +523,7 @@ class GatewayServer:
             try:
                 # Send connected event with protocol version
                 await self.manager.send_json(session_id, ev_connected(session_id, user_id))
+                await self.manager.flush_pending(session_id)
 
                 # Fire connect system event for cron jobs
                 asyncio.create_task(
@@ -477,6 +536,16 @@ class GatewayServer:
                 while True:
                     raw_data = await websocket.receive_json()
                     data = normalize_client_event(raw_data)
+                    validation_errors = validate_client_event(data)
+                    if validation_errors:
+                        await self._emit_session_event(
+                            session_id,
+                            source="protocol",
+                            status="error",
+                            message="; ".join(validation_errors),
+                            user_id=user_id,
+                        )
+                        continue
                     event_name = data.get("event", "")
 
                     if event_name == "chat.send":
@@ -486,6 +555,7 @@ class GatewayServer:
                             # Record user message in transcript
                             self.transcript.append(
                                 session_id, "user", text,
+                                user_id=user_id,
                                 request_id=request_id,
                             )
                             await self._start_agent_run(session_id, user_id, text, request_id)
@@ -497,16 +567,16 @@ class GatewayServer:
                         if text:
                             self.transcript.append(
                                 session_id, "inject", text,
+                                user_id=user_id,
                                 request_id=request_id,
                                 metadata={"role": role},
                             )
-                            await self.manager.send_json(
+                            await self._emit_session_event(
                                 session_id,
-                                ev_system_event(
-                                    source="inject",
-                                    status="ok",
-                                    message=f"Injected {role} message into transcript",
-                                ),
+                                source="inject",
+                                status="ok",
+                                message=f"Injected {role} message into transcript",
+                                user_id=user_id,
                             )
 
                     elif event_name == "chat.abort":
@@ -521,6 +591,15 @@ class GatewayServer:
                     elif event_name == "chat.history":
                         request_id = data.get("request_id")
                         target_session = data.get("session_id") or session_id
+                        if not self.transcript.has_session(target_session, user_id):
+                            await self._emit_session_event(
+                                session_id,
+                                source="protocol",
+                                status="error",
+                                message=f"session not found: {target_session}",
+                                user_id=user_id,
+                            )
+                            continue
                         limit = min(int(data.get("limit") or 100), 500)
                         before = data.get("before")
                         entries = self.transcript.get_history(
@@ -548,14 +627,14 @@ class GatewayServer:
                         result = self.tool_policy.resolve_approval(
                             request_id, approved, reason,
                         )
+                        target_session_id = result.session_id if result else session_id
                         status = "resolved" if result else "not_found"
-                        await self.manager.send_json(
-                            session_id,
-                            ev_system_event(
-                                source="tools.approval",
-                                status=status,
-                                message=f"Approval {request_id}: {'approved' if approved else 'denied'}",
-                            ),
+                        await self._emit_session_event(
+                            target_session_id,
+                            source="tools.approval",
+                            status=status,
+                            message=f"Approval {request_id}: {'approved' if approved else 'denied'}",
+                            user_id=user_id,
                         )
 
             except WebSocketDisconnect:
@@ -632,13 +711,13 @@ class GatewayServer:
 
                 self.transcript.append(
                     session_id, "assistant", partial,
+                    user_id=user_id,
                     request_id=request_id,
                 )
                 await self.manager.send_json(session_id, ev_chat_done(partial, request_id))
                 return
 
-            now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
-            full_msg = f"[システム情報: 現在の日時は {now} です]\n\n{message}"
+            full_msg = self._compose_agent_message(session_id, message)
             content = types.Content(role="user", parts=[types.Part(text=full_msg)])
 
             async with asyncio.timeout(_AGENT_TIMEOUT):
@@ -664,6 +743,7 @@ class GatewayServer:
             # Persist to transcript
             self.transcript.append(
                 session_id, "assistant", partial,
+                user_id=user_id,
                 request_id=request_id,
             )
             await self.manager.send_json(session_id, ev_chat_done(partial, request_id, aborted=False))
@@ -672,6 +752,7 @@ class GatewayServer:
             # Persist partial + aborted flag to transcript
             self.transcript.append(
                 session_id, "assistant", partial,
+                user_id=user_id,
                 request_id=request_id,
                 aborted=True,
             )
@@ -687,6 +768,7 @@ class GatewayServer:
                                         context={"reason": "timeout"})
             self.transcript.append(
                 session_id, "assistant", msg,
+                user_id=user_id,
                 request_id=request_id,
                 metadata={"error": "timeout"},
             )
@@ -698,6 +780,7 @@ class GatewayServer:
             error_msg = f"Error: {exc}"
             self.transcript.append(
                 session_id, "assistant", error_msg,
+                user_id=user_id,
                 request_id=request_id,
                 metadata={"error": str(exc)},
             )
@@ -727,8 +810,7 @@ class GatewayServer:
                 text = quote.get("message", "株価データを取得できませんでした。")
             return {"type": "agent_message", "message": text}
 
-        now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
-        full_msg = f"[システム情報: 現在の日時は {now} です]\n\n{message}"
+        full_msg = self._compose_agent_message(session_id, message)
         content = types.Content(role="user", parts=[types.Part(text=full_msg)])
 
         try:
@@ -763,6 +845,123 @@ class GatewayServer:
             return {"type": "error", "message": f"Error: {exc}"}
 
     # ------------------------------------------------------------------
+    # session / transcript helpers
+    # ------------------------------------------------------------------
+
+    async def _get_or_create_gateway_session(
+        self,
+        *,
+        user_id: str,
+        session_id: Optional[str] = None,
+    ):
+        session = None
+        if session_id:
+            session = await self.session_service.get_session(
+                app_name="boiled-claw",
+                user_id=user_id,
+                session_id=session_id,
+            )
+            if session is None and self.transcript.has_session(session_id, user_id):
+                session = await self._hydrate_session_from_transcript(user_id, session_id)
+
+        if session is None:
+            session = await self.session_service.create_session(
+                app_name="boiled-claw",
+                user_id=user_id,
+                session_id=session_id,
+            )
+
+        self.transcript.ensure_session(session.id, user_id)
+        return session
+
+    async def _hydrate_session_from_transcript(self, user_id: str, session_id: str):
+        session = await self.session_service.create_session(
+            app_name="boiled-claw",
+            user_id=user_id,
+            session_id=session_id,
+        )
+        for entry in self.transcript.get_history(session_id, limit=500):
+            if entry.role not in {"user", "assistant"}:
+                continue
+            if not entry.content.strip():
+                continue
+            content_role = "user" if entry.role == "user" else "model"
+            author = "user" if entry.role == "user" else root_agent.name
+            event = Event(
+                invocation_id=f"hydrated:{session_id}",
+                author=author,
+                content=types.Content(
+                    role=content_role,
+                    parts=[types.Part(text=entry.content)],
+                ),
+                timestamp=entry.created_at,
+            )
+            await self.session_service.append_event(session, event)
+        return session
+
+    def _compose_agent_message(self, session_id: str, message: str) -> str:
+        now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+        history = self.transcript.get_history(session_id, limit=200)
+        inject_lines = []
+        for entry in history:
+            if entry.role != "inject":
+                continue
+            inject_role = entry.metadata.get("role", "system")
+            inject_lines.append(f"[inject:{inject_role}] {entry.content}")
+
+        preface = [f"[システム情報: 現在の日時は {now} です]"]
+        if inject_lines:
+            preface.append("[Gateway inject context]")
+            preface.extend(inject_lines[-10:])
+        preface.append("")
+        preface.append(message)
+        return "\n".join(preface)
+
+    def _resolve_cron_delivery_target(self, payload: Dict[str, Any]) -> str:
+        delivery_target = str(payload.get("delivery_target") or "isolated").strip()
+        bound_session_id = str(payload.get("session_id") or "").strip()
+        if delivery_target == "main" and bound_session_id:
+            return f"session:{bound_session_id}"
+        return delivery_target or "isolated"
+
+    async def _emit_session_event(
+        self,
+        session_id: str,
+        *,
+        source: str,
+        status: str,
+        message: str,
+        user_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+    ) -> None:
+        event = ev_system_event(
+            source=source,
+            status=status,
+            message=message,
+            run_id=run_id,
+            agent_name=agent_name,
+        )
+        session = self.transcript.get_session(session_id)
+        resolved_user = user_id or (session.user_id if session else None)
+        if session is not None and resolved_user:
+            self.transcript.append(
+                session_id,
+                "system",
+                message,
+                user_id=resolved_user,
+                metadata={
+                    "source": source,
+                    "status": status,
+                    "run_id": run_id or "",
+                    "agent_name": agent_name or "",
+                },
+            )
+        elif session_id not in self.manager.active_connections:
+            return
+        await self.manager.send_or_queue_json(session_id, event)
+
+    # ------------------------------------------------------------------
     # heartbeat
     # ------------------------------------------------------------------
 
@@ -772,6 +971,7 @@ class GatewayServer:
             if self.manager.active_connections:
                 tick = ev_health_tick(len(self.manager.active_connections))
                 await self.manager.broadcast_json(tick)
+                await self.manager.flush_all_pending()
 
     # ------------------------------------------------------------------
     # run
