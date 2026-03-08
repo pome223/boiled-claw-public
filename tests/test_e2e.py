@@ -81,6 +81,24 @@ class TestHttpApi:
         assert r.status_code == 200
         assert r.json()["status"] == "healthy"
 
+    def test_root_includes_protocol_version(self, client):
+        r = client.get("/")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["protocol_version"] >= 1
+        assert data["version"] == "0.3.0"
+
+    def test_protocol_endpoint(self, client):
+        """GET /protocol returns JSON schemas for all events."""
+        r = client.get("/protocol")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["version"] >= 1
+        assert "chat.send" in data["events"]
+        assert "connected" in data["events"]
+        assert "tools.approval_request" in data["events"]
+        assert isinstance(data["schemas"], dict)
+
     def test_basic_response(self, client):
         """Case 1: 基本応答"""
         r = client.post("/agent/run", json={
@@ -132,7 +150,58 @@ class TestHttpApi:
 
 
 # ---------------------------------------------------------------------------
-# Cron API tests
+# Transcript / History API tests
+# ---------------------------------------------------------------------------
+
+class TestTranscriptApi:
+    def test_transcript_recorded_on_agent_run(self, client):
+        """POST /agent/run should record both user and assistant in transcript."""
+        r = client.post("/agent/run", json={
+            "user_id": "e2e_transcript",
+            "message": "transcriptテスト: 1+1="
+        })
+        assert r.status_code == 200
+        session_id = r.json()["session_id"]
+
+        # Fetch history
+        r2 = client.get(f"/sessions/e2e_transcript/{session_id}/history")
+        assert r2.status_code == 200
+        data = r2.json()
+        assert data["session_id"] == session_id
+        entries = data["entries"]
+        assert len(entries) >= 2
+
+        roles = [e["role"] for e in entries]
+        assert "user" in roles
+        assert "assistant" in roles
+
+        # User message should contain our test text
+        user_entries = [e for e in entries if e["role"] == "user"]
+        assert any("transcriptテスト" in e["content"] for e in user_entries)
+
+    def test_transcript_sessions_list(self, client):
+        """GET /transcript/sessions returns session summaries."""
+        r = client.get("/transcript/sessions?user_id=e2e_user")
+        assert r.status_code == 200
+        data = r.json()
+        assert "sessions" in data
+
+    def test_history_limit_and_pagination(self, client):
+        """History endpoint respects limit parameter."""
+        # First create a session with messages
+        r = client.post("/agent/run", json={
+            "user_id": "e2e_hist",
+            "message": "historyテスト"
+        })
+        session_id = r.json()["session_id"]
+
+        r2 = client.get(f"/sessions/e2e_hist/{session_id}/history?limit=1")
+        assert r2.status_code == 200
+        assert len(r2.json()["entries"]) <= 1
+
+
+# ---------------------------------------------------------------------------
+# Cron API tests (platform features)
 # ---------------------------------------------------------------------------
 
 class TestCronApi:
@@ -197,6 +266,83 @@ class TestCronApi:
         # 後片付け
         client.delete(f"/cron/{job_id}")
 
+    def test_cron_platform_fields(self, client):
+        """Platform fields: delivery_target, max_retries, system_event."""
+        r = client.post("/cron", json={
+            "name": "platform-test",
+            "cron_expr": "0 0 * * *",
+            "task": "platform test",
+            "delivery_target": "main",
+            "session_id": "sess-platform",
+            "max_retries": 3,
+            "retry_delay": 60,
+        })
+        assert r.status_code == 200
+        job = r.json()["job"]
+        assert job["delivery_target"] == "session:sess-platform"
+        assert job["max_retries"] == 3
+        assert job["retry_delay"] == 60
+
+        client.delete(f"/cron/{job['id']}")
+
+    def test_cron_system_event_job(self, client):
+        """System event triggered job creation."""
+        r = client.post("/cron", json={
+            "name": "on-connect-test",
+            "cron_expr": "",
+            "task": "greet user on connect",
+            "system_event": "connect",
+        })
+        assert r.status_code == 200
+        job = r.json()["job"]
+        assert job["system_event"] == "connect"
+
+        client.delete(f"/cron/{job['id']}")
+
+    def test_cron_invalid_system_event(self, client):
+        """Invalid system_event should be rejected."""
+        r = client.post("/cron", json={
+            "name": "bad-event",
+            "cron_expr": "",
+            "task": "test",
+            "system_event": "invalid_event",
+        })
+        assert r.status_code == 400
+
+    def test_cron_invalid_delivery_target(self, client):
+        """Invalid delivery_target should be rejected."""
+        r = client.post("/cron", json={
+            "name": "bad-target",
+            "cron_expr": "0 0 * * *",
+            "task": "test",
+            "delivery_target": "invalid_target",
+        })
+        assert r.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Tool Policy API tests
+# ---------------------------------------------------------------------------
+
+class TestToolPolicyApi:
+    def test_policy_list(self, client):
+        """GET /tools/policy returns policy structure."""
+        r = client.get("/tools/policy")
+        assert r.status_code == 200
+        data = r.json()
+        assert "default" in data
+        assert "agents" in data
+        assert "rules" in data["default"]
+        assert "fallback" in data["default"]
+
+    def test_approvals_list_empty(self, client):
+        """GET /tools/approvals returns empty list initially."""
+        r = client.get("/tools/approvals")
+        assert r.status_code == 200
+        data = r.json()
+        assert "approvals" in data
+        assert isinstance(data["approvals"], list)
+
 
 # ---------------------------------------------------------------------------
 # WebSocket typed protocol tests
@@ -204,8 +350,8 @@ class TestCronApi:
 
 class TestWebSocketProtocol:
     @pytest.mark.asyncio
-    async def test_ws_connected_event(self):
-        """WS 接続直後に connected イベントが届く"""
+    async def test_ws_connected_event_with_protocol_version(self):
+        """WS 接続直後に connected イベント(protocol_version付き)が届く"""
         url = f"{WS_URL}/ws/e2e_ws"
         async with websockets.connect(url) as ws:
             raw = await asyncio.wait_for(ws.recv(), timeout=10)
@@ -213,6 +359,9 @@ class TestWebSocketProtocol:
             assert payload["event"] == "connected"
             assert payload["session_id"]
             assert payload["user_id"] == "e2e_ws"
+            assert payload["protocol_version"] >= 1
+            assert "v" in payload  # envelope version field
+            assert "ts" in payload  # timestamp field
 
     @pytest.mark.asyncio
     async def test_ws_chat_done(self):
@@ -225,6 +374,8 @@ class TestWebSocketProtocol:
         )
         assert payload["aborted"] is False
         assert len(payload["text"]) > 0
+        assert "v" in payload  # envelope
+        assert "ts" in payload
 
     @pytest.mark.asyncio
     async def test_ws_chat_abort(self):
@@ -271,6 +422,7 @@ class TestWebSocketProtocol:
         )
         assert "active_sessions" in payload
         assert "ts" in payload
+        assert "v" in payload
 
     @pytest.mark.asyncio
     async def test_ws_legacy_message_type(self):
@@ -283,3 +435,106 @@ class TestWebSocketProtocol:
         )
         assert payload["aborted"] is False
         assert len(payload["text"]) > 0
+
+    @pytest.mark.asyncio
+    async def test_ws_chat_history(self):
+        """chat.history request returns transcript entries."""
+        url = f"{WS_URL}/ws/e2e_ws_hist"
+        async with websockets.connect(url) as ws:
+            # connected
+            raw = await asyncio.wait_for(ws.recv(), timeout=10)
+            connected = json.loads(raw)
+            assert connected["event"] == "connected"
+
+            # Send a message first
+            await ws.send(json.dumps({
+                "event": "chat.send",
+                "text": "historyテスト: hello"
+            }))
+
+            # Wait for chat.done
+            deadline = asyncio.get_event_loop().time() + 30
+            while asyncio.get_event_loop().time() < deadline:
+                remaining = deadline - asyncio.get_event_loop().time()
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                p = json.loads(raw)
+                if p.get("event") == "chat.done":
+                    break
+
+            # Now request history
+            await ws.send(json.dumps({"event": "chat.history", "limit": 50}))
+
+            # Wait for chat.history response
+            deadline = asyncio.get_event_loop().time() + 10
+            history_payload = None
+            while asyncio.get_event_loop().time() < deadline:
+                remaining = deadline - asyncio.get_event_loop().time()
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                p = json.loads(raw)
+                if p.get("event") == "chat.history":
+                    history_payload = p
+                    break
+
+            assert history_payload is not None
+            assert "entries" in history_payload
+            assert len(history_payload["entries"]) >= 2  # user + assistant
+
+    @pytest.mark.asyncio
+    async def test_ws_chat_inject(self):
+        """chat.inject should be recorded and acknowledged."""
+        url = f"{WS_URL}/ws/e2e_ws_inject"
+        async with websockets.connect(url) as ws:
+            # connected
+            raw = await asyncio.wait_for(ws.recv(), timeout=10)
+            assert json.loads(raw)["event"] == "connected"
+
+            # Inject a system message
+            await ws.send(json.dumps({
+                "event": "chat.inject",
+                "text": "This is an injected context message",
+                "role": "system",
+            }))
+
+            # Should get system.event acknowledgment
+            deadline = asyncio.get_event_loop().time() + 10
+            ack = None
+            while asyncio.get_event_loop().time() < deadline:
+                remaining = deadline - asyncio.get_event_loop().time()
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                p = json.loads(raw)
+                if p.get("event") == "system.event" and p.get("source") == "inject":
+                    ack = p
+                    break
+
+            assert ack is not None
+            assert ack["status"] == "ok"
+
+    @pytest.mark.asyncio
+    async def test_ws_tools_approval(self):
+        """tools.approval response should be acknowledged via system.event."""
+        url = f"{WS_URL}/ws/e2e_ws_approval"
+        async with websockets.connect(url) as ws:
+            # connected
+            raw = await asyncio.wait_for(ws.recv(), timeout=10)
+            assert json.loads(raw)["event"] == "connected"
+
+            # Send approval for a non-existent request (should get not_found)
+            await ws.send(json.dumps({
+                "event": "tools.approval",
+                "request_id": "nonexistent_req_123",
+                "approved": True,
+            }))
+
+            # Should get system.event with status=not_found
+            deadline = asyncio.get_event_loop().time() + 10
+            response = None
+            while asyncio.get_event_loop().time() < deadline:
+                remaining = deadline - asyncio.get_event_loop().time()
+                raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+                p = json.loads(raw)
+                if p.get("event") == "system.event" and p.get("source") == "tools.approval":
+                    response = p
+                    break
+
+            assert response is not None
+            assert response["status"] == "not_found"

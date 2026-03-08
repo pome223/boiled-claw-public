@@ -1,76 +1,59 @@
 """
 Typed WebSocket event definitions.
 
-Server → Client:
-  connected       : 接続確立
-  chat.token      : ストリーミングトークン（将来拡張用）
-  chat.done       : エージェント応答完了 / abort 確認
-  system.event    : subagent / cron 通知
-  health.tick     : ハートビート (30s)
-  cron.update     : cron ジョブ状態変化
+This module re-exports from protocol.py for backward compatibility.
+All new event builders are defined in protocol.py.
 
-Client → Server:
-  chat.send       : メッセージ送信
-  chat.abort      : 実行中エージェントキャンセル
-  presence.ping   : キープアライブ
+Server -> Client:
+  connected       : connection established (with protocol version)
+  chat.token      : streaming token
+  chat.done       : agent response complete / abort confirmation
+  chat.history    : transcript history response
+  system.event    : subagent / cron notification
+  health.tick     : heartbeat (30s)
+  cron.update     : cron job state change
+  tools.approval_request : request user approval for tool execution
+
+Client -> Server:
+  chat.send       : send message
+  chat.inject     : inject system/context message
+  chat.abort      : cancel running agent
+  chat.history    : request transcript history
+  presence.ping   : keepalive
+  tools.approval  : respond to approval request
 """
 
-import time
-from typing import Any, Optional
+# Re-export all event builders from protocol for backward compatibility
+from src.gateway.protocol import (
+    PROTOCOL_VERSION,
+    ev_connected,
+    ev_chat_done,
+    ev_chat_token,
+    ev_chat_history,
+    ev_system_event,
+    ev_health_tick,
+    ev_cron_update,
+    ev_tools_approval_request,
+    normalize_client_event,
+    validate_client_event,
+    get_schema,
+    make_request_id,
+    EVENT_SCHEMAS,
+)
 
-
-def ev_connected(session_id: str, user_id: str) -> dict:
-    return {"event": "connected", "session_id": session_id, "user_id": user_id}
-
-
-def ev_chat_token(text: str, request_id: Optional[str] = None) -> dict:
-    d: dict[str, Any] = {"event": "chat.token", "text": text}
-    if request_id:
-        d["request_id"] = request_id
-    return d
-
-
-def ev_chat_done(
-    text: str,
-    request_id: Optional[str] = None,
-    aborted: bool = False,
-) -> dict:
-    d: dict[str, Any] = {"event": "chat.done", "text": text, "aborted": aborted}
-    if request_id:
-        d["request_id"] = request_id
-    return d
-
-
-def ev_system_event(
-    source: str,
-    status: str,
-    message: str,
-    run_id: Optional[str] = None,
-    agent_name: Optional[str] = None,
-) -> dict:
-    d: dict[str, Any] = {
-        "event": "system.event",
-        "source": source,
-        "status": status,
-        "message": message,
-        "ts": time.time(),
-    }
-    if run_id:
-        d["run_id"] = run_id
-    if agent_name:
-        d["agent_name"] = agent_name
-    return d
-
-
-def ev_health_tick(active_sessions: int) -> dict:
-    return {"event": "health.tick", "ts": time.time(), "active_sessions": active_sessions}
-
-
-def ev_cron_update(job_id: str, status: str, message: str = "") -> dict:
-    return {
-        "event": "cron.update",
-        "job_id": job_id,
-        "status": status,
-        "message": message,
-        "ts": time.time(),
-    }
+__all__ = [
+    "PROTOCOL_VERSION",
+    "ev_connected",
+    "ev_chat_done",
+    "ev_chat_token",
+    "ev_chat_history",
+    "ev_system_event",
+    "ev_health_tick",
+    "ev_cron_update",
+    "ev_tools_approval_request",
+    "normalize_client_event",
+    "validate_client_event",
+    "get_schema",
+    "make_request_id",
+    "EVENT_SCHEMAS",
+]
