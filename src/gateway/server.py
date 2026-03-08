@@ -43,6 +43,8 @@ from src.cron.scheduler import get_scheduler
 
 _HEARTBEAT_INTERVAL = 30  # seconds
 _AGENT_TIMEOUT = 120       # seconds
+_MAX_PENDING_PER_SESSION = 100
+_MAX_PENDING_SESSIONS = 500
 
 
 class ConnectionManager:
@@ -64,6 +66,7 @@ class ConnectionManager:
     def disconnect(self, session_id: str) -> None:
         self.active_connections.pop(session_id, None)
         self._session_users.pop(session_id, None)
+        self._pending_events.pop(session_id, None)
 
     def get_user_id(self, session_id: str) -> Optional[str]:
         return self._session_users.get(session_id)
@@ -89,7 +92,13 @@ class ConnectionManager:
         if session_id in self.active_connections:
             await self.send_json(session_id, data)
             return
-        self._pending_events.setdefault(session_id, []).append(data)
+        queue = self._pending_events.setdefault(session_id, [])
+        if len(queue) >= _MAX_PENDING_PER_SESSION:
+            queue.pop(0)
+        queue.append(data)
+        if len(self._pending_events) > _MAX_PENDING_SESSIONS:
+            oldest_key = next(iter(self._pending_events))
+            del self._pending_events[oldest_key]
 
     async def flush_pending(self, session_id: str) -> None:
         pending = self._pending_events.pop(session_id, [])
@@ -348,8 +357,11 @@ class GatewayServer:
             }
 
         @self.app.get("/transcript/sessions")
-        async def list_transcript_sessions(limit: int = Query(default=50, ge=1, le=200)):
-            return {"sessions": self.transcript.list_sessions(limit=limit)}
+        async def list_transcript_sessions(
+            user_id: str = Query(...),
+            limit: int = Query(default=50, ge=1, le=200),
+        ):
+            return {"sessions": self.transcript.list_sessions(user_id=user_id, limit=limit)}
 
         # --- agent/run (HTTP) ---
 
@@ -920,8 +932,16 @@ class GatewayServer:
     def _resolve_cron_delivery_target(self, payload: Dict[str, Any]) -> str:
         delivery_target = str(payload.get("delivery_target") or "isolated").strip()
         bound_session_id = str(payload.get("session_id") or "").strip()
-        if delivery_target == "main" and bound_session_id:
-            return f"session:{bound_session_id}"
+        system_event = payload.get("system_event") or None
+        if delivery_target == "main":
+            if bound_session_id:
+                return f"session:{bound_session_id}"
+            if system_event:
+                return "main"
+            raise ValueError(
+                "delivery_target='main' requires either a session_id binding "
+                "or a system_event trigger"
+            )
         return delivery_target or "isolated"
 
     async def _emit_session_event(

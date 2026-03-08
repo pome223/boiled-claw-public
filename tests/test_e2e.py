@@ -181,7 +181,7 @@ class TestTranscriptApi:
 
     def test_transcript_sessions_list(self, client):
         """GET /transcript/sessions returns session summaries."""
-        r = client.get("/transcript/sessions")
+        r = client.get("/transcript/sessions?user_id=e2e_user")
         assert r.status_code == 200
         data = r.json()
         assert "sessions" in data
