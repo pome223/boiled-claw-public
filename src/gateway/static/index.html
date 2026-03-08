@@ -45,6 +45,10 @@
         <div class="k">Session</div>
         <div class="v mono" id="sessionBadge">-</div>
       </div>
+      <div class="side-card">
+        <div class="k">Heartbeat</div>
+        <div class="v"><span id="heartbeatDot" class="dot"></span></div>
+      </div>
     </aside>
 
     <main class="main">
@@ -56,6 +60,7 @@
         <div class="actions">
           <button id="connectBtn" class="btn primary">Connect</button>
           <button id="disconnectBtn" class="btn">Disconnect</button>
+          <button id="abortBtn" class="btn" disabled>Abort</button>
         </div>
       </header>
 
@@ -102,15 +107,11 @@
             <button id="refreshSkillsBtn" class="btn" type="button">Refresh</button>
           </div>
           <p class="muted">OpenClaw-style <code>skills/&lt;name&gt;/SKILL.md</code> を一覧し、直接実行できます。</p>
-
           <ul id="skillsList" class="list"></ul>
-
           <label for="skillNameInput" class="field-label">skill name</label>
           <input id="skillNameInput" class="text-input mono" placeholder="coding-agent" />
-
           <label for="skillParamsInput" class="field-label">params (JSON object)</label>
           <textarea id="skillParamsInput" class="mono" rows="4" placeholder='{"task":"Fix websocket timeout"}'></textarea>
-
           <div class="actions">
             <button id="runSkillBtn" class="btn primary" type="button">Run Skill</button>
           </div>
@@ -125,22 +126,44 @@
             <button id="refreshMemoryBtn" class="btn" type="button">Refresh</button>
           </div>
           <p class="muted">SQLite + vector memory browser. <span id="memoryStats"></span></p>
-
           <div class="memory-search-row">
             <input id="memoryQueryInput" class="text-input mono" placeholder="search query..." style="flex:1" />
             <input id="memoryTagsInput" class="text-input mono" placeholder="tags (comma)" style="width:160px" />
             <button id="searchMemoryBtn" class="btn primary" type="button">Search</button>
           </div>
-
           <ul id="memoryList" class="list"></ul>
         </div>
       </section>
 
       <section id="tab-cron" class="tab">
-        <div class="panel">
-          <h3>Cron Jobs</h3>
-          <p class="muted">UI shell only. Backend cron APIs are not implemented in this repo yet.</p>
-          <div class="placeholder-box">No cron endpoints available.</div>
+        <div class="panel skills-panel">
+          <div class="skills-toolbar">
+            <h3>Cron Jobs</h3>
+            <button id="refreshCronBtn" class="btn" type="button">Refresh</button>
+          </div>
+          <p class="muted">SQLite 永続化されたスケジュールタスク。30秒ごとにチェック。</p>
+
+          <ul id="cronList" class="list"></ul>
+
+          <h4 style="margin-top:1.5rem">Add Job</h4>
+
+          <label for="cronName" class="field-label">name</label>
+          <input id="cronName" class="text-input mono" placeholder="daily-news" />
+
+          <label for="cronExpr" class="field-label">cron expression</label>
+          <input id="cronExpr" class="text-input mono" placeholder="0 9 * * *" />
+          <p class="muted" style="font-size:.75rem">例: <code>*/5 * * * *</code> = 5分ごと, <code>0 9 * * *</code> = 毎日9時</p>
+
+          <label for="cronTask" class="field-label">task (エージェントへの指示)</label>
+          <textarea id="cronTask" class="mono" rows="3" placeholder="最新ニュースを3件まとめて"></textarea>
+
+          <label for="cronAgent" class="field-label">agent_id</label>
+          <input id="cronAgent" class="text-input mono" value="web_researcher" />
+
+          <div class="actions">
+            <button id="addCronBtn" class="btn primary" type="button">Add Job</button>
+          </div>
+          <pre id="cronResult" class="raw-log"></pre>
         </div>
       </section>
 
@@ -157,13 +180,10 @@
           <h3>Gateway Settings</h3>
           <label for="gatewayUrl" class="field-label">gatewayUrl</label>
           <input id="gatewayUrl" class="text-input mono" placeholder="ws://127.0.0.1:18789" />
-
           <label for="token" class="field-label">token (optional)</label>
           <input id="token" class="text-input mono" placeholder="paste token" />
-
           <label for="userId" class="field-label">userId</label>
           <input id="userId" class="text-input mono" value="web_user" />
-
           <div class="actions">
             <button id="saveSettingsBtn" class="btn primary" type="button">Save</button>
             <button id="resetSettingsBtn" class="btn" type="button">Reset</button>

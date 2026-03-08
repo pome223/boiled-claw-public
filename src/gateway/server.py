@@ -1,12 +1,16 @@
 """
 WebSocketゲートウェイサーバー
-OpenClaw のゲートウェイアーキテクチャを参考
+
+Typed event protocol:
+  Client → Server: chat.send / chat.abort / presence.ping
+  Server → Client: connected / chat.done / system.event / health.tick / cron.update
 """
 
 import asyncio
 import json
 from datetime import datetime
 from typing import Any, Dict, Optional
+
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
@@ -24,44 +28,68 @@ from src.skills.runtime import ensure_skills_loaded, get_skills_report
 from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
 from src.tools.memory import memory_search, memory_stats, memory_delete
 from src.tools.subagents import get_subagent_manager, set_subagent_notifier
+from src.gateway.events import (
+    ev_connected, ev_chat_done, ev_system_event,
+    ev_health_tick, ev_cron_update,
+)
+from src.cron.scheduler import get_scheduler
+
+_HEARTBEAT_INTERVAL = 30  # seconds
+_AGENT_TIMEOUT = 120       # seconds
 
 
 class ConnectionManager:
-    """WebSocket接続管理"""
+    """WebSocket 接続 + 実行中タスクの管理"""
 
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
+        self._tasks: Dict[str, asyncio.Task] = {}
 
-    async def connect(self, websocket: WebSocket, session_id: str):
-        """接続を追加"""
+    async def connect(self, websocket: WebSocket, session_id: str) -> None:
         await websocket.accept()
         self.active_connections[session_id] = websocket
 
-    def disconnect(self, session_id: str):
-        """接続を削除"""
-        if session_id in self.active_connections:
-            del self.active_connections[session_id]
+    def disconnect(self, session_id: str) -> None:
+        self.active_connections.pop(session_id, None)
 
-    async def send_message(self, session_id: str, message: dict):
-        """特定セッションにメッセージ送信"""
-        if session_id in self.active_connections:
-            await self.active_connections[session_id].send_json(message)
+    async def send_json(self, session_id: str, data: dict) -> None:
+        ws = self.active_connections.get(session_id)
+        if ws:
+            try:
+                await ws.send_json(data)
+            except Exception:
+                pass
 
-    async def broadcast(self, message: dict, exclude: Optional[str] = None):
-        """全接続にブロードキャスト"""
-        for session_id, connection in self.active_connections.items():
-            if session_id != exclude:
-                try:
-                    await connection.send_json(message)
-                except Exception:
-                    pass
+    async def broadcast_json(self, data: dict, exclude: Optional[str] = None) -> None:
+        for sid, ws in list(self.active_connections.items()):
+            if sid == exclude:
+                continue
+            try:
+                await ws.send_json(data)
+            except Exception:
+                pass
+
+    # --- task tracking for abort ---
+
+    def set_task(self, session_id: str, task: asyncio.Task) -> None:
+        self._tasks[session_id] = task
+
+    def clear_task(self, session_id: str) -> None:
+        self._tasks.pop(session_id, None)
+
+    async def abort(self, session_id: str) -> bool:
+        task = self._tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+            return True
+        return False
 
 
 class GatewayServer:
     """ゲートウェイサーバー"""
 
     def __init__(self):
-        self.app = FastAPI(title="boiled-claw Gateway", version="0.1.0")
+        self.app = FastAPI(title="boiled-claw Gateway", version="0.2.0")
         self.settings = get_settings()
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
@@ -73,8 +101,8 @@ class GatewayServer:
             session_service=self.session_service,
         )
         self.audit_logger = get_audit_logger()
+        self._heartbeat_task: Optional[asyncio.Task] = None
 
-        # CORS設定
         self.app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -83,17 +111,14 @@ class GatewayServer:
             allow_headers=["*"],
         )
 
-        # 認証ミドルウェア
         @self.app.middleware("http")
         async def auth_middleware(request: Request, call_next):
             api_key = self.settings.gateway_api_key
             if not api_key:
                 return await call_next(request)
-            # 認証不要のパス
             public_prefixes = ("/health", "/chat-static", "/chat")
             if any(request.url.path.startswith(p) for p in public_prefixes) or request.url.path == "/":
                 return await call_next(request)
-            # トークン確認 (ヘッダー or クエリパラメータ)
             token = (
                 request.headers.get("X-API-Key")
                 or request.headers.get("Authorization", "").removeprefix("Bearer ")
@@ -109,43 +134,65 @@ class GatewayServer:
             name="chat_static",
         )
 
+        # subagent → WS notifier
         async def _subagent_notifier(payload: Dict[str, Any]) -> None:
             session_id = payload.get("requester_session_id")
-            message = payload.get("message")
-            if not session_id or not message:
+            if not session_id:
                 return
-            await self.manager.send_message(
-                session_id,
-                {
-                    "type": "agent_message",
-                    "message": message,
-                    "source": "subagent",
-                    "run_id": payload.get("run_id"),
-                    "status": payload.get("status"),
-                    "agent_name": payload.get("agent_name"),
-                },
+            event = ev_system_event(
+                source="subagent",
+                status=payload.get("status", ""),
+                message=payload.get("message", ""),
+                run_id=payload.get("run_id"),
+                agent_name=payload.get("agent_name"),
             )
+            await self.manager.send_json(session_id, event)
 
         set_subagent_notifier(_subagent_notifier)
 
+        # cron → WS broadcast notifier
+        async def _cron_notifier(payload: Dict[str, Any]) -> None:
+            event = ev_cron_update(
+                job_id=payload.get("job_id", ""),
+                status=payload.get("status", ""),
+                message=payload.get("message", ""),
+            )
+            await self.manager.broadcast_json(event)
+
+        self._cron_notifier_fn = _cron_notifier
         self._setup_routes()
 
+    # ------------------------------------------------------------------
+    # routes
+    # ------------------------------------------------------------------
+
     def _setup_routes(self):
-        """ルート設定"""
 
         @self.app.on_event("startup")
         async def startup_event():
             await ensure_skills_loaded()
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name="heartbeat"
+            )
+            scheduler = get_scheduler()
+            scheduler.set_spawn_fn(self.subagent_manager.spawn)
+            scheduler.set_notifier(self._cron_notifier_fn)
+            scheduler.start()
 
         @self.app.on_event("shutdown")
         async def shutdown_event():
             set_subagent_notifier(None)
+            if self._heartbeat_task and not self._heartbeat_task.done():
+                self._heartbeat_task.cancel()
+            await get_scheduler().shutdown()
+
+        # --- health / root ---
 
         @self.app.get("/")
         async def root():
             return {
                 "name": "boiled-claw Gateway",
-                "version": "0.1.0",
+                "version": "0.2.0",
                 "status": "running",
                 "active_sessions": len(self.manager.active_connections),
                 "skills_loaded": get_skills_report().get("loaded", False),
@@ -156,15 +203,14 @@ class GatewayServer:
         async def health():
             return {"status": "healthy"}
 
+        # --- skills ---
+
         @self.app.get("/skills")
         async def skills():
             await ensure_skills_loaded()
             detail = await tool_skill_list()
             report = get_skills_report()
-            return {
-                **report,
-                "details": detail.get("skills", []),
-            }
+            return {**report, "details": detail.get("skills", [])}
 
         @self.app.post("/skills/{skill_name}/execute")
         async def execute_skill(skill_name: str, payload: Dict[str, Any] | None = Body(default=None)):
@@ -176,6 +222,8 @@ class GatewayServer:
                 raise HTTPException(status_code=400, detail=result.get("message", "Skill execution failed"))
             return result
 
+        # --- sessions ---
+
         @self.app.get("/sessions/{user_id}")
         async def list_sessions(user_id: str):
             response = await self.session_service.list_sessions(
@@ -183,6 +231,8 @@ class GatewayServer:
             )
             sessions = response.sessions or []
             return {"sessions": [{"id": s.id} for s in sessions]}
+
+        # --- agent/run (HTTP) ---
 
         @self.app.post("/agent/run")
         async def run_agent_endpoint(payload: Dict[str, Any] | None = Body(default=None)):
@@ -194,7 +244,6 @@ class GatewayServer:
             if not message:
                 raise HTTPException(status_code=400, detail="message is required")
 
-            # 既存セッション再利用 or 新規作成
             session = None
             if session_id:
                 session = await self.session_service.get_session(
@@ -204,16 +253,10 @@ class GatewayServer:
                 )
             if session is None:
                 session = await self.session_service.create_session(
-                    app_name="boiled-claw",
-                    user_id=user_id,
+                    app_name="boiled-claw", user_id=user_id,
                 )
 
-            result = await self._run_agent_message(
-                user_id=user_id,
-                session_id=session.id,
-                message=message,
-            )
-
+            result = await self._run_agent_http(user_id, session.id, message)
             return {
                 "ok": result["type"] == "agent_message",
                 "type": result["type"],
@@ -221,6 +264,8 @@ class GatewayServer:
                 "user_id": user_id,
                 "session_id": session.id,
             }
+
+        # --- memory ---
 
         @self.app.get("/memory/stats")
         async def memory_stats_endpoint():
@@ -243,12 +288,14 @@ class GatewayServer:
                 raise HTTPException(status_code=404, detail=f"Memory {memory_id} not found")
             return result
 
+        # --- subagents ---
+
         @self.app.get("/subagents/{session_id}")
         async def subagents_list_endpoint(session_id: str):
             return await self.subagent_manager.list_runs(requester_session_id=session_id)
 
         @self.app.post("/subagents/{run_id}/steer")
-        async def subagents_steer_endpoint(run_id: str, payload: Dict[str, Any] | None = None):
+        async def subagents_steer_endpoint(run_id: str, payload: Dict[str, Any] | None = Body(default=None)):
             message = ""
             if payload and isinstance(payload.get("message"), str):
                 message = payload.get("message", "").strip()
@@ -266,9 +313,48 @@ class GatewayServer:
                 raise HTTPException(status_code=400, detail=result.get("error", "kill failed"))
             return result
 
+        # --- cron ---
+
+        @self.app.get("/cron")
+        async def cron_list():
+            return {"jobs": [j.to_dict() for j in get_scheduler().list_jobs()]}
+
+        @self.app.post("/cron")
+        async def cron_create(payload: Dict[str, Any] | None = Body(default=None)):
+            body = payload or {}
+            try:
+                job = get_scheduler().add_job(
+                    name=str(body.get("name") or ""),
+                    cron_expr=str(body.get("cron_expr") or ""),
+                    task=str(body.get("task") or ""),
+                    agent_id=str(body.get("agent_id") or "web_researcher"),
+                )
+                return {"ok": True, "job": job.to_dict()}
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
+        @self.app.delete("/cron/{job_id}")
+        async def cron_delete(job_id: str):
+            if not get_scheduler().delete_job(job_id):
+                raise HTTPException(status_code=404, detail="job not found")
+            return {"ok": True}
+
+        @self.app.patch("/cron/{job_id}")
+        async def cron_toggle(job_id: str, payload: Dict[str, Any] | None = Body(default=None)):
+            body = payload or {}
+            enabled = bool(body.get("enabled", True))
+            job = get_scheduler().toggle_job(job_id, enabled)
+            if not job:
+                raise HTTPException(status_code=404, detail="job not found")
+            return {"ok": True, "job": job.to_dict()}
+
+        # --- static / chat UI ---
+
         @self.app.get("/chat")
         async def chat_ui():
             return FileResponse(self.static_dir / "index.html")
+
+        # --- WebSocket ---
 
         @self.app.websocket("/ws/{user_id}")
         async def websocket_endpoint(
@@ -277,13 +363,11 @@ class GatewayServer:
             session_id: Optional[str] = Query(default=None),
             token: Optional[str] = Query(default=None),
         ):
-            # WebSocket 認証
             if self.settings.gateway_api_key:
                 if token != self.settings.gateway_api_key:
                     await websocket.close(code=4401, reason="Unauthorized")
                     return
 
-            # 既存セッションの再利用または新規作成
             session = None
             if session_id:
                 session = await self.session_service.get_session(
@@ -293,14 +377,11 @@ class GatewayServer:
                 )
             if session is None:
                 session = await self.session_service.create_session(
-                    app_name="boiled-claw",
-                    user_id=user_id,
+                    app_name="boiled-claw", user_id=user_id,
                 )
             session_id = session.id
 
             await self.manager.connect(websocket, session_id)
-
-            # 監査ログ
             self.audit_logger.log(
                 event_type=AuditEventType.SESSION_START,
                 user_id=user_id,
@@ -310,29 +391,46 @@ class GatewayServer:
             )
 
             try:
-                # 接続確認メッセージ
-                await self.manager.send_message(session_id, {
-                    "type": "connected",
-                    "session_id": session_id,
-                    "user_id": user_id,
-                })
+                await self.manager.send_json(session_id, ev_connected(session_id, user_id))
 
                 while True:
-                    # メッセージ受信
                     data = await websocket.receive_json()
+                    # 新プロトコル: "event" フィールド / 旧プロトコル: "type" フィールド
+                    event_name = data.get("event") or data.get("type", "")
 
-                    message_type = data.get("type", "message")
+                    if event_name in ("chat.send", "message"):
+                        text = (data.get("text") or data.get("message") or "").strip()
+                        request_id = data.get("request_id")
+                        if text:
+                            await self._start_agent_run(session_id, user_id, text, request_id)
 
-                    if message_type == "message":
-                        await self._handle_message(
-                            user_id=user_id,
-                            session_id=session_id,
-                            message=data.get("message", ""),
+                    elif event_name == "chat.abort":
+                        request_id = data.get("request_id")
+                        aborted = await self.manager.abort(session_id)
+                        if not aborted:
+                            # 既に完了 or 実行中タスクなし
+                            await self.manager.send_json(
+                                session_id,
+                                ev_chat_done("", request_id, aborted=False),
+                            )
+
+                    elif event_name in ("presence.ping", "ping"):
+                        await self.manager.send_json(
+                            session_id,
+                            ev_health_tick(len(self.manager.active_connections)),
                         )
-                    elif message_type == "ping":
-                        await self.manager.send_message(session_id, {"type": "pong"})
 
             except WebSocketDisconnect:
+                pass
+            except Exception as e:
+                self.audit_logger.log_error(
+                    error=str(e),
+                    user_id=user_id,
+                    session_id=session_id,
+                    context={"endpoint": "websocket"},
+                )
+            finally:
+                await self.manager.abort(session_id)
                 self.manager.disconnect(session_id)
                 self.audit_logger.log(
                     event_type=AuditEventType.SESSION_END,
@@ -341,35 +439,106 @@ class GatewayServer:
                     action="disconnect",
                     result="success",
                 )
-            except Exception as e:
-                self.audit_logger.log_error(
-                    error=str(e),
+
+    # ------------------------------------------------------------------
+    # agent execution
+    # ------------------------------------------------------------------
+
+    async def _start_agent_run(
+        self,
+        session_id: str,
+        user_id: str,
+        message: str,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """既存のタスクを abort してから新しいエージェント実行タスクを起動する。"""
+        await self.manager.abort(session_id)
+        task = asyncio.create_task(
+            self._agent_run_task(session_id, user_id, message, request_id),
+            name=f"agent:{session_id}",
+        )
+        self.manager.set_task(session_id, task)
+
+    async def _agent_run_task(
+        self,
+        session_id: str,
+        user_id: str,
+        message: str,
+        request_id: Optional[str] = None,
+    ) -> None:
+        """エージェントを実行し、結果を chat.done で送信する。abort 時は aborted=True。"""
+        partial = ""
+        try:
+            # 株価ショートカット
+            if is_direct_stock_price_query(message):
+                quote = await stock_price(message)
+                if quote.get("ok"):
+                    partial = (
+                        f"{quote.get('symbol')} の最新日次データです。\n"
+                        f"- 日付: {quote.get('date')}\n"
+                        f"- 始値: {quote.get('open')}\n"
+                        f"- 高値: {quote.get('high')}\n"
+                        f"- 安値: {quote.get('low')}\n"
+                        f"- 終値: {quote.get('close')}\n"
+                        f"- 出来高: {quote.get('volume')}"
+                    )
+                else:
+                    partial = quote.get("message", "株価データを取得できませんでした。")
+                await self.manager.send_json(session_id, ev_chat_done(partial, request_id))
+                return
+
+            now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
+            full_msg = f"[システム情報: 現在の日時は {now} です]\n\n{message}"
+            content = types.Content(role="user", parts=[types.Part(text=full_msg)])
+
+            async with asyncio.timeout(_AGENT_TIMEOUT):
+                async for event in self.runner.run_async(
                     user_id=user_id,
                     session_id=session_id,
-                    context={"endpoint": "websocket"},
-                )
-                self.manager.disconnect(session_id)
+                    new_message=content,
+                ):
+                    if event.is_final_response() and event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                partial += part.text
 
-    async def _handle_message(self, user_id: str, session_id: str, message: str):
-        """メッセージ処理"""
-        # ユーザーメッセージ送信確認
-        await self.manager.send_message(session_id, {
-            "type": "user_message",
-            "message": message,
-        })
+            if not partial.strip():
+                partial = "応答の生成に失敗しました。もう一度試すか、質問を少し具体化してください。"
 
-        result = await self._run_agent_message(
-            user_id=user_id,
-            session_id=session_id,
-            message=message,
-        )
+            self.audit_logger.log_agent_message(
+                agent_name="root_agent",
+                message=partial,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            await self.manager.send_json(session_id, ev_chat_done(partial, request_id, aborted=False))
 
-        await self.manager.send_message(session_id, result)
+        except asyncio.CancelledError:
+            await self.manager.send_json(
+                session_id,
+                ev_chat_done(partial, request_id, aborted=True),
+            )
+            raise
 
-    async def _run_agent_message(self, user_id: str, session_id: str, message: str) -> Dict[str, str]:
-        """Agent応答を生成して返す（WebSocket/HTTP共通ロジック）"""
+        except TimeoutError:
+            msg = f"Agent timed out after {_AGENT_TIMEOUT} seconds."
+            self.audit_logger.log_error(error=msg, user_id=user_id, session_id=session_id,
+                                        context={"reason": "timeout"})
+            await self.manager.send_json(session_id, ev_chat_done(msg, request_id, aborted=False))
 
-        # 株価クエリは専用ツールで即時処理（LLMループによる長時間待機を回避）
+        except Exception as exc:
+            self.audit_logger.log_error(error=str(exc), user_id=user_id, session_id=session_id,
+                                        context={"message": message})
+            await self.manager.send_json(
+                session_id,
+                ev_chat_done(f"Error: {exc}", request_id, aborted=False),
+            )
+
+        finally:
+            self.manager.clear_task(session_id)
+
+    # HTTP 用エージェント実行（abort 不要）
+    async def _run_agent_http(self, user_id: str, session_id: str, message: str) -> dict:
         if is_direct_stock_price_query(message):
             quote = await stock_price(message)
             if quote.get("ok"):
@@ -384,84 +553,59 @@ class GatewayServer:
                 )
             else:
                 text = quote.get("message", "株価データを取得できませんでした。")
+            return {"type": "agent_message", "message": text}
 
-            return {
-                "type": "agent_message",
-                "message": text,
-            }
-
-        # エージェント実行（現在日時をメッセージ先頭に付与してモデルに正確な日付を伝える）
         now = datetime.now().strftime("%Y年%m月%d日 %H:%M")
-        message_with_date = f"[システム情報: 現在の日時は {now} です]\n\n{message}"
-        content = types.Content(
-            role="user",
-            parts=[types.Part(text=message_with_date)]
-        )
+        full_msg = f"[システム情報: 現在の日時は {now} です]\n\n{message}"
+        content = types.Content(role="user", parts=[types.Part(text=full_msg)])
 
         try:
-            # ストリーミングレスポンス
             response_text = ""
-            # 無限待ち防止: モデル/ツール呼び出しが長時間停止した場合は打ち切る
             async with asyncio.timeout(45):
                 async for event in self.runner.run_async(
-                    user_id=user_id,
-                    session_id=session_id,
-                    new_message=content,
+                    user_id=user_id, session_id=session_id, new_message=content,
                 ):
-                    if event.is_final_response():
-                        if event.content and event.content.parts:
-                            for part in event.content.parts:
-                                if part.text:
-                                    response_text += part.text
+                    if event.is_final_response() and event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                response_text += part.text
 
             if not response_text.strip():
-                response_text = (
-                    "応答の生成に失敗しました。もう一度試すか、質問を少し具体化してください。"
-                )
+                response_text = "応答の生成に失敗しました。もう一度試すか、質問を少し具体化してください。"
 
-            # 監査ログ
             self.audit_logger.log_agent_message(
-                agent_name="root_agent",
-                message=response_text,
-                user_id=user_id,
-                session_id=session_id,
+                agent_name="root_agent", message=response_text,
+                user_id=user_id, session_id=session_id,
             )
-
-            return {
-                "type": "agent_message",
-                "message": response_text,
-            }
+            return {"type": "agent_message", "message": response_text}
 
         except TimeoutError:
-            error_message = (
-                "Agent timed out after 45 seconds. "
-                "Please try again with a more specific query."
-            )
-            self.audit_logger.log_error(
-                error=error_message,
-                user_id=user_id,
-                session_id=session_id,
-                context={"message": message, "reason": "timeout"},
-            )
-            return {
-                "type": "error",
-                "message": error_message,
-            }
-        except Exception as e:
-            error_message = f"Error: {str(e)}"
-            self.audit_logger.log_error(
-                error=str(e),
-                user_id=user_id,
-                session_id=session_id,
-                context={"message": message},
-            )
-            return {
-                "type": "error",
-                "message": error_message,
-            }
+            msg = "Agent timed out after 45 seconds. Please try again with a more specific query."
+            self.audit_logger.log_error(error=msg, user_id=user_id, session_id=session_id,
+                                        context={"message": message, "reason": "timeout"})
+            return {"type": "error", "message": msg}
+
+        except Exception as exc:
+            self.audit_logger.log_error(error=str(exc), user_id=user_id, session_id=session_id,
+                                        context={"message": message})
+            return {"type": "error", "message": f"Error: {exc}"}
+
+    # ------------------------------------------------------------------
+    # heartbeat
+    # ------------------------------------------------------------------
+
+    async def _heartbeat_loop(self) -> None:
+        while True:
+            await asyncio.sleep(_HEARTBEAT_INTERVAL)
+            if self.manager.active_connections:
+                tick = ev_health_tick(len(self.manager.active_connections))
+                await self.manager.broadcast_json(tick)
+
+    # ------------------------------------------------------------------
+    # run
+    # ------------------------------------------------------------------
 
     def run(self, host: Optional[str] = None, port: Optional[int] = None):
-        """サーバー起動"""
         import uvicorn
         uvicorn.run(
             self.app,
@@ -471,5 +615,4 @@ class GatewayServer:
 
 
 def create_gateway() -> GatewayServer:
-    """ゲートウェイインスタンスを作成"""
     return GatewayServer()
