@@ -1,4 +1,5 @@
 import asyncio
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 
@@ -34,7 +35,13 @@ class _FakeScheduler:
         return []
 
 
-def _build_gateway(monkeypatch, tmp_path):
+def _build_gateway(
+    monkeypatch,
+    tmp_path,
+    *,
+    gateway_api_key=None,
+    gateway_auth_user_header=None,
+):
     transcript_module._store = TranscriptStore(tmp_path / "transcript.db")
     tool_policy_module._engine = None
     scheduler = _FakeScheduler()
@@ -44,6 +51,16 @@ def _build_gateway(monkeypatch, tmp_path):
 
     monkeypatch.setattr(server_module, "ensure_skills_loaded", _noop_skills)
     monkeypatch.setattr(server_module, "get_scheduler", lambda: scheduler)
+    monkeypatch.setattr(
+        server_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            gateway_api_key=gateway_api_key,
+            gateway_auth_user_header=gateway_auth_user_header,
+            gateway_host="127.0.0.1",
+            gateway_port=18789,
+        ),
+    )
 
     gateway = server_module.GatewayServer()
 
@@ -139,3 +156,114 @@ def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
             assert gateway.tool_policy.get_pending_approval("req-123") is None
+
+
+def test_cron_main_delivery_rejects_startup_without_bound_session(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    try:
+        gateway._resolve_cron_delivery_target(
+            {
+                "delivery_target": "main",
+                "system_event": "startup",
+            }
+        )
+        raise AssertionError("expected ValueError")
+    except ValueError as exc:
+        assert "connect/disconnect" in str(exc)
+
+
+def test_http_auth_uses_authenticated_user_header_for_transcript_ownership(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(
+        monkeypatch,
+        tmp_path,
+        gateway_api_key="secret-token",
+        gateway_auth_user_header="X-Auth-User",
+    )
+    alice_headers = {
+        "Authorization": "Bearer secret-token",
+        "X-Auth-User": "alice",
+    }
+    bob_headers = {
+        "Authorization": "Bearer secret-token",
+        "X-Auth-User": "bob",
+    }
+
+    with TestClient(gateway.app) as client:
+        run = client.post(
+            "/agent/run",
+            headers=alice_headers,
+            json={"user_id": "mallory", "message": "private transcript"},
+        )
+        assert run.status_code == 200
+        payload = run.json()
+        session_id = payload["session_id"]
+
+        assert payload["user_id"] == "alice"
+        stored = gateway.transcript.get_session(session_id)
+        assert stored is not None
+        assert stored.user_id == "alice"
+
+        sessions = client.get("/sessions/mallory", headers=alice_headers)
+        assert sessions.status_code == 200
+        listed = sessions.json()["sessions"]
+        assert listed[0]["id"] == session_id
+        assert listed[0]["user_id"] == "alice"
+
+        denied = client.get(f"/sessions/alice/{session_id}/history", headers=bob_headers)
+        assert denied.status_code == 404
+
+
+def test_http_auth_requires_trusted_user_header_when_configured(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(
+        monkeypatch,
+        tmp_path,
+        gateway_api_key="secret-token",
+        gateway_auth_user_header="X-Auth-User",
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/agent/run",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"user_id": "alice", "message": "missing header"},
+        )
+        assert response.status_code == 401
+        assert "X-Auth-User" in response.json()["detail"]
+
+
+def test_http_auth_without_identity_header_uses_shared_api_key_principal(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(
+        monkeypatch,
+        tmp_path,
+        gateway_api_key="secret-token",
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/agent/run",
+            headers={"Authorization": "Bearer secret-token"},
+            json={"user_id": "mallory", "message": "shared principal"},
+        )
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["user_id"] == gateway._shared_api_key_principal()
+        assert payload["user_id"] != "mallory"
+
+
+def test_websocket_auth_ignores_path_user_id_when_identity_header_is_present(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(
+        monkeypatch,
+        tmp_path,
+        gateway_api_key="secret-token",
+        gateway_auth_user_header="X-Auth-User",
+    )
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect(
+            "/ws/spoofed?token=secret-token",
+            headers={"X-Auth-User": "alice"},
+        ) as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+            assert connected["user_id"] == "alice"

@@ -55,6 +55,14 @@ class Settings(BaseSettings):
     audit_log_path: Path = Field(default=Path("data/audit.log"), description="Audit log path")
     shell_enabled: bool = Field(default=True, description="Enable shell execution")
     gateway_api_key: Optional[str] = Field(default=None, description="API key for gateway auth (empty = auth disabled)")
+    gateway_auth_user_header: Optional[str] = Field(
+        default=None,
+        description=(
+            "Trusted header containing the authenticated user id when gateway auth "
+            "is enabled. If unset, all requests authenticated by the shared API key "
+            "share a single derived principal."
+        ),
+    )
     file_workspace_paths: str = Field(
         default="",
         description="Comma-separated allowed file paths. Empty = blocklist only (no whitelist).",

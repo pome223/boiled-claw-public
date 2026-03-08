@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -76,42 +77,44 @@ class TranscriptStore:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._init_db()
 
     def _init_db(self) -> None:
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS transcript_sessions (
-                session_id     TEXT PRIMARY KEY,
-                user_id        TEXT NOT NULL,
-                created_at     REAL NOT NULL,
-                last_activity  REAL NOT NULL,
-                entry_count    INTEGER NOT NULL DEFAULT 0,
-                preview        TEXT NOT NULL DEFAULT '',
-                last_role      TEXT NOT NULL DEFAULT '',
-                last_preview   TEXT NOT NULL DEFAULT ''
-            )
-        """)
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS transcript (
-                id          TEXT PRIMARY KEY,
-                session_id  TEXT NOT NULL,
-                role        TEXT NOT NULL,
-                content     TEXT NOT NULL DEFAULT '',
-                request_id  TEXT,
-                aborted     INTEGER NOT NULL DEFAULT 0,
-                metadata    TEXT NOT NULL DEFAULT '{}',
-                created_at  REAL NOT NULL
-            )
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_transcript_session
-            ON transcript (session_id, created_at)
-        """)
-        self._conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_transcript_sessions_user
-            ON transcript_sessions (user_id, last_activity)
-        """)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS transcript_sessions (
+                    session_id     TEXT PRIMARY KEY,
+                    user_id        TEXT NOT NULL,
+                    created_at     REAL NOT NULL,
+                    last_activity  REAL NOT NULL,
+                    entry_count    INTEGER NOT NULL DEFAULT 0,
+                    preview        TEXT NOT NULL DEFAULT '',
+                    last_role      TEXT NOT NULL DEFAULT '',
+                    last_preview   TEXT NOT NULL DEFAULT ''
+                )
+            """)
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS transcript (
+                    id          TEXT PRIMARY KEY,
+                    session_id  TEXT NOT NULL,
+                    role        TEXT NOT NULL,
+                    content     TEXT NOT NULL DEFAULT '',
+                    request_id  TEXT,
+                    aborted     INTEGER NOT NULL DEFAULT 0,
+                    metadata    TEXT NOT NULL DEFAULT '{}',
+                    created_at  REAL NOT NULL
+                )
+            """)
+            self._conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_transcript_session
+                ON transcript (session_id, created_at)
+            """)
+            self._conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_transcript_sessions_user
+                ON transcript_sessions (user_id, last_activity)
+            """)
+            self._conn.commit()
 
     @staticmethod
     def _summarize(content: str, limit: int = 96) -> str:
@@ -122,21 +125,22 @@ class TranscriptStore:
 
     def ensure_session(self, session_id: str, user_id: str) -> TranscriptSession:
         now = time.time()
-        self._conn.execute(
-            """INSERT OR IGNORE INTO transcript_sessions
-               (session_id, user_id, created_at, last_activity)
-               VALUES (?, ?, ?, ?)""",
-            (session_id, user_id, now, now),
-        )
-        self._conn.execute(
-            """UPDATE transcript_sessions
-               SET user_id = CASE WHEN user_id = '' OR user_id = 'unknown_user'
-                                  THEN ? ELSE user_id END,
-                   last_activity = MAX(last_activity, ?)
-               WHERE session_id = ?""",
-            (user_id, now, session_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR IGNORE INTO transcript_sessions
+                   (session_id, user_id, created_at, last_activity)
+                   VALUES (?, ?, ?, ?)""",
+                (session_id, user_id, now, now),
+            )
+            self._conn.execute(
+                """UPDATE transcript_sessions
+                   SET user_id = CASE WHEN user_id = '' OR user_id = 'unknown_user'
+                                      THEN ? ELSE user_id END,
+                       last_activity = MAX(last_activity, ?)
+                   WHERE session_id = ?""",
+                (user_id, now, session_id),
+            )
+            self._conn.commit()
         session = self.get_session(session_id)
         if session is None:
             raise RuntimeError(f"failed to ensure transcript session: {session_id}")
@@ -160,31 +164,32 @@ class TranscriptStore:
         self.ensure_session(session_id, resolved_user_id)
         meta_json = json.dumps(metadata, ensure_ascii=False)
 
-        self._conn.execute(
-            """INSERT INTO transcript
-               (id, session_id, role, content, request_id, aborted, metadata, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (entry_id, session_id, role, content, request_id, 1 if aborted else 0,
-             meta_json, now),
-        )
         preview = self._summarize(content)
-        existing_preview_row = self._conn.execute(
-            "SELECT preview FROM transcript_sessions WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
-        existing_preview = existing_preview_row[0] if existing_preview_row else ""
-        session_preview = existing_preview or (preview if role == "user" else "")
-        self._conn.execute(
-            """UPDATE transcript_sessions
-               SET last_activity = ?,
-                   entry_count = entry_count + 1,
-                   preview = ?,
-                   last_role = ?,
-                   last_preview = ?
-               WHERE session_id = ?""",
-            (now, session_preview, role, preview, session_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO transcript
+                   (id, session_id, role, content, request_id, aborted, metadata, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (entry_id, session_id, role, content, request_id, 1 if aborted else 0,
+                 meta_json, now),
+            )
+            existing_preview_row = self._conn.execute(
+                "SELECT preview FROM transcript_sessions WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            existing_preview = existing_preview_row[0] if existing_preview_row else ""
+            session_preview = existing_preview or (preview if role == "user" else "")
+            self._conn.execute(
+                """UPDATE transcript_sessions
+                   SET last_activity = ?,
+                       entry_count = entry_count + 1,
+                       preview = ?,
+                       last_role = ?,
+                       last_preview = ?
+                   WHERE session_id = ?""",
+                (now, session_preview, role, preview, session_id),
+            )
+            self._conn.commit()
 
         return TranscriptEntry(
             id=entry_id,
@@ -203,46 +208,50 @@ class TranscriptStore:
         limit: int = 100,
         before: Optional[float] = None,
     ) -> List[TranscriptEntry]:
-        if before is not None:
-            rows = self._conn.execute(
-                """SELECT * FROM transcript
-                   WHERE session_id = ? AND created_at < ?
-                   ORDER BY created_at DESC LIMIT ?""",
-                (session_id, before, limit),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                """SELECT * FROM transcript
-                   WHERE session_id = ?
-                   ORDER BY created_at DESC LIMIT ?""",
-                (session_id, limit),
-            ).fetchall()
+        with self._lock:
+            if before is not None:
+                rows = self._conn.execute(
+                    """SELECT * FROM transcript
+                       WHERE session_id = ? AND created_at < ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (session_id, before, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """SELECT * FROM transcript
+                       WHERE session_id = ?
+                       ORDER BY created_at DESC LIMIT ?""",
+                    (session_id, limit),
+                ).fetchall()
 
         entries = [self._row(r) for r in rows]
         entries.reverse()  # chronological order
         return entries
 
     def get_entry(self, entry_id: str) -> Optional[TranscriptEntry]:
-        row = self._conn.execute(
-            "SELECT * FROM transcript WHERE id = ?", (entry_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM transcript WHERE id = ?", (entry_id,)
+            ).fetchone()
         return self._row(row) if row else None
 
     def session_count(self, session_id: str) -> int:
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM transcript WHERE session_id = ?",
-            (session_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM transcript WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
         return row[0] if row else 0
 
     def get_session(self, session_id: str) -> Optional[TranscriptSession]:
-        row = self._conn.execute(
-            """SELECT session_id, user_id, created_at, last_activity,
-                      entry_count, preview, last_role, last_preview
-               FROM transcript_sessions
-               WHERE session_id = ?""",
-            (session_id,),
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                """SELECT session_id, user_id, created_at, last_activity,
+                          entry_count, preview, last_role, last_preview
+                   FROM transcript_sessions
+                   WHERE session_id = ?""",
+                (session_id,),
+            ).fetchone()
         if row is None:
             return None
         return TranscriptSession(
@@ -270,25 +279,26 @@ class TranscriptStore:
         user_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """Return transcript-backed sessions ordered by last activity."""
-        if user_id:
-            rows = self._conn.execute(
-                """SELECT session_id, user_id, created_at, last_activity,
-                          entry_count, preview, last_role, last_preview
-                   FROM transcript_sessions
-                   WHERE user_id = ?
-                   ORDER BY last_activity DESC
-                   LIMIT ?""",
-                (user_id, limit),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                """SELECT session_id, user_id, created_at, last_activity,
-                          entry_count, preview, last_role, last_preview
-                   FROM transcript_sessions
-                   ORDER BY last_activity DESC
-                   LIMIT ?""",
-                (limit,),
-            ).fetchall()
+        with self._lock:
+            if user_id:
+                rows = self._conn.execute(
+                    """SELECT session_id, user_id, created_at, last_activity,
+                              entry_count, preview, last_role, last_preview
+                       FROM transcript_sessions
+                       WHERE user_id = ?
+                       ORDER BY last_activity DESC
+                       LIMIT ?""",
+                    (user_id, limit),
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    """SELECT session_id, user_id, created_at, last_activity,
+                              entry_count, preview, last_role, last_preview
+                       FROM transcript_sessions
+                       ORDER BY last_activity DESC
+                       LIMIT ?""",
+                    (limit,),
+                ).fetchall()
         return [
             TranscriptSession(
                 session_id=r[0],

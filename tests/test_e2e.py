@@ -181,7 +181,7 @@ class TestTranscriptApi:
 
     def test_transcript_sessions_list(self, client):
         """GET /transcript/sessions returns session summaries."""
-        r = client.get("/transcript/sessions")
+        r = client.get("/transcript/sessions?user_id=e2e_user")
         assert r.status_code == 200
         data = r.json()
         assert "sessions" in data
@@ -273,12 +273,13 @@ class TestCronApi:
             "cron_expr": "0 0 * * *",
             "task": "platform test",
             "delivery_target": "main",
+            "session_id": "sess-platform",
             "max_retries": 3,
             "retry_delay": 60,
         })
         assert r.status_code == 200
         job = r.json()["job"]
-        assert job["delivery_target"] == "main"
+        assert job["delivery_target"] == "session:sess-platform"
         assert job["max_retries"] == 3
         assert job["retry_delay"] == 60
 

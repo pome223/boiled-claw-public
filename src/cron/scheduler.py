@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field, replace
@@ -83,6 +84,7 @@ class CronScheduler:
         self._db_path = db_path
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+        self._lock = threading.Lock()
         self._loop_task: Optional[asyncio.Task] = None
         self._notifier: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
         self._spawn_fn: Optional[Callable[..., Awaitable[Dict[str, Any]]]] = None
@@ -93,42 +95,44 @@ class CronScheduler:
     # ------------------------------------------------------------------
 
     def _init_db(self) -> None:
-        self._conn.execute("""
-            CREATE TABLE IF NOT EXISTS cron_jobs (
-                id          TEXT PRIMARY KEY,
-                name        TEXT NOT NULL,
-                cron_expr   TEXT NOT NULL,
-                task        TEXT NOT NULL,
-                agent_id    TEXT NOT NULL DEFAULT 'web_researcher',
-                enabled     INTEGER NOT NULL DEFAULT 1,
-                created_at  REAL NOT NULL,
-                last_run    REAL,
-                next_run    REAL,
-                run_count   INTEGER NOT NULL DEFAULT 0,
-                last_result TEXT,
-                last_error  TEXT
-            )
-        """)
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS cron_jobs (
+                    id          TEXT PRIMARY KEY,
+                    name        TEXT NOT NULL,
+                    cron_expr   TEXT NOT NULL,
+                    task        TEXT NOT NULL,
+                    agent_id    TEXT NOT NULL DEFAULT 'web_researcher',
+                    enabled     INTEGER NOT NULL DEFAULT 1,
+                    created_at  REAL NOT NULL,
+                    last_run    REAL,
+                    next_run    REAL,
+                    run_count   INTEGER NOT NULL DEFAULT 0,
+                    last_result TEXT,
+                    last_error  TEXT
+                )
+            """)
+            self._conn.commit()
         self._migrate()
 
     def _migrate(self) -> None:
         """Add platform columns if they don't exist yet."""
-        existing = {
-            row[1]
-            for row in self._conn.execute("PRAGMA table_info(cron_jobs)").fetchall()
-        }
-        migrations = [
-            ("delivery_target", "TEXT NOT NULL DEFAULT 'isolated'"),
-            ("max_retries", "INTEGER NOT NULL DEFAULT 0"),
-            ("retry_delay", "INTEGER NOT NULL DEFAULT 30"),
-            ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
-            ("system_event", "TEXT"),
-        ]
-        for col, typedef in migrations:
-            if col not in existing:
-                self._conn.execute(f"ALTER TABLE cron_jobs ADD COLUMN {col} {typedef}")
-        self._conn.commit()
+        with self._lock:
+            existing = {
+                row[1]
+                for row in self._conn.execute("PRAGMA table_info(cron_jobs)").fetchall()
+            }
+            migrations = [
+                ("delivery_target", "TEXT NOT NULL DEFAULT 'isolated'"),
+                ("max_retries", "INTEGER NOT NULL DEFAULT 0"),
+                ("retry_delay", "INTEGER NOT NULL DEFAULT 30"),
+                ("retry_count", "INTEGER NOT NULL DEFAULT 0"),
+                ("system_event", "TEXT"),
+            ]
+            for col, typedef in migrations:
+                if col not in existing:
+                    self._conn.execute(f"ALTER TABLE cron_jobs ADD COLUMN {col} {typedef}")
+            self._conn.commit()
 
     def set_notifier(self, fn: Optional[Callable[[Dict[str, Any]], Awaitable[None]]]) -> None:
         self._notifier = fn
@@ -198,43 +202,48 @@ class CronScheduler:
         now = time.time()
         next_run = self._next_ts(cron_expr, now) if not system_event else None
 
-        self._conn.execute(
-            """INSERT INTO cron_jobs
-               (id, name, cron_expr, task, agent_id, created_at, next_run,
-                delivery_target, max_retries, retry_delay, system_event)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (job_id, name.strip(), cron_expr, task.strip(), agent_id, now,
-             next_run, delivery_target, max_retries, retry_delay, system_event),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO cron_jobs
+                   (id, name, cron_expr, task, agent_id, created_at, next_run,
+                    delivery_target, max_retries, retry_delay, system_event)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (job_id, name.strip(), cron_expr, task.strip(), agent_id, now,
+                 next_run, delivery_target, max_retries, retry_delay, system_event),
+            )
+            self._conn.commit()
         return self._fetch(job_id)  # type: ignore[return-value]
 
     def list_jobs(self) -> List[CronJob]:
-        rows = self._conn.execute(
-            "SELECT * FROM cron_jobs ORDER BY created_at DESC"
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM cron_jobs ORDER BY created_at DESC"
+            ).fetchall()
         return [self._row(r) for r in rows]
 
     def get_job(self, job_id: str) -> Optional[CronJob]:
         return self._fetch(job_id)
 
     def delete_job(self, job_id: str) -> bool:
-        cur = self._conn.execute("DELETE FROM cron_jobs WHERE id = ?", (job_id,))
-        self._conn.commit()
+        with self._lock:
+            cur = self._conn.execute("DELETE FROM cron_jobs WHERE id = ?", (job_id,))
+            self._conn.commit()
         return cur.rowcount > 0
 
     def toggle_job(self, job_id: str, enabled: bool) -> Optional[CronJob]:
-        self._conn.execute(
-            "UPDATE cron_jobs SET enabled = ? WHERE id = ?",
-            (1 if enabled else 0, job_id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "UPDATE cron_jobs SET enabled = ? WHERE id = ?",
+                (1 if enabled else 0, job_id),
+            )
+            self._conn.commit()
         return self._fetch(job_id)
 
     def _fetch(self, job_id: str) -> Optional[CronJob]:
-        row = self._conn.execute(
-            "SELECT * FROM cron_jobs WHERE id = ?", (job_id,)
-        ).fetchone()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM cron_jobs WHERE id = ?", (job_id,)
+            ).fetchone()
         return self._row(row) if row else None
 
     @staticmethod
@@ -279,14 +288,15 @@ class CronScheduler:
 
     async def _tick(self) -> None:
         now = time.time()
-        rows = self._conn.execute(
-            """SELECT * FROM cron_jobs
-               WHERE enabled = 1
-                 AND next_run IS NOT NULL
-                 AND next_run <= ?
-                 AND (system_event IS NULL OR system_event = '')""",
-            (now,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                """SELECT * FROM cron_jobs
+                   WHERE enabled = 1
+                     AND next_run IS NOT NULL
+                     AND next_run <= ?
+                     AND (system_event IS NULL OR system_event = '')""",
+                (now,),
+            ).fetchall()
         for row in rows:
             asyncio.create_task(self._run_job(self._row(row)), name=f"cron:{row[0]}")
 
@@ -295,10 +305,11 @@ class CronScheduler:
 
         Returns the number of jobs fired.
         """
-        rows = self._conn.execute(
-            "SELECT * FROM cron_jobs WHERE enabled = 1 AND system_event = ?",
-            (event_name,),
-        ).fetchall()
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM cron_jobs WHERE enabled = 1 AND system_event = ?",
+                (event_name,),
+            ).fetchall()
         count = 0
         for row in rows:
             job = self._row(row)
@@ -326,13 +337,14 @@ class CronScheduler:
         else:
             next_run = None
 
-        self._conn.execute(
-            """UPDATE cron_jobs
-               SET last_run = ?, next_run = ?, run_count = run_count + 1
-               WHERE id = ?""",
-            (time.time(), next_run, job.id),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """UPDATE cron_jobs
+                   SET last_run = ?, next_run = ?, run_count = run_count + 1
+                   WHERE id = ?""",
+                (time.time(), next_run, job.id),
+            )
+            self._conn.commit()
 
         retry_label = f" (retry {retry_attempt}/{job.max_retries})" if retry_attempt > 0 else ""
         requester_session_id = f"cron_{job.id}"
@@ -363,11 +375,12 @@ class CronScheduler:
                 mode=mode,
             )
             snippet = json.dumps(result, ensure_ascii=False)[:200]
-            self._conn.execute(
-                "UPDATE cron_jobs SET last_result = ?, last_error = NULL, retry_count = 0 WHERE id = ?",
-                (snippet, job.id),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE cron_jobs SET last_result = ?, last_error = NULL, retry_count = 0 WHERE id = ?",
+                    (snippet, job.id),
+                )
+                self._conn.commit()
             run_id = result.get("run_id", "?")
             await self._notify(
                 job.id,
@@ -377,11 +390,12 @@ class CronScheduler:
                 delivery_target=job.delivery_target,
             )
         except Exception as exc:
-            self._conn.execute(
-                "UPDATE cron_jobs SET last_error = ?, retry_count = ? WHERE id = ?",
-                (str(exc), retry_attempt + 1, job.id),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    "UPDATE cron_jobs SET last_error = ?, retry_count = ? WHERE id = ?",
+                    (str(exc), retry_attempt + 1, job.id),
+                )
+                self._conn.commit()
             await self._notify(
                 job.id,
                 "failed",

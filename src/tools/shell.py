@@ -10,14 +10,7 @@ from google.adk.agents.context import Context as ToolContext
 
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
-
-
-def _resolve_tool_context(tool_context: Optional[ToolContext]) -> dict[str, str]:
-    session = getattr(tool_context, "session", None)
-    return {
-        "agent_name": getattr(tool_context, "agent_name", None) or "unknown_agent",
-        "session_id": getattr(session, "id", None) or "",
-    }
+from src.tools.context import resolve_tool_context
 
 
 async def _check_tool_policy(
@@ -28,7 +21,7 @@ async def _check_tool_policy(
     if tool_context is None:
         return None
 
-    ctx = _resolve_tool_context(tool_context)
+    ctx = resolve_tool_context(tool_context)
     engine = get_tool_policy_engine()
     action, reason = engine.evaluate(ctx["agent_name"], tool_name)
     if action == "allow":

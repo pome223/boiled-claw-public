@@ -9,6 +9,8 @@ Typed Gateway Protocol v1:
 """
 
 import asyncio
+from collections.abc import Mapping
+import hashlib
 import json
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -43,6 +45,8 @@ from src.cron.scheduler import get_scheduler
 
 _HEARTBEAT_INTERVAL = 30  # seconds
 _AGENT_TIMEOUT = 120       # seconds
+_MAX_PENDING_PER_SESSION = 100
+_MAX_PENDING_SESSIONS = 500
 
 
 class ConnectionManager:
@@ -64,6 +68,7 @@ class ConnectionManager:
     def disconnect(self, session_id: str) -> None:
         self.active_connections.pop(session_id, None)
         self._session_users.pop(session_id, None)
+        self._pending_events.pop(session_id, None)
 
     def get_user_id(self, session_id: str) -> Optional[str]:
         return self._session_users.get(session_id)
@@ -89,7 +94,13 @@ class ConnectionManager:
         if session_id in self.active_connections:
             await self.send_json(session_id, data)
             return
-        self._pending_events.setdefault(session_id, []).append(data)
+        queue = self._pending_events.setdefault(session_id, [])
+        if len(queue) >= _MAX_PENDING_PER_SESSION:
+            queue.pop(0)
+        queue.append(data)
+        if len(self._pending_events) > _MAX_PENDING_SESSIONS:
+            oldest_key = next(iter(self._pending_events))
+            del self._pending_events[oldest_key]
 
     async def flush_pending(self, session_id: str) -> None:
         pending = self._pending_events.pop(session_id, [])
@@ -220,6 +231,64 @@ class GatewayServer:
         self.tool_policy.set_notifier(_approval_notifier)
         self._setup_routes()
 
+    def _shared_api_key_principal(self) -> str:
+        api_key = self.settings.gateway_api_key or ""
+        digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+        return f"gateway_api:{digest}"
+
+    def _resolve_effective_user_id(
+        self,
+        requested_user_id: Optional[str],
+        *,
+        headers: Mapping[str, str],
+        default_user_id: str,
+    ) -> str:
+        requested = (requested_user_id or "").strip()
+        if not self.settings.gateway_api_key:
+            return requested or default_user_id
+
+        trusted_header = (
+            getattr(self.settings, "gateway_auth_user_header", None) or ""
+        ).strip()
+        if trusted_header:
+            authenticated_user_id = (headers.get(trusted_header) or "").strip()
+            if not authenticated_user_id:
+                raise HTTPException(
+                    status_code=401,
+                    detail=f"Missing authenticated user header: {trusted_header}",
+                )
+            return authenticated_user_id
+
+        # Shared API key mode has a single authenticated principal, so caller-supplied
+        # user_id values must not affect transcript ownership checks.
+        return self._shared_api_key_principal()
+
+    def _resolve_http_user_id(
+        self,
+        request: Request,
+        requested_user_id: Optional[str],
+        *,
+        default_user_id: str,
+    ) -> str:
+        return self._resolve_effective_user_id(
+            requested_user_id,
+            headers=request.headers,
+            default_user_id=default_user_id,
+        )
+
+    def _resolve_websocket_user_id(
+        self,
+        websocket: WebSocket,
+        requested_user_id: Optional[str],
+        *,
+        default_user_id: str,
+    ) -> str:
+        return self._resolve_effective_user_id(
+            requested_user_id,
+            headers=websocket.headers,
+            default_user_id=default_user_id,
+        )
+
     # ------------------------------------------------------------------
     # routes
     # ------------------------------------------------------------------
@@ -296,18 +365,21 @@ class GatewayServer:
         # --- sessions ---
 
         @self.app.get("/sessions/{user_id}")
-        async def list_sessions(user_id: str):
-            sessions = self.transcript.list_sessions(user_id=user_id)
+        async def list_sessions(user_id: str, request: Request):
+            effective_user_id = self._resolve_http_user_id(
+                request, user_id, default_user_id="api_user"
+            )
+            sessions = self.transcript.list_sessions(user_id=effective_user_id)
             if not sessions:
                 response = await self.session_service.list_sessions(
-                    app_name="boiled-claw", user_id=user_id
+                    app_name="boiled-claw", user_id=effective_user_id
                 )
                 hydrated = response.sessions or []
                 return {
                     "sessions": [
                         {
                             "id": s.id,
-                            "user_id": user_id,
+                            "user_id": effective_user_id,
                             "last_activity": getattr(s, "last_update_time", 0.0),
                             "preview": "",
                             "entry_count": len(getattr(s, "events", []) or []),
@@ -333,12 +405,16 @@ class GatewayServer:
 
         @self.app.get("/sessions/{user_id}/{session_id}/history")
         async def get_session_history(
+            request: Request,
             user_id: str,
             session_id: str,
             limit: int = Query(default=100, ge=1, le=500),
             before: Optional[float] = Query(default=None),
         ):
-            if not self.transcript.has_session(session_id, user_id):
+            effective_user_id = self._resolve_http_user_id(
+                request, user_id, default_user_id="api_user"
+            )
+            if not self.transcript.has_session(session_id, effective_user_id):
                 raise HTTPException(status_code=404, detail="session not found")
             entries = self.transcript.get_history(session_id, limit=limit, before=before)
             return {
@@ -348,15 +424,35 @@ class GatewayServer:
             }
 
         @self.app.get("/transcript/sessions")
-        async def list_transcript_sessions(limit: int = Query(default=50, ge=1, le=200)):
-            return {"sessions": self.transcript.list_sessions(limit=limit)}
+        async def list_transcript_sessions(
+            request: Request,
+            user_id: str = Query(...),
+            limit: int = Query(default=50, ge=1, le=200),
+        ):
+            effective_user_id = self._resolve_http_user_id(
+                request, user_id, default_user_id="api_user"
+            )
+            return {
+                "sessions": self.transcript.list_sessions(
+                    user_id=effective_user_id,
+                    limit=limit,
+                )
+            }
 
         # --- agent/run (HTTP) ---
 
         @self.app.post("/agent/run")
-        async def run_agent_endpoint(payload: Dict[str, Any] | None = Body(default=None)):
+        async def run_agent_endpoint(
+            request: Request,
+            payload: Dict[str, Any] | None = Body(default=None),
+        ):
             body = payload or {}
-            user_id = str(body.get("user_id") or "api_user")
+            requested_user_id = str(body.get("user_id") or "api_user")
+            user_id = self._resolve_http_user_id(
+                request,
+                requested_user_id,
+                default_user_id="api_user",
+            )
             message = str(body.get("message") or "").strip()
             session_id = body.get("session_id")
 
@@ -504,6 +600,15 @@ class GatewayServer:
                 if token != self.settings.gateway_api_key:
                     await websocket.close(code=4401, reason="Unauthorized")
                     return
+            try:
+                user_id = self._resolve_websocket_user_id(
+                    websocket,
+                    user_id,
+                    default_user_id="web_user",
+                )
+            except HTTPException as exc:
+                await websocket.close(code=4401, reason=str(exc.detail))
+                return
 
             session = await self._get_or_create_gateway_session(
                 user_id=user_id,
@@ -920,8 +1025,16 @@ class GatewayServer:
     def _resolve_cron_delivery_target(self, payload: Dict[str, Any]) -> str:
         delivery_target = str(payload.get("delivery_target") or "isolated").strip()
         bound_session_id = str(payload.get("session_id") or "").strip()
-        if delivery_target == "main" and bound_session_id:
-            return f"session:{bound_session_id}"
+        system_event = payload.get("system_event") or None
+        if delivery_target == "main":
+            if bound_session_id:
+                return f"session:{bound_session_id}"
+            if system_event in {"connect", "disconnect"}:
+                return "main"
+            raise ValueError(
+                "delivery_target='main' requires either a session_id binding "
+                "or a connect/disconnect system_event trigger"
+            )
         return delivery_target or "isolated"
 
     async def _emit_session_event(
