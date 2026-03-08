@@ -56,3 +56,6 @@ target-version = "py311"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+markers = [
+    "e2e: end-to-end tests requiring a running gateway",
+]
