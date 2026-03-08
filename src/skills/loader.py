@@ -22,6 +22,9 @@ class MarkdownSkill(BaseSkill):
         self.content = content
 
     def get_metadata(self) -> SkillMetadata:
+        # Markdown skills are instruction-first: execute() returns the SKILL.md
+        # body so callers such as skill_spawn can reuse it as an agent prompt.
+        # Python skills are separate and can define their own behavior.
         return SkillMetadata(
             name=self.metadata.get("name", self.skill_file.parent.name),
             description=self.metadata.get(
