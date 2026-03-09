@@ -15,8 +15,11 @@ OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベ
 - 💬 **マルチチャネル** - Telegram, Discord, WebSocket 対応
 - 🤝 **マルチエージェント委譲** - ADK sub_agents + AgentTool + sessions_spawn
 - 🔧 **動的エージェント生成** - 実行時に MCP サーバーをアタッチしてエージェントを生成
+- 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
+- 📝 **永続 transcript** - SQLite-backed session history を Gateway が保持
+- ⏰ **Cron platform** - system event 連動、delivery target、retry をサポート
 - 🔌 **MCP サポート** - SSE / HTTP / stdio 接続に対応したサンプル MCP サーバー同梱
-- 🔒 **セキュリティ** - 監査ログ、コマンドポリシー
+- 🔒 **セキュリティ** - 監査ログ、コマンドポリシー、tool approvals
 - 📦 **拡張可能** - スキルプラグインシステム
 - 🐳 **Docker対応** - `docker compose` で簡単デプロイ
 
@@ -26,7 +29,7 @@ OpenClaw の本質的アーキテクチャを Python で再現:
 
 ```
 boiled-claw/
-├── Gateway (WebSocket制御プレーン: ws://127.0.0.1:18789)
+├── Gateway (typed WS control plane + transcript + cron + approvals)
 ├── Agents (Gemini 3.0 Flash ベース)
 │   ├── Root Agent (メイン)
 │   ├── Sub Agents (Web, File, System, Memory, Browser)
@@ -38,7 +41,7 @@ boiled-claw/
 │   ├── Discord
 │   └── WebSocket
 ├── Memory (SQLite + ベクトル検索)
-├── Security (監査ログ + ポリシー)
+├── Security (監査ログ + tool policy + approvals)
 └── Skills (プラグイン拡張)
 ```
 
@@ -64,9 +67,17 @@ pip install -e ".[all]"
 ```bash
 cp .env.example .env
 # .env を編集して GOOGLE_API_KEY を設定
+# 必要に応じて Gateway auth も設定:
+# GATEWAY_API_KEY=change-me
+# GATEWAY_AUTH_USER_HEADER=X-Auth-User
 ```
 
 Google API Key は [Google AI Studio](https://aistudio.google.com/apikey) で取得できます。
+
+`GATEWAY_API_KEY` を設定すると Gateway の HTTP / WebSocket API に認証が掛かります。
+さらに `GATEWAY_AUTH_USER_HEADER` を設定した場合、effective `user_id` はその trusted header
+から解決され、path や body に含まれる `user_id` では上書きできません。`GATEWAY_AUTH_USER_HEADER`
+を未設定のまま shared API key を使う場合、認証済みリクエストは単一の shared principal に束ねられます。
 
 ### 3. 実行
 
@@ -80,7 +91,9 @@ boiled-claw
 #### Webサーバーモード (WebSocket Gateway)
 ```bash
 python -m src.main web
+# Web UI: http://127.0.0.1:18789/chat
 # WebSocket endpoint: ws://127.0.0.1:18789/ws/{user_id}
+# Protocol schema: http://127.0.0.1:18789/protocol
 ```
 
 #### チャネルモード (Telegram, Discord)
@@ -133,12 +146,15 @@ boiled-claw/
 │   │   └── model_config.py     # モデル設定管理
 │   ├── gateway/
 │   │   ├── server.py           # WebSocketゲートウェイサーバー
+│   │   ├── protocol.py         # Typed Gateway Protocol v1
+│   │   ├── transcript.py       # 永続 transcript / history
 │   │   ├── session_manager.py  # セッション管理
 │   │   └── router.py           # メッセージルーティング
 │   ├── tools/
 │   │   ├── web_search.py       # Web検索
 │   │   ├── shell.py            # シェル実行
 │   │   ├── file_manager.py     # ファイル操作
+│   │   ├── context.py          # ToolContext 共通解決
 │   │   ├── browser.py          # ブラウザ自動化
 │   │   ├── memory.py           # メモリツール
 │   │   └── subagents.py        # サブエージェント・動的エージェント管理
@@ -153,7 +169,8 @@ boiled-claw/
 │   │   └── (メモリストア実装)
 │   ├── security/
 │   │   ├── audit.py            # 監査ログ
-│   │   └── policy.py           # セキュリティポリシー
+│   │   ├── policy.py           # コマンド/パス セキュリティポリシー
+│   │   └── tool_policy.py      # tool approvals / per-agent policy
 │   ├── config/
 │   │   ├── settings.py         # Pydantic設定
 │   │   └── schema.py           # 設定スキーマ
@@ -188,37 +205,84 @@ Python 3.12がリリースされました...
 
 ```python
 import asyncio
-import websockets
 import json
+import websockets
 
 async def chat():
     uri = "ws://127.0.0.1:18789/ws/my_user_id"
     async with websockets.connect(uri) as websocket:
-        # メッセージ送信
+        connected = json.loads(await websocket.recv())
+        print("connected:", connected)
+
         await websocket.send(json.dumps({
-            "type": "message",
-            "message": "Hello, boiled-claw!"
+            "event": "chat.send",
+            "text": "Hello, boiled-claw!",
+            "request_id": "demo-1"
         }))
 
-        # レスポンス受信
-        response = await websocket.recv()
-        print(json.loads(response))
+        while True:
+            event = json.loads(await websocket.recv())
+            print(event)
+            if event["event"] == "chat.done":
+                break
 
 asyncio.run(chat())
 ```
+
+クライアントから送る主なイベント:
+
+- `chat.send`
+- `chat.inject`
+- `chat.abort`
+- `chat.history`
+- `presence.ping`
+- `tools.approval`
+
+サーバーから返る主なイベント:
+
+- `connected`
+- `chat.done`
+- `chat.history`
+- `system.event`
+- `health.tick`
+- `cron.update`
+- `tools.approval_request`
+
+イベント schema は `GET /protocol` で取得できます。
 
 ### HTTP API（curl）で使う
 
 ```bash
 curl -sS -X POST http://127.0.0.1:18789/agent/run \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
   -d '{
     "user_id": "curl_user",
     "message": "NVIDIAの最新ニュースを3つ教えて"
   }'
 ```
 
+`GATEWAY_API_KEY` を設定していない場合は `Authorization` ヘッダは不要です。
 `session_id` を指定すれば同一会話を継続できます。
+
+### Gateway 認証と `user_id`
+
+- 認証無効時: HTTP body / WebSocket path の `user_id` をそのまま使います。
+- `GATEWAY_API_KEY` のみ設定時: 認証済みリクエストは single shared principal に束ねられます。
+- `GATEWAY_API_KEY` + `GATEWAY_AUTH_USER_HEADER` 設定時: effective `user_id` は trusted header から解決されます。
+
+つまり、認証有効時は path/body の `user_id` を transcript ownership の境界として信用しません。
+reverse proxy や API gateway で認証済みユーザー ID を `GATEWAY_AUTH_USER_HEADER` に流す構成を想定しています。
+
+### Gateway の主要エンドポイント
+
+- `GET /protocol` - typed protocol schema
+- `GET /sessions/{user_id}` - セッション一覧
+- `GET /sessions/{user_id}/{session_id}/history` - transcript history
+- `GET /transcript/sessions?user_id=...` - transcript-backed session summaries
+- `POST /cron` / `GET /cron` - cron platform
+- `GET /tools/policy` - tool policy 一覧
+- `GET /tools/approvals` - pending approval 一覧
 
 ### Telegramで使う
 
@@ -248,6 +312,7 @@ curl -sS -X POST http://127.0.0.1:18789/agent/run \
 - **subagents_kill** - サブエージェント実行停止
 - **skill_list** - ロード済みスキル一覧を取得
 - **skill_execute** - 指定スキルを実行
+- **skill_spawn** - スキル内容を instruction にして動的 Agent を起動
 
 ### 動的エージェント生成 (sessions_spawn_dynamic)
 
@@ -308,7 +373,9 @@ Docker ネットワーク内からは `http://boiled-claw-mcp-sample:8765/sse` �
 - `skills/<name>/SKILL.md` を追加すると起動時に自動ロードされます（OpenClaw 形式）。
 - 互換性のために `skills/*.py` の旧形式も引き続きロードされます。
 - ゲートウェイ起動後に `GET /skills` でロード状況を確認できます。
-- サンプルとして `skills/coding-agent/SKILL.md` を同梱しています。
+- `skill_execute` はスキル内容の確認・実行に使います。
+- `skill_spawn` はスキル内容を dynamic agent の instruction として使い、タスク実行を委譲します。
+- サンプルとして `skills/coding-agent/SKILL.md` と `skills/e2e-test/SKILL.md` を同梱しています。
 
 ### セキュリティ
 
@@ -316,6 +383,9 @@ Docker ネットワーク内からは `http://boiled-claw-mcp-sample:8765/sse` �
 - コマンドブロックリスト
 - パスアクセス制御
 - 秘密情報検出
+- per-agent tool policy
+- tool approval request / resolve (`tools.approval_request`, `tools.approval`)
+- Gateway API key + trusted identity header による transcript ownership 保護
 
 ### チャネル
 
@@ -347,6 +417,10 @@ ruff check src/
 - [x] ブラウザ自動化 (Playwright)
 - [x] メモリシステム (SQLite + ベクトル検索)
 - [x] WebSocketゲートウェイ
+- [x] Typed Gateway Protocol v1
+- [x] Gateway-owned transcript / history persistence
+- [x] Cron platform (delivery target / retry / system events)
+- [x] Tool security / approvals
 - [x] Telegram チャネル
 - [x] Discord チャネル
 - [x] セキュリティ (監査ログ + ポリシー)
