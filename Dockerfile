@@ -19,8 +19,13 @@ RUN apt-get update && apt-get install -y \
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-# Python依存関係 (Web起動に必要な最小セット)
-RUN pip install .
+# Python依存関係
+ARG INSTALL_DEV=false
+RUN if [ "$INSTALL_DEV" = "true" ]; then \
+      pip install ".[dev]"; \
+    else \
+      pip install .; \
+    fi
 
 # オプション: ブラウザ自動化をコンテナイメージに含める場合のみ有効化
 ARG INSTALL_BROWSER=false

@@ -47,20 +47,12 @@ boiled-claw/
 
 ## セットアップ
 
-### 1. 依存関係インストール
+Docker ベースの運用と開発を前提にしています。ホスト側の `.venv` は使いません。
 
-```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ".[dev]"
+### 1. 前提条件
 
-# オプション: ブラウザ自動化
-pip install -e ".[browser]"
-playwright install chromium
-
-# オプション: 全機能
-pip install -e ".[all]"
-```
+- Docker
+- Docker Compose v2
 
 ### 2. 環境変数設定
 
@@ -79,36 +71,9 @@ Google API Key は [Google AI Studio](https://aistudio.google.com/apikey) で取
 から解決され、path や body に含まれる `user_id` では上書きできません。`GATEWAY_AUTH_USER_HEADER`
 を未設定のまま shared API key を使う場合、認証済みリクエストは単一の shared principal に束ねられます。
 
-### 3. 実行
-
-#### CLIモード
-```bash
-python -m src.main cli
-# または
-boiled-claw
-```
-
-#### Webサーバーモード (WebSocket Gateway)
-```bash
-python -m src.main web
-# Web UI: http://127.0.0.1:18789/chat
-# WebSocket endpoint: ws://127.0.0.1:18789/ws/{user_id}
-# Protocol schema: http://127.0.0.1:18789/protocol
-```
-
-#### チャネルモード (Telegram, Discord)
-```bash
-# .env にチャネルトークンを設定してから
-python -m src.main channels
-```
-
-### Docker で実行
+### 3. Gateway を起動
 
 ```bash
-# .env ファイル作成
-cp .env.example .env
-# GOOGLE_API_KEY を設定
-
 # Gateway のみ起動
 docker compose up -d --build boiled-claw-gateway
 
@@ -122,16 +87,47 @@ docker compose logs -f boiled-claw-gateway
 docker compose down
 ```
 
-CLI コンテナを使う場合:
+Gateway 起動後のエンドポイント:
+
+- Web UI: `http://127.0.0.1:18789/chat`
+- WebSocket endpoint: `ws://127.0.0.1:18789/ws/{user_id}`
+- Protocol schema: `http://127.0.0.1:18789/protocol`
+
+### 4. コンテナから使う
+
+#### CLIモード
 
 ```bash
 docker compose --profile cli run --rm boiled-claw-cli cli
 ```
 
-ブラウザ自動化 (Playwright) をコンテナに含めたい場合:
+#### チャネルモード (Telegram, Discord)
 
 ```bash
-docker compose build --build-arg INSTALL_BROWSER=true
+# .env にチャネルトークンを設定してから
+docker compose run --rm boiled-claw-gateway python -m src.main channels
+```
+
+#### 開発コマンド
+
+```bash
+# 単体テスト
+docker compose --profile dev run --rm boiled-claw-dev pytest tests/ -m "not e2e"
+
+# E2E テスト
+docker compose --profile dev run --rm boiled-claw-dev pytest tests/test_e2e.py -v -m e2e
+
+# Lint
+docker compose --profile dev run --rm boiled-claw-dev ruff check src/
+```
+
+`boiled-claw-dev` は Docker ネットワーク内で `GATEWAY_URL=http://boiled-claw-gateway:18789`
+を使うため、E2E テストもホストの Python 環境に依存しません。
+
+#### ブラウザ自動化をコンテナに含める
+
+```bash
+docker compose build --build-arg INSTALL_BROWSER=true boiled-claw-gateway
 docker compose up -d boiled-claw-gateway
 ```
 
@@ -193,7 +189,7 @@ boiled-claw/
 ### CLIで使う
 
 ```bash
-$ python -m src.main cli
+$ docker compose --profile cli run --rm boiled-claw-cli cli
 
 You: Pythonの最新ニュースを検索して
 
@@ -288,7 +284,7 @@ reverse proxy や API gateway で認証済みユーザー ID を `GATEWAY_AUTH_U
 
 1. BotFather で Telegram Bot を作成
 2. `.env` に `TELEGRAM_BOT_TOKEN` を設定
-3. `python -m src.main channels` で起動
+3. `docker compose run --rm boiled-claw-gateway python -m src.main channels` で起動
 4. Telegram で Bot にメッセージ送信
 
 ## 機能一覧
@@ -324,7 +320,7 @@ curl -sS -X POST http://127.0.0.1:18789/agent/run \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "my_user",
-    "message": "sessions_spawn_dynamic でエージェントを起動して。instruction=\"あなたは計算エージェントです\"、mcp_servers=[{\"type\":\"sse\",\"url\":\"http://localhost:8765/sse\"}]、task=\"100 + 200 を計算して\""
+    "message": "sessions_spawn_dynamic でエージェントを起動して。instruction=\"あなたは計算エージェントです\"、mcp_servers=[{\"type\":\"sse\",\"url\":\"http://boiled-claw-mcp-sample:8765/sse\"}]、task=\"100 + 200 を計算して\""
   }'
 
 # 実行結果を確認
@@ -355,13 +351,7 @@ curl http://127.0.0.1:18789/subagents/{session_id}
 **起動方法:**
 
 ```bash
-# stdio モード（sessions_spawn_dynamic の stdio 接続用）
-python -m src.mcp_servers.sample_server
-
-# SSE モード（常駐サービスとして起動）
-python -m src.mcp_servers.sample_server --sse --port 8765
-
-# Docker で起動（docker-compose.yml に定義済み）
+# SSE モード（docker-compose.yml に定義済み）
 docker compose up -d boiled-claw-mcp-sample
 # → http://localhost:8765/sse でアクセス可能
 ```
@@ -398,13 +388,13 @@ Docker ネットワーク内からは `http://boiled-claw-mcp-sample:8765/sse` �
 ### テスト
 
 ```bash
-pytest tests/
+docker compose --profile dev run --rm boiled-claw-dev pytest tests/ -m "not e2e"
 ```
 
 ### Lint
 
 ```bash
-ruff check src/
+docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 ```
 
 ## ロードマップ

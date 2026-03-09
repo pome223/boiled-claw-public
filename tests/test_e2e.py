@@ -2,11 +2,11 @@
 E2E smoke tests against a running boiled-claw gateway.
 
 前提条件:
-  - Gateway が http://127.0.0.1:18789 で起動していること
+  - `docker compose up -d --build boiled-claw-gateway` で Gateway が起動していること
   - GOOGLE_API_KEY が設定されていること
 
 実行:
-  pytest tests/test_e2e.py -v -m e2e --timeout=60
+  docker compose --profile dev run --rm boiled-claw-dev pytest tests/test_e2e.py -v -m e2e
 
 スキップ条件:
   GATEWAY_URL に接続できない場合はすべてスキップ。

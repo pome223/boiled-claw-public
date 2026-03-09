@@ -1,80 +1,45 @@
 ---
 name: e2e-test
-description: Run end-to-end smoke tests against the running boiled-claw gateway via HTTP API.
-version: 1.0.0
+description: Run end-to-end smoke tests against the boiled-claw gateway from the Docker dev container.
+version: 1.1.0
 author: boiled-claw
 tags:
   - testing
   - e2e
-  - curl
+  - docker
+  - pytest
 ---
 
 # E2E Test Skill
 
-Smoke-test the boiled-claw gateway by firing curl requests against `/agent/run`.
+Run the automated e2e suite from the Docker dev container. Do not rely on a host `.venv`.
 
 ## Prerequisites
 
-- Gateway is running at `http://127.0.0.1:18789` (or `GATEWAY_URL` env var)
-- `GATEWAY_API_KEY` is set in the environment if auth is enabled
+- Docker daemon is running
+- `.env` exists and `GOOGLE_API_KEY` is set
+- Gateway is started with `docker compose up -d --build boiled-claw-gateway`
 
-## Test Cases
-
-Run each case in order. Check `ok: true` in every response.
-
-### 1. Basic response
+## Standard Run
 
 ```bash
-curl -sS -X POST ${GATEWAY_URL:-http://127.0.0.1:18789}/agent/run \
-  -H "Content-Type: application/json" \
-  ${GATEWAY_API_KEY:+-H "Authorization: Bearer $GATEWAY_API_KEY"} \
-  -d '{"user_id":"e2e","message":"こんにちは。一言で自己紹介して"}'
+docker compose --profile dev run --rm boiled-claw-dev pytest tests/test_e2e.py -v -m e2e
 ```
 
-Expected: `ok: true`, `response` contains agent name or description.
+`boiled-claw-dev` injects `GATEWAY_URL=http://boiled-claw-gateway:18789`, so the test container talks to the gateway over the Compose network.
 
-### 2. Session continuity
+## Quick Smoke Check
 
-Capture `session_id` from case 1, then:
+If you need a fast readiness check before the full suite:
 
 ```bash
-curl -sS -X POST ${GATEWAY_URL:-http://127.0.0.1:18789}/agent/run \
-  -H "Content-Type: application/json" \
-  ${GATEWAY_API_KEY:+-H "Authorization: Bearer $GATEWAY_API_KEY"} \
-  -d "{\"user_id\":\"e2e\",\"session_id\":\"<SESSION_ID>\",\"message\":\"さっき何を話しましたか？\"}"
+docker compose --profile dev run --rm boiled-claw-dev curl -sS http://boiled-claw-gateway:18789/health
 ```
 
-Expected: response references the previous turn.
-
-### 3. Stock price shortcut (is_direct_stock_price_query = true)
-
-```bash
-curl -sS -X POST ${GATEWAY_URL:-http://127.0.0.1:18789}/agent/run \
-  -H "Content-Type: application/json" \
-  ${GATEWAY_API_KEY:+-H "Authorization: Bearer $GATEWAY_API_KEY"} \
-  -d '{"user_id":"e2e","message":"NVIDIAの株価"}'
-```
-
-Expected: OHLC data returned immediately (始値/高値/安値/終値/出来高).
-
-### 4. Stock price news (is_direct_stock_price_query = false → LLM routing)
-
-```bash
-curl -sS -X POST ${GATEWAY_URL:-http://127.0.0.1:18789}/agent/run \
-  -H "Content-Type: application/json" \
-  ${GATEWAY_API_KEY:+-H "Authorization: Bearer $GATEWAY_API_KEY"} \
-  -d '{"user_id":"e2e","message":"NVIDIAの株価ニュースを2つ教えて"}'
-```
-
-Expected: LLM performs web search and returns news items, not raw OHLC.
+Expected: JSON with `"status": "ok"`.
 
 ## Pass Criteria
 
-| Case | `ok` | Response shape |
-|------|------|----------------|
-| 1    | true | free text      |
-| 2    | true | references prior turn |
-| 3    | true | contains 始値/終値 |
-| 4    | true | news articles, no raw OHLC |
-
-If any case returns `ok: false` or HTTP 4xx/5xx, the gateway is not ready to merge.
+- `pytest` exits with code `0`
+- No test is skipped because the gateway is unreachable
+- If the quick smoke check is used, `/health` returns HTTP `200`

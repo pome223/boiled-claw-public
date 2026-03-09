@@ -365,10 +365,7 @@ Security Policy Check
 docker compose up -d --build
 ```
 
-### 手動
-```bash
-python -m src.main web
-```
+Docker ベースの運用を前提とし、起動・テスト・lint は `docker compose` に集約します。
 
 ## モニタリング
 

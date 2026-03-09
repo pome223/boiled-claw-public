@@ -3,6 +3,7 @@ services:
     build:
       context: .
       args:
+        INSTALL_DEV: "false"
         INSTALL_BROWSER: "false"
     container_name: boiled-claw-gateway
     env_file:
@@ -22,6 +23,7 @@ services:
     build:
       context: .
       args:
+        INSTALL_DEV: "false"
         INSTALL_BROWSER: "false"
     container_name: boiled-claw-mcp-sample
     env_file:
@@ -40,6 +42,7 @@ services:
     build:
       context: .
       args:
+        INSTALL_DEV: "false"
         INSTALL_BROWSER: "false"
     env_file:
       - .env
@@ -57,3 +60,24 @@ services:
     tty: true
     profiles:
       - cli
+
+  boiled-claw-dev:
+    build:
+      context: .
+      args:
+        INSTALL_DEV: "true"
+        INSTALL_BROWSER: "false"
+    env_file:
+      - .env
+    environment:
+      - FILE_WORKSPACE_PATHS=/workspace/data,/workspace/skills
+      - GATEWAY_URL=http://boiled-claw-gateway:18789
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    depends_on:
+      boiled-claw-gateway:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+    profiles:
+      - dev
