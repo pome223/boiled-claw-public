@@ -13,6 +13,7 @@ Server -> Client:
   health.tick     : heartbeat (30s)
   cron.update     : cron job state change
   tools.approval_request : request user approval for tool execution
+  control.approval_request : request human approval for a control-loop plan
 
 Client -> Server:
   chat.send       : send message
@@ -34,6 +35,7 @@ from src.gateway.protocol import (
     ev_health_tick,
     ev_cron_update,
     ev_tools_approval_request,
+    ev_control_approval_request,
     normalize_client_event,
     validate_client_event,
     get_schema,
@@ -51,6 +53,7 @@ __all__ = [
     "ev_health_tick",
     "ev_cron_update",
     "ev_tools_approval_request",
+    "ev_control_approval_request",
     "normalize_client_event",
     "validate_client_event",
     "get_schema",

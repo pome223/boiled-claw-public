@@ -2,9 +2,15 @@ import asyncio
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from google.adk.events.event import Event
+from google.genai import types
+import pytest
 
+from src.control_loop.root_workflow import ExecutionResult
 import src.gateway.server as server_module
 import src.gateway.transcript as transcript_module
+import src.memory_lifecycle.adk_memory_service as adk_memory_module
+import src.memory_lifecycle.promoted_store as promoted_store_module
 import src.security.tool_policy as tool_policy_module
 from src.gateway.transcript import TranscriptStore
 
@@ -44,6 +50,8 @@ def _build_gateway(
 ):
     transcript_module._store = TranscriptStore(tmp_path / "transcript.db")
     tool_policy_module._engine = None
+    promoted_store_module._promoted_store = None
+    adk_memory_module._promoted_memory_service = None
     scheduler = _FakeScheduler()
 
     async def _noop_skills():
@@ -59,6 +67,7 @@ def _build_gateway(
             gateway_auth_user_header=gateway_auth_user_header,
             gateway_host="127.0.0.1",
             gateway_port=18789,
+            memory_db_path=tmp_path / "memory.db",
         ),
     )
 
@@ -97,6 +106,26 @@ def test_http_run_persists_transcript_and_session_listing(monkeypatch, tmp_path)
         assert entries[1]["content"] == "echo:hello gateway"
 
 
+def test_gateway_lifespan_rebinds_runtime_hooks(monkeypatch, tmp_path):
+    gateway, scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app):
+        assert scheduler.events == [("startup", {})]
+        assert scheduler.spawn_fn is not None
+        assert scheduler.notifier is not None
+        assert gateway.tool_policy._notifier is not None
+        assert gateway._heartbeat_task is not None
+
+    assert gateway.tool_policy._notifier is None
+    assert gateway._heartbeat_task is None
+
+    with TestClient(gateway.app):
+        assert scheduler.events == [("startup", {}), ("startup", {})]
+        assert scheduler.spawn_fn is not None
+        assert scheduler.notifier is not None
+        assert gateway.tool_policy._notifier is not None
+
+
 def test_websocket_history_and_protocol_validation(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
@@ -124,6 +153,37 @@ def test_websocket_history_and_protocol_validation(monkeypatch, tmp_path):
             assert protocol_error["source"] == "protocol"
             assert protocol_error["status"] == "error"
             assert "at least 1 characters" in protocol_error["message"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_http_uses_runner_for_non_stock_query(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    gateway._run_agent_http = server_module.GatewayServer._run_agent_http.__get__(
+        gateway,
+        server_module.GatewayServer,
+    )
+
+    async def _fake_run_async(*, user_id, session_id, new_message):
+        assert user_id == "alice"
+        assert session_id == "sess-1"
+        assert new_message.parts[0].text.endswith("Explain the ADK state model")
+        yield Event(
+            author="root_agent",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="runner response")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.runner, "run_async", _fake_run_async)
+
+    result = await gateway._run_agent_http(
+        user_id="alice",
+        session_id="sess-1",
+        message="Explain the ADK state model",
+    )
+
+    assert result == {"type": "agent_message", "message": "runner response"}
 
 
 def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
@@ -156,6 +216,135 @@ def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
             assert gateway.tool_policy.get_pending_approval("req-123") is None
+
+
+def test_websocket_tool_approval_falls_back_to_control_loop(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _resolve_control_loop(
+        *,
+        user_id: str,
+        session_id: str,
+        approved: bool,
+        request_id: str | None = None,
+    ):
+        assert user_id == "alice"
+        assert session_id
+        assert approved is True
+        assert request_id == "missing-control-loop-request"
+        return True
+
+    monkeypatch.setattr(
+        gateway.control_loop,
+        "resolve_human_approval",
+        _resolve_control_loop,
+    )
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json(
+                {
+                    "event": "tools.approval",
+                    "request_id": "missing-control-loop-request",
+                    "approved": True,
+                }
+            )
+
+            resolved = ws.receive_json()
+            assert resolved["event"] == "system.event"
+            assert resolved["source"] == "tools.approval"
+            assert resolved["status"] == "resolved"
+
+
+def test_http_control_loop_run_returns_pending_approval(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+        assert goal == "Ship the ADK-aligned runtime"
+        assert user_id == "alice"
+        assert session_id
+        return ExecutionResult(
+            request_id="req-1",
+            session_id=session_id,
+            user_id=user_id,
+            final_text="Plan requires human approval. Please review plan:approved in session state.",
+            plan_id="plan-1",
+            success=False,
+            metadata={
+                "needs_human": True,
+                "approval_request": {
+                    "request_id": "plan_req_1",
+                    "plan_id": "plan-1",
+                    "goal": goal,
+                    "risk_level": "critical",
+                    "required_capabilities": ["file.write"],
+                    "plan": {"constraints": []},
+                    "reason": "Human approval required due to capability or risk level.",
+                },
+            },
+        )
+
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_run)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/control-loop/run",
+            json={
+                "user_id": "alice",
+                "goal": "Ship the ADK-aligned runtime",
+            },
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["ok"] is False
+        assert payload["needs_human"] is True
+        assert payload["approval_request"]["request_id"] == "plan_req_1"
+
+
+def test_websocket_control_run_emits_control_approval_request(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+        return ExecutionResult(
+            request_id="req-1",
+            session_id=session_id or "session-1",
+            user_id=user_id,
+            final_text="Plan requires human approval. Please review plan:approved in session state.",
+            plan_id="plan-2",
+            success=False,
+            metadata={
+                "needs_human": True,
+                "approval_request": {
+                    "request_id": "plan_req_2",
+                    "plan_id": "plan-2",
+                    "goal": goal,
+                    "risk_level": "high",
+                    "required_capabilities": ["browser.navigate"],
+                    "plan": {"constraints": []},
+                    "reason": "Human approval required due to capability or risk level.",
+                },
+            },
+        )
+
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_run)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "control.run", "goal": "Review production diff"})
+
+            approval = ws.receive_json()
+            done = ws.receive_json()
+            assert approval["event"] == "control.approval_request"
+            assert approval["request_id"] == "plan_req_2"
+            assert done["event"] == "chat.done"
+            assert "human approval" in done["text"]
 
 
 def test_cron_main_delivery_rejects_startup_without_bound_session(monkeypatch, tmp_path):

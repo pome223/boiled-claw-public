@@ -498,6 +498,53 @@ function handleToolsApprovalRequest(payload) {
   addSystemMessage(`[approval] ${tool} by ${agent}: ${reason || "approval required"}`);
 }
 
+function handleControlApprovalRequest(payload) {
+  logEvent("control.approval_request", payload);
+  const reqId = payload.request_id || "?";
+  const goal = payload.goal || "?";
+  const planId = payload.plan_id || "?";
+  const risk = payload.risk_level || "?";
+  const caps = Array.isArray(payload.required_capabilities)
+    ? payload.required_capabilities.join(", ")
+    : "";
+  const reason = payload.reason || "";
+
+  if (approvalListEl) {
+    const li = document.createElement("li");
+    li.className = "approval-item";
+    li.dataset.requestId = reqId;
+    li.innerHTML = [
+      `<div><strong>control plan</strong> <span class="mono">${escapeHtml(planId)}</span></div>`,
+      `<div>${escapeHtml(goal)}</div>`,
+      `<div class="muted">risk=${escapeHtml(risk)}${caps ? ` caps=${escapeHtml(caps)}` : ""}</div>`,
+      reason ? `<div class="muted">${escapeHtml(reason)}</div>` : "",
+      `<div class="memory-actions">`,
+      `<button class="btn btn-sm approve-btn" data-id="${escapeAttr(reqId)}">Approve</button>`,
+      `<button class="btn btn-sm deny-btn" data-id="${escapeAttr(reqId)}">Deny</button>`,
+      `</div>`,
+    ].join("");
+    approvalListEl.prepend(li);
+
+    li.querySelector(".approve-btn").addEventListener("click", () => {
+      sendApproval(reqId, true);
+      li.remove();
+    });
+    li.querySelector(".deny-btn").addEventListener("click", () => {
+      sendApproval(reqId, false);
+      li.remove();
+    });
+  }
+
+  if (!approvalListEl) {
+    const approved = window.confirm(
+      `Approve control plan?\n\nGoal: ${goal}\nRisk: ${risk}\nPlan: ${planId}\n${reason}`
+    );
+    sendApproval(reqId, approved);
+  }
+
+  addSystemMessage(`[control approval] ${goal} (${risk})`);
+}
+
 function sendApproval(requestId, approved) {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
   const payload = {
@@ -896,6 +943,7 @@ function connect(targetSessionId = null) {
       if (evName === "health.tick") { handleHealthTick(payload); return; }
       if (evName === "cron.update") { handleCronUpdate(payload); return; }
       if (evName === "tools.approval_request") { handleToolsApprovalRequest(payload); return; }
+      if (evName === "control.approval_request") { handleControlApprovalRequest(payload); return; }
 
       // --- backward compat ---
       if (evName === "agent_message") {
@@ -932,7 +980,13 @@ function sendMessage(text) {
     connect();
     return;
   }
-  const payload = { event: "chat.send", text };
+  let payload = { event: "chat.send", text };
+  const controlGoal = text.startsWith("/control ")
+    ? text.slice("/control ".length).trim()
+    : (text.startsWith("/plan ") ? text.slice("/plan ".length).trim() : "");
+  if (controlGoal) {
+    payload = { event: "control.run", goal: controlGoal };
+  }
   socket.send(JSON.stringify(payload));
   logEvent("socket.send", payload);
   appendBubble("user", text);

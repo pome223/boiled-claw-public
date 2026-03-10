@@ -12,6 +12,7 @@ Envelope format (all messages):
 
 Client -> Server:
   chat.send           text, request_id?
+  control.run         goal, constraints?, request_id?
   chat.inject         text, role?, request_id?
   chat.abort          request_id?
   chat.history        session_id?, limit?, before?
@@ -27,6 +28,7 @@ Server -> Client:
   health.tick         active_sessions, ts
   cron.update         job_id, status, message
   tools.approval_request  request_id, tool_name, agent_name, args, reason
+  control.approval_request  request_id, plan_id, goal, risk_level, required_capabilities, plan
 """
 
 from __future__ import annotations
@@ -61,6 +63,17 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "v": {"type": "integer"},
             "text": {"type": "string", "minLength": 1},
             "role": {"type": "string", "enum": ["system", "context", "user"]},
+            "request_id": {"type": "string"},
+        },
+    },
+    "control.run": {
+        "type": "object",
+        "required": ["event", "goal"],
+        "properties": {
+            "event": {"const": "control.run"},
+            "v": {"type": "integer"},
+            "goal": {"type": "string", "minLength": 1},
+            "constraints": {"type": "array"},
             "request_id": {"type": "string"},
         },
     },
@@ -186,6 +199,22 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "tool_name": {"type": "string"},
             "agent_name": {"type": "string"},
             "args": {"type": "object"},
+            "reason": {"type": "string"},
+            "ts": {"type": "number"},
+        },
+    },
+    "control.approval_request": {
+        "type": "object",
+        "required": ["event", "request_id", "plan_id", "goal", "risk_level"],
+        "properties": {
+            "event": {"const": "control.approval_request"},
+            "v": {"type": "integer"},
+            "request_id": {"type": "string"},
+            "plan_id": {"type": "string"},
+            "goal": {"type": "string"},
+            "risk_level": {"type": "string"},
+            "required_capabilities": {"type": "array"},
+            "plan": {"type": "object"},
             "reason": {"type": "string"},
             "ts": {"type": "number"},
         },
@@ -366,6 +395,25 @@ def ev_tools_approval_request(
     d["tool_name"] = tool_name
     d["agent_name"] = agent_name
     d["args"] = args or {}
+    d["reason"] = reason
+    return d
+
+
+def ev_control_approval_request(
+    request_id: str,
+    plan_id: str,
+    goal: str,
+    risk_level: str,
+    required_capabilities: Optional[list[str]] = None,
+    plan: Optional[dict[str, Any]] = None,
+    reason: str = "",
+) -> dict[str, Any]:
+    d = _base("control.approval_request", request_id)
+    d["plan_id"] = plan_id
+    d["goal"] = goal
+    d["risk_level"] = risk_level
+    d["required_capabilities"] = required_capabilities or []
+    d["plan"] = plan or {}
     d["reason"] = reason
     return d
 
