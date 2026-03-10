@@ -2,6 +2,9 @@ import asyncio
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+from google.adk.events.event import Event
+from google.genai import types
+import pytest
 
 from src.control_loop.root_workflow import ExecutionResult
 import src.gateway.server as server_module
@@ -150,6 +153,37 @@ def test_websocket_history_and_protocol_validation(monkeypatch, tmp_path):
             assert protocol_error["source"] == "protocol"
             assert protocol_error["status"] == "error"
             assert "at least 1 characters" in protocol_error["message"]
+
+
+@pytest.mark.asyncio
+async def test_run_agent_http_uses_runner_for_non_stock_query(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    gateway._run_agent_http = server_module.GatewayServer._run_agent_http.__get__(
+        gateway,
+        server_module.GatewayServer,
+    )
+
+    async def _fake_run_async(*, user_id, session_id, new_message):
+        assert user_id == "alice"
+        assert session_id == "sess-1"
+        assert new_message.parts[0].text.endswith("Explain the ADK state model")
+        yield Event(
+            author="root_agent",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="runner response")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.runner, "run_async", _fake_run_async)
+
+    result = await gateway._run_agent_http(
+        user_id="alice",
+        session_id="sess-1",
+        message="Explain the ADK state model",
+    )
+
+    assert result == {"type": "agent_message", "message": "runner response"}
 
 
 def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):

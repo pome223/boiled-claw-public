@@ -42,7 +42,10 @@ def _check_capability_in_plan(
     if raw_plan is None:
         raise PermissionError("No approved plan in session state.")
 
-    plan = raw_plan if isinstance(raw_plan, dict) else json.loads(raw_plan)
+    try:
+        plan = raw_plan if isinstance(raw_plan, dict) else json.loads(raw_plan)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise PermissionError("Approved plan is not valid JSON.") from exc
     required = {
         cap.get("name", "") for cap in plan.get("required_capabilities", [])
     }

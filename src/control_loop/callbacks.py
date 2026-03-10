@@ -21,6 +21,7 @@ from typing import Optional
 from google.adk.agents.callback_context import CallbackContext
 from google.genai.types import Content
 
+from src.control_loop.constants import DEFAULT_MAX_REPAIR_ATTEMPTS
 from src.runtime.state_keys import StateKeys
 from src.tools.context import resolve_callback_context
 
@@ -119,7 +120,7 @@ def policy_judge_callback(
 
 # ── Repair callback ────────────────────────────────────────────────────────
 
-_MAX_REPAIR_ATTEMPTS = 3
+_MAX_REPAIR_ATTEMPTS = DEFAULT_MAX_REPAIR_ATTEMPTS
 _REPAIR_THRESHOLD_SCORE = 0.85
 
 

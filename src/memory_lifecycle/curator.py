@@ -31,12 +31,17 @@ class CurationResult:
 
     promoted: list[PromotedMemory] = field(default_factory=list)
     merged: list[PromotedMemory] = field(default_factory=list)
+    updated: list[PromotedMemory] = field(default_factory=list)
     rejected_ids: list[str] = field(default_factory=list)
     conflict_records: list[ConflictRecord] = field(default_factory=list)
 
     @property
     def all_promoted(self) -> list[PromotedMemory]:
         return self.promoted + self.merged
+
+    @property
+    def persisted_memories(self) -> list[PromotedMemory]:
+        return self.promoted + self.merged + self.updated
 
     @property
     def promoted_ids(self) -> list[str]:
@@ -115,9 +120,11 @@ class Curator:
                     result.rejected_ids.append(candidate.candidate_id)
             elif has_contradiction:
                 # 矛盾: 信頼度が高い方を採用
-                promoted = self._resolve_contradiction(candidate)
+                promoted, deprecated = self._resolve_contradiction(candidate)
                 if promoted:
                     result.promoted.append(promoted)
+                    if deprecated is not None:
+                        result.updated.append(deprecated)
                     self._store.update_status(
                         candidate.candidate_id, ReviewStatus.PROMOTED
                     )
@@ -143,7 +150,7 @@ class Curator:
         """候補と既存メモリをマージする。信頼度が高い方のコンテンツを採用。"""
         from src.memory_lifecycle.conflict_detector import _jaccard
 
-        for mem in self._existing:
+        for index, mem in enumerate(self._existing):
             if mem.memory_type != candidate.memory_type:
                 continue
             sim = _jaccard(candidate.content, mem.content)
@@ -156,17 +163,68 @@ class Curator:
                         "trust_score": max(mem.trust_score, candidate.trust_score),
                         "merged_from": mem.merged_from + [candidate.candidate_id],
                     })
+                    self._existing[index] = merged
                     return merged
                 return None  # 既存の方が信頼度が高い
         return None
 
     def _resolve_contradiction(
         self, candidate: MemoryCandidate
-    ) -> PromotedMemory | None:
-        """矛盾する候補と既存メモリを比較し、信頼度が高い方を返す。"""
+    ) -> tuple[PromotedMemory | None, PromotedMemory | None]:
+        """矛盾する候補と既存メモリを比較し、新旧の更新結果を返す。"""
+        from src.memory_lifecycle.conflict_detector import (
+            _CONTRADICTION_THRESHOLD,
+            _DUPLICATE_THRESHOLD,
+            _jaccard,
+        )
+
+        for index, mem in enumerate(self._existing):
+            if mem.memory_type != candidate.memory_type:
+                continue
+            same_subject = (
+                candidate.subject is not None
+                and mem.subject is not None
+                and candidate.subject.lower() == mem.subject.lower()
+            )
+            if not same_subject:
+                continue
+
+            sim = _jaccard(candidate.content, mem.content)
+            if not (_CONTRADICTION_THRESHOLD <= sim < _DUPLICATE_THRESHOLD):
+                continue
+            if candidate.trust_score <= max(_MIN_TRUST, mem.trust_score):
+                return None, None
+
+            promoted = _candidate_to_promoted(candidate).model_copy(
+                update={
+                    "supersedes": _append_unique([], mem.memory_id),
+                    "contradicts": _append_unique([], mem.memory_id),
+                }
+            )
+            deprecated = mem.model_copy(
+                update={
+                    "review_status": ReviewStatus.DEPRECATED,
+                    "contradicts": _append_unique(mem.contradicts, promoted.memory_id),
+                    "metadata": {
+                        **mem.metadata,
+                        "superseded_by": promoted.memory_id,
+                    },
+                }
+            )
+            self._existing[index] = promoted
+            return promoted, deprecated
+
         if candidate.trust_score >= _MIN_TRUST:
-            return _candidate_to_promoted(candidate)
-        return None
+            promoted = _candidate_to_promoted(candidate)
+            self._existing.append(promoted)
+            return promoted, None
+        return None, None
+
+
+def _append_unique(values: list[str], item: str) -> list[str]:
+    if item in values:
+        return values
+    return values + [item]
 
 
 def _candidate_to_promoted(candidate: MemoryCandidate) -> PromotedMemory:

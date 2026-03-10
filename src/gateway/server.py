@@ -1215,7 +1215,53 @@ class GatewayServer:
                 )
             else:
                 text = quote.get("message", "株価データを取得できませんでした。")
-        return {"type": "agent_message", "message": text}
+            return {"type": "agent_message", "message": text}
+
+        full_msg = self._compose_agent_message(session_id, message)
+        content = types.Content(role="user", parts=[types.Part(text=full_msg)])
+
+        try:
+            response_text = ""
+            async with asyncio.timeout(_AGENT_TIMEOUT):
+                async for event in self.runner.run_async(
+                    user_id=user_id,
+                    session_id=session_id,
+                    new_message=content,
+                ):
+                    if event.is_final_response() and event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                response_text += part.text
+
+            if not response_text.strip():
+                response_text = "応答の生成に失敗しました。もう一度試すか、質問を少し具体化してください。"
+
+            self.audit_logger.log_agent_message(
+                agent_name="root_agent",
+                message=response_text,
+                user_id=user_id,
+                session_id=session_id,
+            )
+            return {"type": "agent_message", "message": response_text}
+
+        except TimeoutError:
+            msg = f"Agent timed out after {_AGENT_TIMEOUT} seconds."
+            self.audit_logger.log_error(
+                error=msg,
+                user_id=user_id,
+                session_id=session_id,
+                context={"message": message, "reason": "timeout"},
+            )
+            return {"type": "error", "message": msg}
+
+        except Exception as exc:
+            self.audit_logger.log_error(
+                error=str(exc),
+                user_id=user_id,
+                session_id=session_id,
+                context={"message": message},
+            )
+            return {"type": "error", "message": f"Error: {exc}"}
 
     async def _run_control_loop_http(
         self,

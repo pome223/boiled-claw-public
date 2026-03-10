@@ -105,8 +105,46 @@ class PromotedMemoryStore:
     def bulk_save(
         self, memories: list[PromotedMemory], *, app_name: str
     ) -> None:
-        for memory in memories:
-            self.save(memory, app_name=app_name)
+        if not memories:
+            return
+        with sqlite3.connect(self.db_path) as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO promoted_memories (
+                    memory_id, app_name, user_id, memory_type, content,
+                    subject, tags, provenance, confidence, trust_score,
+                    sensitivity, valid_from, valid_until, review_status,
+                    supersedes, contradicts, merged_from, metadata, created_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
+                """,
+                [
+                    (
+                        memory.memory_id,
+                        app_name,
+                        memory.user_id,
+                        memory.memory_type.value,
+                        memory.content,
+                        memory.subject,
+                        json.dumps(memory.tags),
+                        memory.provenance.model_dump_json(),
+                        memory.confidence,
+                        memory.trust_score,
+                        memory.sensitivity.value,
+                        memory.valid_from.isoformat() if memory.valid_from else None,
+                        memory.valid_until.isoformat() if memory.valid_until else None,
+                        memory.review_status.value,
+                        json.dumps(memory.supersedes),
+                        json.dumps(memory.contradicts),
+                        json.dumps(memory.merged_from),
+                        json.dumps(memory.metadata),
+                        time.time(),
+                    )
+                    for memory in memories
+                ],
+            )
 
     def search(
         self,
@@ -119,15 +157,17 @@ class PromotedMemoryStore:
         words = [word.strip() for word in query.split() if word.strip()]
         sql = (
             "SELECT * FROM promoted_memories "
-            "WHERE app_name = ? AND user_id = ?"
+            "WHERE app_name = ? AND user_id = ? AND review_status != ?"
         )
-        params: list[Any] = [app_name, user_id]
+        params: list[Any] = [app_name, user_id, ReviewStatus.DEPRECATED.value]
 
         if words:
             clauses = []
             for word in words:
-                clauses.append("(content LIKE ? OR subject LIKE ?)")
-                pattern = f"%{word}%"
+                clauses.append(
+                    "(content LIKE ? ESCAPE '\\' OR subject LIKE ? ESCAPE '\\')"
+                )
+                pattern = _like_pattern(word)
                 params.extend([pattern, pattern])
             sql += " AND (" + " OR ".join(clauses) + ")"
 
@@ -136,6 +176,23 @@ class PromotedMemoryStore:
 
         with sqlite3.connect(self.db_path) as conn:
             rows = conn.execute(sql, params).fetchall()
+        return [self._row_to_memory(row) for row in rows]
+
+    def list_memories(
+        self,
+        *,
+        app_name: str,
+        user_id: str,
+    ) -> list[PromotedMemory]:
+        with sqlite3.connect(self.db_path) as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM promoted_memories
+                WHERE app_name = ? AND user_id = ? AND review_status != ?
+                ORDER BY created_at DESC
+                """,
+                (app_name, user_id, ReviewStatus.DEPRECATED.value),
+            ).fetchall()
         return [self._row_to_memory(row) for row in rows]
 
     def _row_to_memory(self, row: tuple[Any, ...]) -> PromotedMemory:
@@ -187,6 +244,15 @@ class PromotedMemoryStore:
 
 
 _promoted_store: PromotedMemoryStore | None = None
+
+
+def _like_pattern(word: str) -> str:
+    escaped = (
+        word.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return f"%{escaped}%"
 
 
 def get_promoted_store() -> PromotedMemoryStore:

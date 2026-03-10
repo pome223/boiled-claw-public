@@ -6,18 +6,26 @@ import pytest
 from google.adk.events.event import Event
 from google.adk.events.event_actions import EventActions
 from google.adk.memory.base_memory_service import MemoryEntry, SearchMemoryResponse
+from google.adk.agents.readonly_context import ReadonlyContext
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from src.control_loop import guarded_tools as guarded_tools_module
+from src.control_loop.instructions import (
+    build_executor_instruction,
+    build_planner_instruction,
+    build_verifier_instruction,
+)
 from src.control_loop.root_workflow import ControlLoop
 import src.memory_lifecycle.candidate_store as candidate_store_module
 from src.memory_lifecycle.adk_memory_service import PromotedMemoryService
 from src.memory_lifecycle.candidate_store import CandidateStore
+from src.memory_lifecycle.curator import Curator
 from src.memory_lifecycle.memory_schema import (
     MemoryCandidate,
     MemoryType,
     OriginatorType,
+    PromotedMemory,
     Provenance,
     SensitivityLevel,
 )
@@ -35,6 +43,19 @@ def _make_runtime_context():
             user_id="user-1",
             session=SimpleNamespace(id="session-1"),
         ),
+    )
+
+
+def _make_readonly_context(state: dict[str, object]) -> ReadonlyContext:
+    return ReadonlyContext(
+        SimpleNamespace(
+            session=SimpleNamespace(state=state),
+            user_id="user-1",
+            invocation_id="inv-1",
+            user_content=None,
+            run_config=None,
+            agent=SimpleNamespace(name="planner"),
+        )
     )
 
 
@@ -62,6 +83,30 @@ def test_resolve_callback_context_falls_back_to_legacy_session():
     assert resolved["agent_name"] == "verifier"
     assert resolved["session_id"] == "legacy-session"
     assert resolved["user_id"] == ""
+
+
+@pytest.mark.asyncio
+async def test_dynamic_instructions_render_custom_state_keys():
+    ctx = _make_readonly_context(
+        {
+            StateKeys.TASK_GOAL: "Ship the ADK alignment",
+            StateKeys.TASK_CONSTRAINTS: ["keep session state stable"],
+            StateKeys.TEMP_REPAIR_PATCH: {"note": "retry verifier"},
+            StateKeys.PLAN_APPROVED: {"plan_id": "plan-1"},
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.TEMP_EXECUTOR_OUTPUTS: {"summary": "done"},
+        }
+    )
+
+    planner = await build_planner_instruction(ctx)
+    executor = await build_executor_instruction(ctx)
+    verifier = await build_verifier_instruction(ctx)
+
+    assert "Ship the ADK alignment" in planner
+    assert "{task:goal}" not in planner
+    assert '"plan_id": "plan-1"' in executor
+    assert "policy_approved" in executor
+    assert '"summary": "done"' in verifier
 
 
 @pytest.mark.asyncio
@@ -254,6 +299,67 @@ async def test_control_loop_resumes_after_human_approval(monkeypatch, tmp_path):
         query="control loop",
     )
     assert memory_result.memories
+
+
+@pytest.mark.asyncio
+async def test_curator_deprecates_conflicting_promoted_memory(tmp_path):
+    candidate_store = CandidateStore(str(tmp_path / "candidates.db"))
+    promoted_store = PromotedMemoryStore(str(tmp_path / "promoted.db"))
+    existing = PromotedMemory(
+        memory_id="mem-existing",
+        user_id="user-1",
+        memory_type=MemoryType.SEMANTIC,
+        content="gateway port is 18789 for production",
+        subject="gateway port",
+        provenance=Provenance(
+            originator_type=OriginatorType.SYSTEM,
+            capture_method="test",
+            captured_at=datetime.now(timezone.utc),
+        ),
+        confidence=0.7,
+        trust_score=0.7,
+        sensitivity=SensitivityLevel.INTERNAL,
+    )
+    promoted_store.save(existing, app_name="boiled_claw_v2")
+
+    candidate = MemoryCandidate(
+        candidate_id="cand-1",
+        session_id="sess-1",
+        user_id="user-1",
+        memory_type=MemoryType.SEMANTIC,
+        content="gateway port is 19789 for production",
+        subject="gateway port",
+        provenance=Provenance(
+            originator_type=OriginatorType.SYSTEM,
+            capture_method="test",
+            captured_at=datetime.now(timezone.utc),
+        ),
+        confidence=0.95,
+        trust_score=0.95,
+        sensitivity=SensitivityLevel.INTERNAL,
+    )
+
+    curation = await Curator(
+        candidate_store,
+        existing_promoted=promoted_store.list_memories(
+            app_name="boiled_claw_v2",
+            user_id="user-1",
+        ),
+    ).curate_candidates([candidate], user_id="user-1")
+
+    assert len(curation.promoted) == 1
+    assert len(curation.updated) == 1
+    assert curation.promoted[0].supersedes == ["mem-existing"]
+    assert curation.updated[0].review_status.value == "deprecated"
+
+    promoted_store.bulk_save(curation.persisted_memories, app_name="boiled_claw_v2")
+    memories = promoted_store.search(
+        app_name="boiled_claw_v2",
+        user_id="user-1",
+        query="gateway port",
+    )
+    assert len(memories) == 1
+    assert memories[0].content == "gateway port is 19789 for production"
 
 
 @pytest.mark.asyncio

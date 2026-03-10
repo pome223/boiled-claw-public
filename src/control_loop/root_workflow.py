@@ -30,6 +30,7 @@ from src.control_loop.callbacks import (
     policy_judge_callback,
     repair_callback,
 )
+from src.control_loop.constants import DEFAULT_MAX_REPAIR_ATTEMPTS
 from src.control_loop.executor_agent import executor_agent
 from src.control_loop.guarded_tools import (
     guarded_browser_extract_text,
@@ -39,20 +40,14 @@ from src.control_loop.guarded_tools import (
     guarded_web_search,
     guarded_write_file,
 )
-from src.control_loop.planner_agent import (
-    planner_agent,
-    _INSTRUCTION as _PLANNER_INSTRUCTION,
-)
-from src.control_loop.verifier_agent import (
-    verifier_agent,
-    _INSTRUCTION as _VERIFIER_INSTRUCTION,
-)
+from src.control_loop.planner_agent import planner_agent
+from src.control_loop.verifier_agent import verifier_agent
 from src.runtime.state_keys import StateKeys
 
 logger = logging.getLogger(__name__)
 
 _APP_NAME = "boiled_claw_v2"
-_MAX_REPAIR_ATTEMPTS = 3
+_MAX_REPAIR_ATTEMPTS = DEFAULT_MAX_REPAIR_ATTEMPTS
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
 _CONTROL_LOOP_AUTHOR = "control_loop"
 
@@ -76,7 +71,7 @@ def _chain_after_callbacks(
 planner_with_policy = LlmAgent(
     name="planner",
     model="gemini-3-flash-preview",
-    instruction=_PLANNER_INSTRUCTION,
+    instruction=planner_agent.instruction,
     output_key=StateKeys.TEMP_PLANNER_DRAFT,
     after_agent_callback=policy_judge_callback,
     description="Produces a structured plan, then auto-evaluates via policy_judge_callback.",
@@ -86,7 +81,7 @@ planner_with_policy = LlmAgent(
 verifier_with_hooks = LlmAgent(
     name="verifier",
     model="gemini-3-flash-preview",
-    instruction=_VERIFIER_INSTRUCTION,
+    instruction=verifier_agent.instruction,
     output_key=StateKeys.VERIFY_LAST_REPORT,
     after_agent_callback=_chain_after_callbacks(repair_callback, curator_callback),
     description=(
@@ -441,20 +436,28 @@ class ControlLoop:
         """Curate session candidates and sync promoted memories to ADK memory."""
         from src.memory_lifecycle.candidate_store import get_candidate_store
         from src.memory_lifecycle.curator import Curator
+        from src.memory_lifecycle.promoted_store import get_promoted_store
 
         store = get_candidate_store()
-        curation = await Curator(store).curate_session(
+        existing_promoted = get_promoted_store().list_memories(
+            app_name=_APP_NAME,
+            user_id=user_id,
+        )
+        curation = await Curator(
+            store,
+            existing_promoted=existing_promoted,
+        ).curate_session(
             session_id=session_id,
             user_id=user_id,
         )
         promoted_ids = curation.promoted_ids
-        if not promoted_ids:
+        if not curation.persisted_memories:
             return []
 
         if hasattr(self._memory_service, "store_promoted_memories"):
             await self._memory_service.store_promoted_memories(
                 app_name=_APP_NAME,
-                memories=curation.all_promoted,
+                memories=curation.persisted_memories,
             )
 
         session = await self._get_session(user_id, session_id)
