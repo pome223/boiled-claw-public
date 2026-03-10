@@ -17,6 +17,7 @@ class StateKeys:
 
     # ── Approval / Verification / Repair ──────────────────────────────────
     APPROVAL_STATUS = "approval:status"
+    APPROVAL_REQUEST = "approval:request"
     VERIFY_LAST_REPORT = "verify:last_report"
     REPAIR_COUNT = "repair:count"
 

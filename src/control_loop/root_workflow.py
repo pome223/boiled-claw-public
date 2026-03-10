@@ -19,8 +19,10 @@ from typing import Any, Callable, Optional
 
 from google.adk.agents import LlmAgent
 from google.adk.agents.callback_context import CallbackContext
+from google.adk.events.event import Event
+from google.adk.events.event_actions import EventActions
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
+from google.adk.sessions import InMemorySessionService, Session
 from google.genai.types import Content, Part
 
 from src.control_loop.callbacks import (
@@ -51,6 +53,8 @@ logger = logging.getLogger(__name__)
 
 _APP_NAME = "boiled_claw_v2"
 _MAX_REPAIR_ATTEMPTS = 3
+_APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
+_CONTROL_LOOP_AUTHOR = "control_loop"
 
 
 # ── Callback helpers ───────────────────────────────────────────────────────
@@ -139,9 +143,17 @@ class ControlLoop:
     def __init__(
         self,
         session_service=None,
+        memory_service=None,
         max_repair_attempts: int = _MAX_REPAIR_ATTEMPTS,
     ) -> None:
         self._session_service = session_service or InMemorySessionService()
+        if memory_service is None:
+            from src.memory_lifecycle.adk_memory_service import (
+                get_promoted_memory_service,
+            )
+
+            memory_service = get_promoted_memory_service()
+        self._memory_service = memory_service
         self._max_repair = max_repair_attempts
 
     async def run(
@@ -170,13 +182,13 @@ class ControlLoop:
             StateKeys.REPAIR_COUNT: 0,
             **(initial_state or {}),
         }
-
-        await self._session_service.create_session(
-            app_name=_APP_NAME,
+        session, created = await self._get_or_create_session(
             user_id=user_id,
             session_id=session_id,
-            state=init_state,
+            goal=goal,
+            init_state=init_state,
         )
+        session_id = session.id
 
         result = ExecutionResult(
             request_id=request_id,
@@ -184,32 +196,48 @@ class ControlLoop:
             user_id=user_id,
             final_text="",
         )
+        result.metadata["session_created"] = created
 
         for attempt in range(self._max_repair + 1):
             logger.info(
                 "ControlLoop: attempt=%d, session=%s", attempt, session_id
             )
 
-            # ── Step 1: Planner + PolicyJudge callback ─────────────────────
-            plan_message = (
-                goal
-                if attempt == 0
-                else f"[repair attempt {attempt}] {goal}"
-            )
-            await self._run_agent(
-                planner_with_policy,
-                session_id=session_id,
-                user_id=user_id,
-                message=plan_message,
-            )
-
-            # approval:status を確認
             state = await self._get_state(user_id, session_id)
             approval = state.get(StateKeys.APPROVAL_STATUS, "")
+            has_approved_plan = bool(state.get(StateKeys.PLAN_APPROVED))
+            resume_existing_plan = (
+                attempt == 0
+                and has_approved_plan
+                and approval in _APPROVED_STATUSES
+            )
+
+            if not resume_existing_plan:
+                # ── Step 1: Planner + PolicyJudge callback ─────────────────
+                plan_message = (
+                    goal
+                    if attempt == 0
+                    else f"[repair attempt {attempt}] {goal}"
+                )
+                await self._run_agent(
+                    planner_with_policy,
+                    session_id=session_id,
+                    user_id=user_id,
+                    message=plan_message,
+                )
+
+                # approval:status を確認
+                state = await self._get_state(user_id, session_id)
+                approval = state.get(StateKeys.APPROVAL_STATUS, "")
+            else:
+                logger.info(
+                    "ControlLoop: resuming approved plan for session=%s", session_id
+                )
 
             if approval == "denied":
                 result.final_text = "Plan was denied by policy judge."
                 result.success = False
+                result.plan_id = _extract_plan_id(state)
                 break
 
             if approval == "needs_human":
@@ -218,7 +246,11 @@ class ControlLoop:
                     "Please review plan:approved in session state."
                 )
                 result.success = False
+                result.plan_id = _extract_plan_id(state)
                 result.metadata["needs_human"] = True
+                result.metadata["approval_request"] = state.get(
+                    StateKeys.APPROVAL_REQUEST
+                )
                 break
 
             # ── Step 2: Executor ───────────────────────────────────────────
@@ -246,11 +278,15 @@ class ControlLoop:
             result.repair_count = state.get(StateKeys.REPAIR_COUNT, 0)
             result.plan_id = _extract_plan_id(state)
             result.verification_report_id = report.get("report_id")
-            result.promoted_memory_ids = state.get(
-                StateKeys.MEMORY_LAST_CANDIDATE_IDS, []
-            )
+            candidate_ids = state.get(StateKeys.MEMORY_LAST_CANDIDATE_IDS, [])
+            if candidate_ids:
+                result.metadata["memory_candidate_ids"] = candidate_ids
 
             if verify_status == "pass":
+                result.promoted_memory_ids = await self._promote_memories(
+                    user_id=user_id,
+                    session_id=session_id,
+                )
                 result.success = True
                 result.final_text = _build_final_text(state, report)
                 break
@@ -284,6 +320,7 @@ class ControlLoop:
             agent=agent,
             app_name=_APP_NAME,
             session_service=self._session_service,
+            memory_service=self._memory_service,
         )
         user_content = Content(role="user", parts=[Part(text=message)])
         async for _event in runner.run_async(
@@ -293,13 +330,156 @@ class ControlLoop:
         ):
             pass  # 結果は session.state の output_key 経由で取得
 
-    async def _get_state(self, user_id: str, session_id: str) -> dict[str, Any]:
-        """session state を dict として返す。"""
-        session = await self._session_service.get_session(
+    async def resolve_human_approval(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        approved: bool,
+        request_id: str | None = None,
+    ) -> bool:
+        """Record a human approval decision via ADK state_delta."""
+        session = await self._get_session(user_id, session_id)
+        if session is None or not session.state.get(StateKeys.PLAN_APPROVED):
+            return False
+        pending_request = session.state.get(StateKeys.APPROVAL_REQUEST) or {}
+        if request_id and pending_request.get("request_id") != request_id:
+            return False
+
+        await self._append_state_delta(
+            session=session,
+            author=_CONTROL_LOOP_AUTHOR,
+            invocation_prefix="approval",
+            state_delta={
+                StateKeys.APPROVAL_STATUS: (
+                    "human_approved" if approved else "denied"
+                ),
+                StateKeys.APPROVAL_REQUEST: None,
+            },
+        )
+        return True
+
+    async def get_pending_approval(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        session = await self._get_session(user_id, session_id)
+        if session is None:
+            return None
+        approval = session.state.get(StateKeys.APPROVAL_STATUS)
+        request = session.state.get(StateKeys.APPROVAL_REQUEST)
+        if approval != "needs_human" or not isinstance(request, dict):
+            return None
+        return request
+
+    async def _get_or_create_session(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        goal: str,
+        init_state: dict[str, Any],
+    ) -> tuple[Session, bool]:
+        session = await self._get_session(user_id, session_id)
+        if session is None:
+            session = await self._session_service.create_session(
+                app_name=_APP_NAME,
+                user_id=user_id,
+                session_id=session_id,
+                state=init_state,
+            )
+            return session, True
+
+        current_goal = session.state.get(StateKeys.TASK_GOAL)
+        if current_goal and current_goal != goal:
+            raise ValueError(
+                "Session already has a different task goal. "
+                "Use a new session_id for a new workflow."
+            )
+
+        missing_state = {
+            key: value
+            for key, value in init_state.items()
+            if key not in session.state
+        }
+        if missing_state:
+            await self._append_state_delta(
+                session=session,
+                author=_CONTROL_LOOP_AUTHOR,
+                invocation_prefix="bootstrap",
+                state_delta=missing_state,
+            )
+            session = await self._get_session(user_id, session_id)
+            assert session is not None
+
+        return session, False
+
+    async def _append_state_delta(
+        self,
+        *,
+        session: Session,
+        author: str,
+        invocation_prefix: str,
+        state_delta: dict[str, Any],
+    ) -> None:
+        """Persist state updates through ADK session events."""
+        event = Event(
+            invocation_id=f"{invocation_prefix}:{uuid.uuid4().hex[:12]}",
+            author=author,
+            actions=EventActions(state_delta=state_delta),
+        )
+        await self._session_service.append_event(session, event)
+
+    async def _promote_memories(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> list[str]:
+        """Curate session candidates and sync promoted memories to ADK memory."""
+        from src.memory_lifecycle.candidate_store import get_candidate_store
+        from src.memory_lifecycle.curator import Curator
+
+        store = get_candidate_store()
+        curation = await Curator(store).curate_session(
+            session_id=session_id,
+            user_id=user_id,
+        )
+        promoted_ids = curation.promoted_ids
+        if not promoted_ids:
+            return []
+
+        if hasattr(self._memory_service, "store_promoted_memories"):
+            await self._memory_service.store_promoted_memories(
+                app_name=_APP_NAME,
+                memories=curation.all_promoted,
+            )
+
+        session = await self._get_session(user_id, session_id)
+        if session is not None:
+            await self._append_state_delta(
+                session=session,
+                author=_CONTROL_LOOP_AUTHOR,
+                invocation_prefix="memory_promotion",
+                state_delta={StateKeys.MEMORY_LAST_PROMOTED_IDS: promoted_ids},
+            )
+
+        return promoted_ids
+
+    async def _get_session(
+        self, user_id: str, session_id: str
+    ) -> Session | None:
+        return await self._session_service.get_session(
             app_name=_APP_NAME,
             user_id=user_id,
             session_id=session_id,
         )
+
+    async def _get_state(self, user_id: str, session_id: str) -> dict[str, Any]:
+        """session state を dict として返す。"""
+        session = await self._get_session(user_id, session_id)
         return session.state if session and session.state else {}
 
 

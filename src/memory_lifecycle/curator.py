@@ -60,7 +60,9 @@ class Curator:
     ) -> CurationResult:
         """セッションの全 CANDIDATE を審査する。"""
         candidates = self._store.list_by_session(
-            session_id, status=ReviewStatus.CANDIDATE
+            session_id,
+            user_id=user_id,
+            status=ReviewStatus.CANDIDATE,
         )
         return await self._curate(candidates, user_id)
 

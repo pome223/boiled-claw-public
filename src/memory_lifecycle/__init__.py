@@ -14,6 +14,14 @@ from src.memory_lifecycle.memory_schema import (
 from src.memory_lifecycle.candidate_store import CandidateStore, get_candidate_store
 from src.memory_lifecycle.conflict_detector import ConflictDetector
 from src.memory_lifecycle.curator import Curator, CurationResult
+from src.memory_lifecycle.promoted_store import (
+    PromotedMemoryStore,
+    get_promoted_store,
+)
+from src.memory_lifecycle.adk_memory_service import (
+    PromotedMemoryService,
+    get_promoted_memory_service,
+)
 from src.memory_lifecycle.retrieval_planner import (
     RetrievalPlanner,
     RetrievalBundle,
@@ -35,6 +43,10 @@ __all__ = [
     "ConflictDetector",
     "Curator",
     "CurationResult",
+    "PromotedMemoryStore",
+    "get_promoted_store",
+    "PromotedMemoryService",
+    "get_promoted_memory_service",
     "RetrievalPlanner",
     "RetrievalBundle",
     "RetrievalQuery",

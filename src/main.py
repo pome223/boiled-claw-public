@@ -25,16 +25,19 @@ async def run_cli():
     from google.genai import types
     from src.agents.root_agent import root_agent
     from src.config.settings import get_settings
+    from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
     from src.skills.runtime import ensure_skills_loaded
 
     settings = get_settings()
     await ensure_skills_loaded()
 
     session_service = InMemorySessionService()
+    memory_service = get_promoted_memory_service()
     runner = Runner(
         agent=root_agent,
         app_name="boiled-claw",
         session_service=session_service,
+        memory_service=memory_service,
     )
 
     session = await session_service.create_session(
@@ -111,6 +114,7 @@ async def run_channels():
     from src.agents.root_agent import root_agent
     from google.genai import types
     from src.skills.runtime import ensure_skills_loaded
+    from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 
     settings = get_settings()
     await ensure_skills_loaded()
@@ -118,10 +122,12 @@ async def run_channels():
 
     # セッションとランナー
     session_service = InMemorySessionService()
+    memory_service = get_promoted_memory_service()
     runner = Runner(
         agent=root_agent,
         app_name="boiled-claw",
         session_service=session_service,
+        memory_service=memory_service,
     )
 
     # メッセージハンドラー

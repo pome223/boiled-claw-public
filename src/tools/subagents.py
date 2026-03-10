@@ -26,6 +26,7 @@ from google.genai import types
 
 from src.agents.sub_agents import SUB_AGENTS
 from src.config.settings import get_settings
+from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.security.audit import AuditEventType, get_audit_logger
 
 _AGENT_MAP = {agent.name: agent for agent in SUB_AGENTS}
@@ -436,10 +437,12 @@ class SubagentManager:
             return
 
         session_service = InMemorySessionService()
+        memory_service = get_promoted_memory_service()
         runner = Runner(
             agent=resolved_agent,
             app_name=state.app_name,
             session_service=session_service,
+            memory_service=memory_service,
         )
         session = await session_service.create_session(
             app_name=state.app_name,

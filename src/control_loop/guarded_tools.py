@@ -9,6 +9,8 @@ Executor agent にアタッチし、approved plan の範囲外の実行を防ぐ
 
 from __future__ import annotations
 
+from typing import Any
+
 from google.adk.tools import ToolContext
 
 from src.runtime.state_keys import StateKeys
@@ -48,6 +50,19 @@ def _check_capability_in_plan(
         raise PermissionError(
             f"Capability '{capability_name}' is not in the approved plan."
         )
+
+
+def _memory_entry_to_result(entry: Any) -> dict[str, Any]:
+    content = getattr(entry, "content", None)
+    parts = getattr(content, "parts", None) or []
+    text = "\n".join(
+        part.text for part in parts if getattr(part, "text", None)
+    ).strip()
+    return {
+        "content": text,
+        "author": getattr(entry, "author", None),
+        "timestamp": getattr(entry, "timestamp", None),
+    }
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -107,6 +122,23 @@ async def guarded_memory_read(
     """memory.read capability が承認済みの場合のみメモリを検索する。"""
     if tool_context is not None:
         _check_approval(tool_context, "memory.read")
+        _check_capability_in_plan(tool_context, "memory.read")
+
+        if query and not tags:
+            try:
+                response = await tool_context.search_memory(query)
+            except ValueError:
+                response = None
+            else:
+                memories = response.memories[: max(1, limit)]
+                return {
+                    "results": [_memory_entry_to_result(entry) for entry in memories],
+                    "count": len(memories),
+                    "query": query,
+                    "tags": None,
+                    "source": "adk_memory",
+                    "success": True,
+                }
 
     from src.tools.memory import memory_search
     return await memory_search(query=query, tags=tags, limit=limit)
@@ -131,6 +163,7 @@ async def guarded_browser_extract_text(
     """browser.navigate と同じ承認のもとでテキスト抽出を許可する。"""
     if tool_context is not None:
         _check_approval(tool_context, "browser.navigate")
+        _check_capability_in_plan(tool_context, "browser.navigate")
 
     from src.tools.browser import browser_extract_text
     return await browser_extract_text(selector)

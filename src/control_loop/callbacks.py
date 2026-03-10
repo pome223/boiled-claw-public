@@ -22,6 +22,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.genai.types import Content
 
 from src.runtime.state_keys import StateKeys
+from src.tools.context import resolve_callback_context
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +38,6 @@ _HUMAN_REQUIRED_CAPS: set[str] = {
 
 # 常に拒否する capability
 _ALWAYS_DENIED_CAPS: set[str] = {"admin"}
-
-_RISK_SCORE = {"low": 0.1, "medium": 0.4, "high": 0.75, "critical": 1.0}
-
 
 def policy_judge_callback(
     callback_context: CallbackContext,
@@ -78,6 +76,7 @@ def policy_judge_callback(
     denied = cap_names & _ALWAYS_DENIED_CAPS
     if denied:
         callback_context.state[StateKeys.APPROVAL_STATUS] = "denied"
+        callback_context.state[StateKeys.APPROVAL_REQUEST] = None
         callback_context.state[StateKeys.PLAN_RISK_LEVEL] = risk_level
         logger.warning("policy_judge_callback: denied caps=%s", denied)
         return None
@@ -85,7 +84,19 @@ def policy_judge_callback(
     # Human approval が必要な capability
     needs_human = bool(cap_names & _HUMAN_REQUIRED_CAPS) or risk_level == "critical"
     if needs_human:
+        approval_request = {
+            "request_id": f"plan_{uuid.uuid4().hex[:12]}",
+            "plan_id": plan.get("plan_id", ""),
+            "goal": plan.get("goal", ""),
+            "risk_level": risk_level,
+            "required_capabilities": sorted(cap_names),
+            "reason": (
+                "Human approval required due to capability or risk level."
+            ),
+            "plan": plan,
+        }
         callback_context.state[StateKeys.APPROVAL_STATUS] = "needs_human"
+        callback_context.state[StateKeys.APPROVAL_REQUEST] = approval_request
         callback_context.state[StateKeys.PLAN_APPROVED] = plan
         callback_context.state[StateKeys.PLAN_RISK_LEVEL] = risk_level
         logger.info(
@@ -99,6 +110,7 @@ def policy_judge_callback(
     callback_context.state[StateKeys.PLAN_APPROVED] = plan
     callback_context.state[StateKeys.PLAN_RISK_LEVEL] = risk_level
     callback_context.state[StateKeys.APPROVAL_STATUS] = "policy_approved"
+    callback_context.state[StateKeys.APPROVAL_REQUEST] = None
     logger.info(
         "policy_judge_callback: policy_approved (risk=%s)", risk_level
     )
@@ -261,9 +273,9 @@ def _extract_and_register_candidates(
     store = get_candidate_store()
     now = datetime.now(tz=timezone.utc)
 
-    # session_id は invocation_id から取るか、state から取る
-    session_id = getattr(callback_context, "session_id", "unknown")
-    user_id = getattr(callback_context, "user_id", "unknown")
+    runtime_context = resolve_callback_context(callback_context)
+    session_id = runtime_context["session_id"] or "unknown"
+    user_id = runtime_context["user_id"] or "unknown"
 
     candidate_ids: list[str] = []
 

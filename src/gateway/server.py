@@ -2,14 +2,16 @@
 WebSocket Gateway Server
 
 Typed Gateway Protocol v1:
-  Client -> Server: chat.send / chat.inject / chat.abort / chat.history /
+  Client -> Server: chat.send / control.run / chat.inject / chat.abort / chat.history /
                     presence.ping / tools.approval
   Server -> Client: connected / chat.done / chat.token / chat.history /
-                    system.event / health.tick / cron.update / tools.approval_request
+                    system.event / health.tick / cron.update /
+                    tools.approval_request / control.approval_request
 """
 
 import asyncio
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
 import hashlib
 import json
 from datetime import datetime
@@ -27,6 +29,8 @@ from pathlib import Path
 
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
+from src.control_loop.root_workflow import ControlLoop
+from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.security.audit import get_audit_logger, AuditEventType
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.finance import is_direct_stock_price_query, stock_price
@@ -38,6 +42,7 @@ from src.gateway.protocol import (
     PROTOCOL_VERSION,
     ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
     ev_health_tick, ev_cron_update, ev_tools_approval_request,
+    ev_control_approval_request,
     normalize_client_event, validate_client_event,
 )
 from src.gateway.transcript import get_transcript_store
@@ -131,21 +136,31 @@ class GatewayServer:
     """Gateway server with typed protocol, transcript, cron platform, and tool security."""
 
     def __init__(self):
-        self.app = FastAPI(title="boiled-claw Gateway", version="0.3.0")
         self.settings = get_settings()
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
         self.session_service = InMemorySessionService()
+        self.memory_service = get_promoted_memory_service()
         self.subagent_manager = get_subagent_manager()
         self.runner = Runner(
             agent=root_agent,
             app_name="boiled-claw",
             session_service=self.session_service,
+            memory_service=self.memory_service,
+        )
+        self.control_loop = ControlLoop(
+            session_service=self.session_service,
+            memory_service=self.memory_service,
         )
         self.audit_logger = get_audit_logger()
         self.transcript = get_transcript_store()
         self.tool_policy = get_tool_policy_engine()
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self.app = FastAPI(
+            title="boiled-claw Gateway",
+            version="0.3.0",
+            lifespan=self._lifespan,
+        )
 
         self.app.add_middleware(
             CORSMiddleware,
@@ -192,7 +207,7 @@ class GatewayServer:
                 agent_name=payload.get("agent_name"),
             )
 
-        set_subagent_notifier(_subagent_notifier)
+        self._subagent_notifier_fn = _subagent_notifier
 
         # cron -> WS/session notifier
         async def _cron_notifier(payload: Dict[str, Any]) -> None:
@@ -228,8 +243,38 @@ class GatewayServer:
                 ),
             )
 
-        self.tool_policy.set_notifier(_approval_notifier)
+        self._approval_notifier_fn = _approval_notifier
         self._setup_routes()
+
+    @asynccontextmanager
+    async def _lifespan(self, _app: FastAPI) -> AsyncIterator[None]:
+        await self._startup_gateway()
+        try:
+            yield
+        finally:
+            await self._shutdown_gateway()
+
+    async def _startup_gateway(self) -> None:
+        await ensure_skills_loaded()
+        set_subagent_notifier(self._subagent_notifier_fn)
+        self.tool_policy.set_notifier(self._approval_notifier_fn)
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_loop(), name="heartbeat"
+            )
+        scheduler = get_scheduler()
+        scheduler.set_spawn_fn(self.subagent_manager.spawn)
+        scheduler.set_notifier(self._cron_notifier_fn)
+        scheduler.start()
+        await scheduler.fire_system_event("startup")
+
+    async def _shutdown_gateway(self) -> None:
+        set_subagent_notifier(None)
+        self.tool_policy.set_notifier(None)
+        if self._heartbeat_task and not self._heartbeat_task.done():
+            self._heartbeat_task.cancel()
+        self._heartbeat_task = None
+        await get_scheduler().shutdown()
 
     def _shared_api_key_principal(self) -> str:
         api_key = self.settings.gateway_api_key or ""
@@ -294,28 +339,6 @@ class GatewayServer:
     # ------------------------------------------------------------------
 
     def _setup_routes(self):
-
-        @self.app.on_event("startup")
-        async def startup_event():
-            await ensure_skills_loaded()
-            self._heartbeat_task = asyncio.create_task(
-                self._heartbeat_loop(), name="heartbeat"
-            )
-            scheduler = get_scheduler()
-            scheduler.set_spawn_fn(self.subagent_manager.spawn)
-            scheduler.set_notifier(self._cron_notifier_fn)
-            scheduler.start()
-            # Fire startup system event jobs
-            await scheduler.fire_system_event("startup")
-
-        @self.app.on_event("shutdown")
-        async def shutdown_event():
-            set_subagent_notifier(None)
-            self.tool_policy.set_notifier(None)
-            if self._heartbeat_task and not self._heartbeat_task.done():
-                self._heartbeat_task.cancel()
-            await get_scheduler().shutdown()
-
         # --- health / root / protocol ---
 
         @self.app.get("/")
@@ -483,6 +506,144 @@ class GatewayServer:
                 "user_id": user_id,
                 "session_id": session.id,
             }
+
+        @self.app.post("/control-loop/run")
+        async def run_control_loop_endpoint(
+            request: Request,
+            payload: Dict[str, Any] | None = Body(default=None),
+        ):
+            body = payload or {}
+            requested_user_id = str(body.get("user_id") or "api_user")
+            user_id = self._resolve_http_user_id(
+                request,
+                requested_user_id,
+                default_user_id="api_user",
+            )
+            goal = str(body.get("goal") or "").strip()
+            session_id = body.get("session_id")
+            constraints = _normalize_constraints(body.get("constraints"))
+
+            if not goal:
+                raise HTTPException(status_code=400, detail="goal is required")
+
+            session = await self._get_or_create_gateway_session(
+                user_id=user_id,
+                session_id=str(session_id) if session_id else None,
+            )
+            self.transcript.append(
+                session.id,
+                "user",
+                goal,
+                user_id=user_id,
+                metadata={"type": "control_loop", "constraints": constraints},
+            )
+
+            result = await self._run_control_loop_http(
+                user_id=user_id,
+                session_id=session.id,
+                goal=goal,
+                constraints=constraints,
+            )
+            self.transcript.append(
+                session.id,
+                "assistant",
+                result.final_text,
+                user_id=user_id,
+                metadata={
+                    "type": "control_loop",
+                    "success": result.success,
+                    "needs_human": bool(result.metadata.get("needs_human")),
+                    "plan_id": result.plan_id,
+                },
+            )
+            if result.metadata.get("needs_human"):
+                await self._emit_control_approval_request(
+                    session.id,
+                    result.metadata.get("approval_request"),
+                )
+
+            return {
+                "ok": result.success,
+                "response": result.final_text,
+                "user_id": user_id,
+                "session_id": session.id,
+                "plan_id": result.plan_id,
+                "verification_report_id": result.verification_report_id,
+                "repair_count": result.repair_count,
+                "needs_human": bool(result.metadata.get("needs_human")),
+                "approval_request": result.metadata.get("approval_request"),
+                "promoted_memory_ids": result.promoted_memory_ids,
+            }
+
+        @self.app.post("/control-loop/approve")
+        async def approve_control_loop_endpoint(
+            request: Request,
+            payload: Dict[str, Any] | None = Body(default=None),
+        ):
+            body = payload or {}
+            requested_user_id = str(body.get("user_id") or "api_user")
+            user_id = self._resolve_http_user_id(
+                request,
+                requested_user_id,
+                default_user_id="api_user",
+            )
+            session_id = str(body.get("session_id") or "").strip()
+            request_id = str(body.get("request_id") or "").strip()
+            approved = bool(body.get("approved", False))
+
+            if not session_id or not request_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="session_id and request_id are required",
+                )
+
+            pending = await self.control_loop.get_pending_approval(
+                user_id=user_id,
+                session_id=session_id,
+            )
+            resolved = await self.control_loop.resolve_human_approval(
+                user_id=user_id,
+                session_id=session_id,
+                approved=approved,
+                request_id=request_id,
+            )
+            if not resolved:
+                raise HTTPException(status_code=404, detail="approval request not found")
+
+            resumed_result = None
+            if approved and pending:
+                resumed_result = await self._run_control_loop_http(
+                    user_id=user_id,
+                    session_id=session_id,
+                    goal=pending.get("goal", ""),
+                    constraints=_normalize_constraints(
+                        (pending.get("plan") or {}).get("constraints")
+                    ),
+                )
+                if resumed_result.metadata.get("needs_human"):
+                    await self._emit_control_approval_request(
+                        session_id,
+                        resumed_result.metadata.get("approval_request"),
+                    )
+
+            response = {
+                "ok": True,
+                "session_id": session_id,
+                "request_id": request_id,
+                "approved": approved,
+            }
+            if resumed_result is not None:
+                response["result"] = {
+                    "ok": resumed_result.success,
+                    "response": resumed_result.final_text,
+                    "plan_id": resumed_result.plan_id,
+                    "verification_report_id": resumed_result.verification_report_id,
+                    "repair_count": resumed_result.repair_count,
+                    "needs_human": bool(resumed_result.metadata.get("needs_human")),
+                    "approval_request": resumed_result.metadata.get("approval_request"),
+                    "promoted_memory_ids": resumed_result.promoted_memory_ids,
+                }
+            return response
 
         # --- memory ---
 
@@ -665,6 +826,30 @@ class GatewayServer:
                             )
                             await self._start_agent_run(session_id, user_id, text, request_id)
 
+                    elif event_name == "control.run":
+                        goal = (data.get("goal") or "").strip()
+                        constraints = _normalize_constraints(data.get("constraints"))
+                        request_id = data.get("request_id")
+                        if goal:
+                            self.transcript.append(
+                                session_id,
+                                "user",
+                                goal,
+                                user_id=user_id,
+                                request_id=request_id,
+                                metadata={
+                                    "type": "control_loop",
+                                    "constraints": constraints,
+                                },
+                            )
+                            await self._start_control_loop_run(
+                                session_id,
+                                user_id,
+                                goal,
+                                constraints,
+                                request_id,
+                            )
+
                     elif event_name == "chat.inject":
                         text = (data.get("text") or "").strip()
                         role = data.get("role", "system")
@@ -732,8 +917,44 @@ class GatewayServer:
                         result = self.tool_policy.resolve_approval(
                             request_id, approved, reason,
                         )
+                        control_loop_resolved = False
+                        pending_control_request = None
+                        if result is None:
+                            pending_control_request = (
+                                await self.control_loop.get_pending_approval(
+                                    user_id=user_id,
+                                    session_id=session_id,
+                                )
+                            )
+                            control_loop_resolved = (
+                                await self.control_loop.resolve_human_approval(
+                                    user_id=user_id,
+                                    session_id=session_id,
+                                    approved=approved,
+                                    request_id=request_id,
+                                )
+                            )
+                            if (
+                                approved
+                                and control_loop_resolved
+                                and pending_control_request
+                            ):
+                                await self._start_control_loop_run(
+                                    session_id=session_id,
+                                    user_id=user_id,
+                                    goal=pending_control_request.get("goal", ""),
+                                    constraints=_normalize_constraints(
+                                        (pending_control_request.get("plan") or {}).get(
+                                            "constraints"
+                                        )
+                                    ),
+                                )
                         target_session_id = result.session_id if result else session_id
-                        status = "resolved" if result else "not_found"
+                        status = (
+                            "resolved"
+                            if result or control_loop_resolved
+                            else "not_found"
+                        )
                         await self._emit_session_event(
                             target_session_id,
                             source="tools.approval",
@@ -785,6 +1006,27 @@ class GatewayServer:
         task = asyncio.create_task(
             self._agent_run_task(session_id, user_id, message, request_id),
             name=f"agent:{session_id}",
+        )
+        self.manager.set_task(session_id, task)
+
+    async def _start_control_loop_run(
+        self,
+        session_id: str,
+        user_id: str,
+        goal: str,
+        constraints: list[str],
+        request_id: Optional[str] = None,
+    ) -> None:
+        await self.manager.abort(session_id)
+        task = asyncio.create_task(
+            self._control_loop_task(
+                session_id,
+                user_id,
+                goal,
+                constraints,
+                request_id,
+            ),
+            name=f"control:{session_id}",
         )
         self.manager.set_task(session_id, task)
 
@@ -897,6 +1139,66 @@ class GatewayServer:
         finally:
             self.manager.clear_task(session_id)
 
+    async def _control_loop_task(
+        self,
+        session_id: str,
+        user_id: str,
+        goal: str,
+        constraints: list[str],
+        request_id: Optional[str] = None,
+    ) -> None:
+        try:
+            result = await self.control_loop.run(
+                goal=goal,
+                user_id=user_id,
+                constraints=constraints,
+                session_id=session_id,
+            )
+            self.transcript.append(
+                session_id,
+                "assistant",
+                result.final_text,
+                user_id=user_id,
+                request_id=request_id,
+                metadata={
+                    "type": "control_loop",
+                    "success": result.success,
+                    "needs_human": bool(result.metadata.get("needs_human")),
+                    "plan_id": result.plan_id,
+                },
+            )
+            if result.metadata.get("needs_human"):
+                await self._emit_control_approval_request(
+                    session_id,
+                    result.metadata.get("approval_request"),
+                )
+            await self.manager.send_json(
+                session_id,
+                ev_chat_done(result.final_text, request_id, aborted=False),
+            )
+        except asyncio.CancelledError:
+            await self.manager.send_json(
+                session_id,
+                ev_chat_done("", request_id, aborted=True),
+            )
+            raise
+        except Exception as exc:
+            error_msg = f"Control loop error: {exc}"
+            self.transcript.append(
+                session_id,
+                "assistant",
+                error_msg,
+                user_id=user_id,
+                request_id=request_id,
+                metadata={"type": "control_loop", "error": str(exc)},
+            )
+            await self.manager.send_json(
+                session_id,
+                ev_chat_done(error_msg, request_id, aborted=False),
+            )
+        finally:
+            self.manager.clear_task(session_id)
+
     # HTTP agent execution (no abort support)
     async def _run_agent_http(self, user_id: str, session_id: str, message: str) -> dict:
         if is_direct_stock_price_query(message):
@@ -913,41 +1215,44 @@ class GatewayServer:
                 )
             else:
                 text = quote.get("message", "株価データを取得できませんでした。")
-            return {"type": "agent_message", "message": text}
+        return {"type": "agent_message", "message": text}
 
-        full_msg = self._compose_agent_message(session_id, message)
-        content = types.Content(role="user", parts=[types.Part(text=full_msg)])
+    async def _run_control_loop_http(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        goal: str,
+        constraints: list[str],
+    ):
+        return await self.control_loop.run(
+            goal=goal,
+            user_id=user_id,
+            constraints=constraints,
+            session_id=session_id,
+        )
 
-        try:
-            response_text = ""
-            async with asyncio.timeout(45):
-                async for event in self.runner.run_async(
-                    user_id=user_id, session_id=session_id, new_message=content,
-                ):
-                    if event.is_final_response() and event.content and event.content.parts:
-                        for part in event.content.parts:
-                            if part.text:
-                                response_text += part.text
-
-            if not response_text.strip():
-                response_text = "応答の生成に失敗しました。もう一度試すか、質問を少し具体化してください。"
-
-            self.audit_logger.log_agent_message(
-                agent_name="root_agent", message=response_text,
-                user_id=user_id, session_id=session_id,
-            )
-            return {"type": "agent_message", "message": response_text}
-
-        except TimeoutError:
-            msg = "Agent timed out after 45 seconds. Please try again with a more specific query."
-            self.audit_logger.log_error(error=msg, user_id=user_id, session_id=session_id,
-                                        context={"message": message, "reason": "timeout"})
-            return {"type": "error", "message": msg}
-
-        except Exception as exc:
-            self.audit_logger.log_error(error=str(exc), user_id=user_id, session_id=session_id,
-                                        context={"message": message})
-            return {"type": "error", "message": f"Error: {exc}"}
+    async def _emit_control_approval_request(
+        self,
+        session_id: str,
+        approval_request: dict[str, Any] | None,
+    ) -> None:
+        if not approval_request:
+            return
+        await self.manager.send_or_queue_json(
+            session_id,
+            ev_control_approval_request(
+                request_id=approval_request.get("request_id", ""),
+                plan_id=approval_request.get("plan_id", ""),
+                goal=approval_request.get("goal", ""),
+                risk_level=approval_request.get("risk_level", ""),
+                required_capabilities=approval_request.get(
+                    "required_capabilities", []
+                ),
+                plan=approval_request.get("plan", {}),
+                reason=approval_request.get("reason", ""),
+            ),
+        )
 
     # ------------------------------------------------------------------
     # session / transcript helpers
@@ -1097,6 +1402,12 @@ class GatewayServer:
             host=host or self.settings.gateway_host,
             port=port or self.settings.gateway_port,
         )
+
+
+def _normalize_constraints(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
 
 
 def create_gateway() -> GatewayServer:

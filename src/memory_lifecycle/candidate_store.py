@@ -119,11 +119,15 @@ class CandidateStore:
     def list_by_session(
         self,
         session_id: str,
+        user_id: str | None = None,
         status: ReviewStatus | None = None,
     ) -> list[MemoryCandidate]:
         """セッションIDで候補一覧を取得する。"""
         sql = "SELECT * FROM candidates WHERE session_id = ?"
         params: list[Any] = [session_id]
+        if user_id is not None:
+            sql += " AND user_id = ?"
+            params.append(user_id)
         if status is not None:
             sql += " AND review_status = ?"
             params.append(status.value)
