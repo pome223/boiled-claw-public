@@ -6,6 +6,11 @@ duckduckgo-search ライブラリを使って実際のWeb検索結果を返す
 import asyncio
 from typing import Any, Dict
 
+from google.adk.agents.context import Context as ToolContext
+
+from src.security.audit import AuditEventType, get_audit_logger
+from src.tools.context import resolve_tool_context
+
 VALID_TIMELIMITS = {"", "d", "w", "m", "y"}
 
 
@@ -19,6 +24,7 @@ async def web_search(
     max_results: int = 5,
     timelimit: str = "",
     region: str = "jp-jp",
+    tool_context: ToolContext | None = None,
 ) -> Dict[str, Any]:
     """
     Webを検索して結果を返す。
@@ -40,14 +46,30 @@ async def web_search(
     Returns:
         検索結果のリスト
     """
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_logger = get_audit_logger()
+
+    def _audit(result: str, metadata: Dict[str, Any]) -> None:
+        audit_logger.log(
+            event_type=AuditEventType.WEB_SEARCH,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="search",
+            resource=query,
+            result=result,
+            metadata=metadata,
+        )
+
     try:
         from ddgs import DDGS
     except ImportError:
-        return {
+        payload = {
             "results": [],
             "query": query,
             "message": "ddgs library not installed",
         }
+        _audit("error", {"reason": "ddgs_missing"})
+        return payload
 
     normalized_timelimit = _normalize_timelimit(timelimit)
     normalized_max_results = max(1, min(10, int(max_results)))
@@ -67,10 +89,12 @@ async def web_search(
     try:
         raw = await asyncio.get_event_loop().run_in_executor(None, _search)
     except Exception as exc:
-        return {"results": [], "query": query, "message": f"Search failed: {exc}"}
+        payload = {"results": [], "query": query, "message": f"Search failed: {exc}"}
+        _audit("error", {"error": str(exc), "timelimit": normalized_timelimit})
+        return payload
 
     if not raw:
-        return {
+        payload = {
             "results": [],
             "query": query,
             "message": f"No results found for: {query}",
@@ -80,6 +104,8 @@ async def web_search(
                 "timelimit": normalized_timelimit,
             },
         }
+        _audit("empty", payload["meta"])
+        return payload
 
     results = [
         {
@@ -90,7 +116,7 @@ async def web_search(
         for item in raw
     ]
 
-    return {
+    payload = {
         "results": results,
         "query": query,
         "meta": {
@@ -99,3 +125,12 @@ async def web_search(
             "timelimit": normalized_timelimit,
         },
     }
+    _audit(
+        "success",
+        {
+            **payload["meta"],
+            "count": len(results),
+            "top_urls": [item["url"] for item in results[:3]],
+        },
+    )
+    return payload

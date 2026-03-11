@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import json
 from datetime import datetime
+import uuid
 from typing import Any, Dict, Optional
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -29,11 +30,14 @@ from pathlib import Path
 
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
+from src.agents.sub_agents import SUB_AGENTS
 from src.control_loop.root_workflow import ControlLoop
+from src.gateway.routing_agent import routing_agent
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.security.audit import get_audit_logger, AuditEventType
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.finance import is_direct_stock_price_query, stock_price
+from src.tools.web_search import web_search
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
 from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
 from src.tools.memory import memory_search, memory_stats, memory_delete
@@ -43,8 +47,10 @@ from src.gateway.protocol import (
     ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
     ev_health_tick, ev_cron_update, ev_tools_approval_request,
     ev_control_approval_request,
+    ev_tool_start, ev_tool_result,
     normalize_client_event, validate_client_event,
 )
+from src.gateway.routing import RoutingDecision, decision_from_payload, heuristic_decision
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 
@@ -52,6 +58,11 @@ _HEARTBEAT_INTERVAL = 30  # seconds
 _AGENT_TIMEOUT = 120       # seconds
 _MAX_PENDING_PER_SESSION = 100
 _MAX_PENDING_SESSIONS = 500
+_FRESHNESS_KEYWORDS = {
+    "最新", "最近", "ニュース", "調べて", "噂", "今年", "来日", "予定",
+    "公演", "ライブ", "フェス", "開催", "話題", "リサーチ", "調査",
+    "推測", "予測", "見通し", "発表", "gtc", "tour", "festival",
+}
 
 
 class ConnectionManager:
@@ -148,6 +159,22 @@ class GatewayServer:
             session_service=self.session_service,
             memory_service=self.memory_service,
         )
+        self.routing_session_service = InMemorySessionService()
+        self.routing_runner = Runner(
+            agent=routing_agent,
+            app_name="boiled-claw-router",
+            session_service=self.routing_session_service,
+            memory_service=self.memory_service,
+        )
+        self.specialist_runners = {
+            agent.name: Runner(
+                agent=agent,
+                app_name="boiled-claw",
+                session_service=self.session_service,
+                memory_service=self.memory_service,
+            )
+            for agent in SUB_AGENTS
+        }
         self.control_loop = ControlLoop(
             session_service=self.session_service,
             memory_service=self.memory_service,
@@ -263,7 +290,7 @@ class GatewayServer:
                 self._heartbeat_loop(), name="heartbeat"
             )
         scheduler = get_scheduler()
-        scheduler.set_spawn_fn(self.subagent_manager.spawn)
+        scheduler.set_spawn_fn(self._spawn_cron_target)
         scheduler.set_notifier(self._cron_notifier_fn)
         scheduler.start()
         await scheduler.fire_system_event("startup")
@@ -275,6 +302,561 @@ class GatewayServer:
             self._heartbeat_task.cancel()
         self._heartbeat_task = None
         await get_scheduler().shutdown()
+
+    def _should_force_web_research(self, message: str) -> bool:
+        normalized = (message or "").strip().lower()
+        if not normalized or is_direct_stock_price_query(message):
+            return False
+        return any(keyword in normalized for keyword in _FRESHNESS_KEYWORDS)
+
+    def _select_web_search_timelimit(self, message: str) -> str:
+        normalized = (message or "").strip().lower()
+        if any(keyword in normalized for keyword in {"今日", "きょう", "today", "速報"}):
+            return "d"
+        if any(keyword in normalized for keyword in {"今年", "来日", "公演", "ライブ", "フェス", "予定", "開催"}):
+            return "y"
+        if any(keyword in normalized for keyword in {"最新", "最近", "ニュース", "噂", "発表", "gtc"}):
+            return "w"
+        return "m"
+
+    async def _send_tool_event(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if session_id not in self.manager.active_connections:
+            return
+        await self.manager.send_or_queue_json(session_id, payload)
+
+    def _summarize_tool_result(self, payload: Any) -> dict[str, Any]:
+        if isinstance(payload, dict):
+            summarized: dict[str, Any] = {}
+            for key, value in payload.items():
+                if key in {"results"} and isinstance(value, list):
+                    summarized[key] = value[:3]
+                    summarized["count"] = len(value)
+                    continue
+                if isinstance(value, str):
+                    summarized[key] = value[:400]
+                elif isinstance(value, list):
+                    summarized[key] = value[:5]
+                elif isinstance(value, dict):
+                    summarized[key] = self._summarize_tool_result(value)
+                else:
+                    summarized[key] = value
+            return summarized
+        return {"value": str(payload)[:400]}
+
+    async def _emit_runner_tool_events(
+        self,
+        session_id: str,
+        event: Event,
+        *,
+        fallback_request_id: str | None = None,
+    ) -> None:
+        for function_call in event.get_function_calls():
+            await self._send_tool_event(
+                session_id,
+                ev_tool_start(
+                    tool_name=function_call.name or "unknown_tool",
+                    agent_name=event.author,
+                    args=function_call.args or {},
+                    request_id=function_call.id or fallback_request_id,
+                ),
+            )
+        for function_response in event.get_function_responses():
+            response = function_response.response or {}
+            await self._send_tool_event(
+                session_id,
+                ev_tool_result(
+                    tool_name=function_response.name or "unknown_tool",
+                    agent_name=event.author,
+                    ok="error" not in response,
+                    result=self._summarize_tool_result(response),
+                    request_id=function_response.id or fallback_request_id,
+                ),
+            )
+
+    def _format_web_grounding(self, query: str, result: dict[str, Any]) -> str:
+        lines = [f"web_search query: {query}"]
+        meta = result.get("meta") or {}
+        if meta:
+            lines.append(
+                f"timelimit={meta.get('timelimit', '')} region={meta.get('region', '')}"
+            )
+        entries = result.get("results") or []
+        if not entries:
+            lines.append(
+                f"No results. message={result.get('message', 'no search results returned')}"
+            )
+            return "\n".join(lines)
+        for index, item in enumerate(entries[:5], start=1):
+            lines.append(f"{index}. {item.get('title', '')}")
+            lines.append(f"   URL: {item.get('url', '')}")
+            snippet = (item.get("snippet") or "").strip()
+            if snippet:
+                lines.append(f"   Snippet: {snippet}")
+        return "\n".join(lines)
+
+    async def _compose_grounded_agent_message(
+        self,
+        session_id: str,
+        user_id: str,
+        message: str,
+        *,
+        agent_name: str = "",
+        request_id: str | None = None,
+        emit_tool_events: bool = False,
+        allow_forced_research: bool = True,
+    ) -> str:
+        composed = self._compose_agent_message(session_id, message)
+        if not allow_forced_research or not self._should_force_web_research(message):
+            return composed
+
+        timelimit = self._select_web_search_timelimit(message)
+        request_key = request_id or f"grounding:{session_id}"
+        resolved_agent_name = agent_name or root_agent.name
+        if emit_tool_events:
+            await self._send_tool_event(
+                session_id,
+                ev_tool_start(
+                    tool_name="web_search",
+                    agent_name=resolved_agent_name,
+                    args={
+                        "query": message,
+                        "timelimit": timelimit,
+                        "region": "jp-jp",
+                    },
+                    request_id=request_key,
+                ),
+            )
+
+        result = await web_search(
+            query=message,
+            timelimit=timelimit,
+            region="jp-jp",
+        )
+        self.audit_logger.log(
+            event_type=AuditEventType.WEB_SEARCH,
+            user_id=user_id,
+            session_id=session_id,
+            action="search",
+            resource=message,
+            result="success" if result.get("results") else "empty",
+            metadata={
+                "timelimit": timelimit,
+                "count": len(result.get("results") or []),
+                "message": result.get("message", ""),
+            },
+        )
+        if emit_tool_events:
+            await self._send_tool_event(
+                session_id,
+                ev_tool_result(
+                    tool_name="web_search",
+                    agent_name=resolved_agent_name,
+                    ok="error" not in result,
+                    result=self._summarize_tool_result(result),
+                    request_id=request_key,
+                ),
+            )
+
+        grounding = self._format_web_grounding(message, result)
+        return (
+            f"{composed}\n\n"
+            "[Grounding from web_search]\n"
+            f"{grounding}\n\n"
+            "Use the web_search grounding above as the primary evidence. "
+            "If it is insufficient or contradictory, say so explicitly and avoid guessing."
+        )
+
+    async def _emit_routing_event(
+        self,
+        session_id: str,
+        *,
+        status: str,
+        message: str,
+        user_id: str,
+        agent_name: str | None = None,
+    ) -> None:
+        await self._emit_session_event(
+            session_id,
+            source="router",
+            status=status,
+            message=message,
+            user_id=user_id,
+            agent_name=agent_name,
+        )
+
+    def _format_root_routing_message(
+        self,
+        original_message: str,
+        decision: RoutingDecision,
+        specialist_output: str | None = None,
+    ) -> str:
+        lines = [
+            "[Gateway routing]",
+            f"Primary specialist: {decision.specialist or 'root_agent'}",
+        ]
+        if decision.reason:
+            lines.append(f"Reason: {decision.reason}")
+        lines.append(
+            "You are still the root_agent. Use the routing context below to decide delegation and synthesis."
+        )
+        if specialist_output:
+            lines.extend(
+                [
+                    "",
+                    f"[Specialist output from {decision.specialist}]",
+                    specialist_output.strip(),
+                ]
+            )
+        lines.extend(["", "[Original user request]", original_message])
+        return "\n".join(lines)
+
+    async def _run_specialist_prepass(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        message: str,
+        specialist_name: str,
+        request_id: str | None = None,
+    ) -> str:
+        runner = self.specialist_runners.get(specialist_name)
+        if runner is None:
+            return ""
+
+        full_message = message
+        if specialist_name == "web_researcher":
+            full_message = await self._compose_grounded_agent_message(
+                session_id,
+                user_id,
+                message,
+                agent_name=specialist_name,
+                request_id=request_id,
+                emit_tool_events=True,
+                allow_forced_research=True,
+            )
+        content = types.Content(role="user", parts=[types.Part(text=full_message)])
+        partial = ""
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=content,
+        ):
+            await self._emit_runner_tool_events(
+                session_id,
+                event,
+                fallback_request_id=request_id,
+            )
+            if event.is_final_response() and event.content and event.content.parts:
+                for part in event.content.parts:
+                    if part.text:
+                        partial += part.text
+        return partial.strip()
+
+    def _routing_history_block(self, session_id: str, limit: int = 8) -> str:
+        lines: list[str] = []
+        for entry in self.transcript.get_history(session_id, limit=limit):
+            if entry.role not in {"user", "assistant", "inject", "system"}:
+                continue
+            content = (entry.content or "").strip()
+            if not content:
+                continue
+            lines.append(f"{entry.role}: {content[:280]}")
+        return "\n".join(lines) if lines else "(empty)"
+
+    def _build_routing_request(
+        self,
+        *,
+        session_id: str,
+        source: str,
+        message: str,
+        explicit_target: str | None = None,
+    ) -> str:
+        override = explicit_target or "auto"
+        history_block = self._routing_history_block(session_id)
+        return (
+            f"source={source}\n"
+            f"explicit_target={override}\n\n"
+            "[Recent transcript]\n"
+            f"{history_block}\n\n"
+            "[Current request]\n"
+            f"{message}\n"
+        )
+
+    @staticmethod
+    def _extract_json_payload(text: str) -> dict[str, Any] | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        try:
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            pass
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start < 0 or end <= start:
+            return None
+        try:
+            payload = json.loads(raw[start : end + 1])
+            return payload if isinstance(payload, dict) else None
+        except json.JSONDecodeError:
+            return None
+
+    async def _select_route_for_message(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        message: str,
+        source: str,
+        explicit_target: str | None = None,
+    ) -> RoutingDecision:
+        prompt = self._build_routing_request(
+            session_id=session_id,
+            source=source,
+            message=message,
+            explicit_target=explicit_target,
+        )
+        routing_session = await self.routing_session_service.create_session(
+            app_name="boiled-claw-router",
+            user_id=user_id,
+            session_id=f"route_{uuid.uuid4().hex[:12]}",
+        )
+        content = types.Content(role="user", parts=[types.Part(text=prompt)])
+        raw_response = ""
+
+        try:
+            async with asyncio.timeout(20):
+                async for event in self.routing_runner.run_async(
+                    user_id=user_id,
+                    session_id=routing_session.id,
+                    new_message=content,
+                ):
+                    if event.is_final_response() and event.content and event.content.parts:
+                        for part in event.content.parts:
+                            if part.text:
+                                raw_response += part.text
+
+            payload = self._extract_json_payload(raw_response)
+            if payload is None:
+                raise ValueError("routing_agent returned non-JSON output")
+
+            decision = decision_from_payload(payload, fallback_message=message)
+            if decision.confidence < 0.35:
+                raise ValueError("routing_agent confidence too low")
+            return decision
+        except Exception as exc:
+            fallback = heuristic_decision(message)
+            self.audit_logger.log(
+                event_type=AuditEventType.AGENT_MESSAGE,
+                user_id=user_id,
+                session_id=session_id,
+                action="routing_fallback",
+                resource="routing_agent",
+                result="fallback",
+                metadata={
+                    "error": str(exc),
+                    "fallback_target": fallback.route_label,
+                },
+            )
+            return fallback
+
+    @staticmethod
+    def _default_dynamic_instruction(message: str) -> str:
+        return (
+            "You are a dedicated dynamic agent created for a single user task.\n"
+            "Work only on the assigned task, stay within the provided tools, and "
+            "return concise status and results.\n\n"
+            f"Assigned task:\n{message}"
+        )
+
+    async def _spawn_dynamic_route(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        message: str,
+        decision: RoutingDecision,
+    ) -> dict[str, Any]:
+        dynamic_request = decision.dynamic_agent
+        instruction = (
+            dynamic_request.instruction.strip()
+            or self._default_dynamic_instruction(message)
+        )
+        result = await self.subagent_manager.spawn_dynamic(
+            task=message,
+            instruction=instruction,
+            mcp_servers=dynamic_request.mcp_servers,
+            requester_session_id=session_id,
+            user_id=user_id,
+            app_name="boiled-claw",
+            mode=dynamic_request.mode or "run",
+        )
+        return result
+
+    async def _spawn_cron_target(
+        self,
+        *,
+        task: str,
+        agent_name: str,
+        requester_session_id: str,
+        user_id: str,
+        app_name: str,
+        mode: str = "run",
+    ) -> dict[str, Any]:
+        if agent_name != "auto":
+            return await self.subagent_manager.spawn(
+                task=task,
+                agent_name=agent_name,
+                requester_session_id=requester_session_id,
+                user_id=user_id,
+                app_name=app_name,
+                mode=mode,
+            )
+
+        decision = await self._select_route_for_message(
+            session_id=requester_session_id,
+            user_id=user_id,
+            message=task,
+            source="cron",
+            explicit_target="auto",
+        )
+
+        if decision.target == "specialist" and decision.specialist:
+            return await self.subagent_manager.spawn(
+                task=task,
+                agent_name=decision.specialist,
+                requester_session_id=requester_session_id,
+                user_id=user_id,
+                app_name=app_name,
+                mode=mode,
+            )
+
+        if decision.target == "dynamic_agent":
+            return await self._spawn_dynamic_route(
+                session_id=requester_session_id,
+                user_id=user_id,
+                message=task,
+                decision=decision,
+            )
+
+        run_id = f"cronrt_{uuid.uuid4().hex[:12]}"
+        if decision.target == "control_loop":
+            asyncio.create_task(
+                self._cron_control_loop_task(
+                    run_id=run_id,
+                    session_id=requester_session_id,
+                    user_id=user_id,
+                    goal=task,
+                ),
+                name=f"cron-control:{run_id}",
+            )
+            return {
+                "status": "accepted",
+                "run_id": run_id,
+                "agent_name": "control_loop",
+                "mode": mode,
+                "requester_session_id": requester_session_id,
+            }
+
+        asyncio.create_task(
+            self._cron_root_agent_task(
+                run_id=run_id,
+                session_id=requester_session_id,
+                user_id=user_id,
+                message=task,
+            ),
+            name=f"cron-root:{run_id}",
+        )
+        return {
+            "status": "accepted",
+            "run_id": run_id,
+            "agent_name": "root_agent",
+            "mode": mode,
+            "requester_session_id": requester_session_id,
+        }
+
+    async def _cron_root_agent_task(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        user_id: str,
+        message: str,
+    ) -> None:
+        result = await self._run_agent_http(user_id, session_id, message)
+        await self._deliver_background_result(
+            session_id=session_id,
+            user_id=user_id,
+            source="cron",
+            run_id=run_id,
+            agent_name="root_agent",
+            message=result.get("message", ""),
+            ok=bool(result.get("ok")),
+            metadata={"type": result.get("type", "agent_message")},
+        )
+
+    async def _cron_control_loop_task(
+        self,
+        *,
+        run_id: str,
+        session_id: str,
+        user_id: str,
+        goal: str,
+    ) -> None:
+        result = await self._run_control_loop_http(
+            user_id=user_id,
+            session_id=session_id,
+            goal=goal,
+            constraints=[],
+        )
+        await self._deliver_background_result(
+            session_id=session_id,
+            user_id=user_id,
+            source="cron",
+            run_id=run_id,
+            agent_name="control_loop",
+            message=result.final_text,
+            ok=result.success,
+            metadata={"type": "control_loop", "plan_id": result.plan_id},
+        )
+
+    async def _deliver_background_result(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        source: str,
+        run_id: str,
+        agent_name: str,
+        message: str,
+        ok: bool,
+        metadata: dict[str, Any],
+    ) -> None:
+        session = self.transcript.get_session(session_id)
+        owner_id = session.user_id if session is not None else user_id
+        if session is not None and message.strip():
+            self.transcript.append(
+                session_id,
+                "assistant",
+                message,
+                user_id=owner_id,
+                metadata=metadata,
+            )
+        await self._emit_session_event(
+            session_id,
+            source=source,
+            status="completed" if ok else "failed",
+            message=message,
+            user_id=owner_id,
+            run_id=run_id,
+            agent_name=agent_name,
+        )
 
     def _shared_api_key_principal(self) -> str:
         api_key = self.settings.gateway_api_key or ""
@@ -500,7 +1082,7 @@ class GatewayServer:
             )
 
             return {
-                "ok": result["type"] == "agent_message",
+                "ok": result.get("ok", result["type"] == "agent_message"),
                 "type": result["type"],
                 "response": result["message"],
                 "user_id": user_id,
@@ -1042,7 +1624,26 @@ class GatewayServer:
         try:
             # Stock price shortcut
             if is_direct_stock_price_query(message):
+                await self._send_tool_event(
+                    session_id,
+                    ev_tool_start(
+                        tool_name="stock_price",
+                        agent_name=root_agent.name,
+                        args={"query": message},
+                        request_id=request_id,
+                    ),
+                )
                 quote = await stock_price(message)
+                await self._send_tool_event(
+                    session_id,
+                    ev_tool_result(
+                        tool_name="stock_price",
+                        agent_name=root_agent.name,
+                        ok=bool(quote.get("ok")),
+                        result=self._summarize_tool_result(quote),
+                        request_id=request_id,
+                    ),
+                )
                 if quote.get("ok"):
                     partial = (
                         f"{quote.get('symbol')} の最新日次データです。\n"
@@ -1064,7 +1665,147 @@ class GatewayServer:
                 await self.manager.send_json(session_id, ev_chat_done(partial, request_id))
                 return
 
-            full_msg = self._compose_agent_message(session_id, message)
+            decision = await self._select_route_for_message(
+                session_id=session_id,
+                user_id=user_id,
+                message=message,
+                source="chat",
+            )
+            if decision.target == "control_loop":
+                await self._emit_routing_event(
+                    session_id,
+                    status="selected",
+                    message=f"Router selected control loop ({decision.reason or 'multi-step task'}).",
+                    user_id=user_id,
+                    agent_name="root_workflow",
+                )
+                await self._control_loop_task(
+                    session_id,
+                    user_id,
+                    message,
+                    [],
+                    request_id,
+                )
+                return
+
+            if decision.target == "dynamic_agent":
+                await self._emit_routing_event(
+                    session_id,
+                    status="selected",
+                    message=(
+                        f"Router selected dynamic_agent "
+                        f"({decision.reason or 'dedicated task environment'})."
+                    ),
+                    user_id=user_id,
+                    agent_name="dynamic_agent",
+                )
+                spawn = await self._spawn_dynamic_route(
+                    session_id=session_id,
+                    user_id=user_id,
+                    message=message,
+                    decision=decision,
+                )
+                if spawn.get("status") == "accepted":
+                    partial = (
+                        "Dynamic agent started.\n"
+                        f"- run_id: {spawn.get('run_id')}\n"
+                        f"- mode: {decision.dynamic_agent.mode or 'run'}"
+                    )
+                else:
+                    partial = spawn.get("error", "Failed to start dynamic agent.")
+                self.transcript.append(
+                    session_id, "assistant", partial,
+                    user_id=user_id,
+                    request_id=request_id,
+                )
+                await self.manager.send_json(
+                    session_id,
+                    ev_chat_done(partial, request_id, aborted=False),
+                )
+                return
+
+            routed_message = message
+            if decision.target == "specialist" and decision.specialist:
+                await self._emit_routing_event(
+                    session_id,
+                    status="selected",
+                    message=(
+                        f"Router selected {decision.specialist} "
+                        f"({decision.reason or 'specialized task'})."
+                    ),
+                    user_id=user_id,
+                    agent_name=decision.specialist,
+                )
+                if not decision.preflight_specialist:
+                    partial = await self._run_specialist_prepass(
+                        session_id=session_id,
+                        user_id=user_id,
+                        message=message,
+                        specialist_name=decision.specialist,
+                        request_id=request_id,
+                    )
+                    if not partial.strip():
+                        partial = "Specialist did not return a response."
+                    self.transcript.append(
+                        session_id, "assistant", partial,
+                        user_id=user_id,
+                        request_id=request_id,
+                    )
+                    await self.manager.send_json(
+                        session_id,
+                        ev_chat_done(partial, request_id, aborted=False),
+                    )
+                    return
+
+                specialist_output = ""
+                try:
+                    specialist_output = await self._run_specialist_prepass(
+                        session_id=session_id,
+                        user_id=user_id,
+                        message=message,
+                        specialist_name=decision.specialist,
+                        request_id=request_id,
+                    )
+                except Exception as exc:
+                    await self._emit_routing_event(
+                        session_id,
+                        status="fallback",
+                        message=(
+                            f"{decision.specialist} prepass failed; "
+                            f"falling back to root_agent ({exc})."
+                        ),
+                        user_id=user_id,
+                        agent_name="root_agent",
+                    )
+                    specialist_output = ""
+                routed_message = self._format_root_routing_message(
+                    message,
+                    decision,
+                    specialist_output=specialist_output,
+                )
+                await self._emit_routing_event(
+                    session_id,
+                    status="forwarded",
+                    message=(
+                        f"Routing context from {decision.specialist} forwarded to root_agent."
+                    ),
+                    user_id=user_id,
+                    agent_name="root_agent",
+                )
+
+            full_msg = await self._compose_grounded_agent_message(
+                session_id,
+                user_id,
+                routed_message,
+                agent_name=root_agent.name,
+                request_id=request_id,
+                emit_tool_events=True,
+                allow_forced_research=not (
+                    decision.target == "specialist"
+                    and decision.specialist == "web_researcher"
+                    and decision.preflight_specialist
+                ),
+            )
             content = types.Content(role="user", parts=[types.Part(text=full_msg)])
 
             async with asyncio.timeout(_AGENT_TIMEOUT):
@@ -1073,6 +1814,11 @@ class GatewayServer:
                     session_id=session_id,
                     new_message=content,
                 ):
+                    await self._emit_runner_tool_events(
+                        session_id,
+                        event,
+                        fallback_request_id=request_id,
+                    )
                     if event.is_final_response() and event.content and event.content.parts:
                         for part in event.content.parts:
                             if part.text:
@@ -1202,7 +1948,24 @@ class GatewayServer:
     # HTTP agent execution (no abort support)
     async def _run_agent_http(self, user_id: str, session_id: str, message: str) -> dict:
         if is_direct_stock_price_query(message):
+            await self._send_tool_event(
+                session_id,
+                ev_tool_start(
+                    tool_name="stock_price",
+                    agent_name=root_agent.name,
+                    args={"query": message},
+                ),
+            )
             quote = await stock_price(message)
+            await self._send_tool_event(
+                session_id,
+                ev_tool_result(
+                    tool_name="stock_price",
+                    agent_name=root_agent.name,
+                    ok=bool(quote.get("ok")),
+                    result=self._summarize_tool_result(quote),
+                ),
+            )
             if quote.get("ok"):
                 text = (
                     f"{quote.get('symbol')} の最新日次データです。\n"
@@ -1215,9 +1978,150 @@ class GatewayServer:
                 )
             else:
                 text = quote.get("message", "株価データを取得できませんでした。")
-            return {"type": "agent_message", "message": text}
+            return {
+                "type": "agent_message",
+                "message": text,
+                "ok": bool(quote.get("ok")),
+            }
 
-        full_msg = self._compose_agent_message(session_id, message)
+        decision = await self._select_route_for_message(
+            session_id=session_id,
+            user_id=user_id,
+            message=message,
+            source="http",
+        )
+        if decision.target == "control_loop":
+            await self._emit_routing_event(
+                session_id,
+                status="selected",
+                message=f"Router selected control loop ({decision.reason or 'multi-step task'}).",
+                user_id=user_id,
+                agent_name="root_workflow",
+            )
+            result = await self._run_control_loop_http(
+                user_id=user_id,
+                session_id=session_id,
+                goal=message,
+                constraints=[],
+            )
+            if result.metadata.get("needs_human"):
+                await self._emit_control_approval_request(
+                    session_id,
+                    result.metadata.get("approval_request"),
+                )
+            return {
+                "type": "control_loop",
+                "message": result.final_text,
+                "ok": result.success,
+            }
+
+        if decision.target == "dynamic_agent":
+            await self._emit_routing_event(
+                session_id,
+                status="selected",
+                message=(
+                    f"Router selected dynamic_agent "
+                    f"({decision.reason or 'dedicated task environment'})."
+                ),
+                user_id=user_id,
+                agent_name="dynamic_agent",
+            )
+            spawn = await self._spawn_dynamic_route(
+                session_id=session_id,
+                user_id=user_id,
+                message=message,
+                decision=decision,
+            )
+            if spawn.get("status") == "accepted":
+                return {
+                    "type": "dynamic_agent",
+                    "message": (
+                        "Dynamic agent started.\n"
+                        f"- run_id: {spawn.get('run_id')}\n"
+                        f"- mode: {decision.dynamic_agent.mode or 'run'}"
+                    ),
+                    "ok": True,
+                }
+            return {
+                "type": "error",
+                "message": spawn.get("error", "Failed to start dynamic agent."),
+                "ok": False,
+            }
+
+        routed_message = message
+        if decision.target == "specialist" and decision.specialist:
+            await self._emit_routing_event(
+                session_id,
+                status="selected",
+                message=(
+                    f"Router selected {decision.specialist} "
+                    f"({decision.reason or 'specialized task'})."
+                ),
+                user_id=user_id,
+                agent_name=decision.specialist,
+            )
+            if not decision.preflight_specialist:
+                response_text = await self._run_specialist_prepass(
+                    session_id=session_id,
+                    user_id=user_id,
+                    message=message,
+                    specialist_name=decision.specialist,
+                )
+                if not response_text.strip():
+                    response_text = "Specialist did not return a response."
+                return {
+                    "type": "specialist",
+                    "message": response_text,
+                    "ok": True,
+                }
+
+            specialist_output = ""
+            try:
+                specialist_output = await self._run_specialist_prepass(
+                    session_id=session_id,
+                    user_id=user_id,
+                    message=message,
+                    specialist_name=decision.specialist,
+                )
+            except Exception as exc:
+                await self._emit_routing_event(
+                    session_id,
+                    status="fallback",
+                    message=(
+                        f"{decision.specialist} prepass failed; "
+                        f"falling back to root_agent ({exc})."
+                    ),
+                    user_id=user_id,
+                    agent_name="root_agent",
+                )
+                specialist_output = ""
+            routed_message = self._format_root_routing_message(
+                message,
+                decision,
+                specialist_output=specialist_output,
+            )
+            await self._emit_routing_event(
+                session_id,
+                status="forwarded",
+                message=(
+                    f"Routing context from {decision.specialist} forwarded to root_agent."
+                ),
+                user_id=user_id,
+                agent_name="root_agent",
+            )
+
+        full_msg = await self._compose_grounded_agent_message(
+            session_id,
+            user_id,
+            routed_message,
+            agent_name=root_agent.name,
+            emit_tool_events=False,
+            allow_forced_research=not (
+                decision.target == "specialist"
+                and decision.specialist == "web_researcher"
+                and decision.preflight_specialist
+            ),
+        )
         content = types.Content(role="user", parts=[types.Part(text=full_msg)])
 
         try:
@@ -1228,6 +2132,10 @@ class GatewayServer:
                     session_id=session_id,
                     new_message=content,
                 ):
+                    await self._emit_runner_tool_events(
+                        session_id,
+                        event,
+                    )
                     if event.is_final_response() and event.content and event.content.parts:
                         for part in event.content.parts:
                             if part.text:
@@ -1242,7 +2150,7 @@ class GatewayServer:
                 user_id=user_id,
                 session_id=session_id,
             )
-            return {"type": "agent_message", "message": response_text}
+            return {"type": "agent_message", "message": response_text, "ok": True}
 
         except TimeoutError:
             msg = f"Agent timed out after {_AGENT_TIMEOUT} seconds."
@@ -1252,7 +2160,7 @@ class GatewayServer:
                 session_id=session_id,
                 context={"message": message, "reason": "timeout"},
             )
-            return {"type": "error", "message": msg}
+            return {"type": "error", "message": msg, "ok": False}
 
         except Exception as exc:
             self.audit_logger.log_error(
@@ -1261,7 +2169,7 @@ class GatewayServer:
                 session_id=session_id,
                 context={"message": message},
             )
-            return {"type": "error", "message": f"Error: {exc}"}
+            return {"type": "error", "message": f"Error: {exc}", "ok": False}
 
     async def _run_control_loop_http(
         self,

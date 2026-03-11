@@ -12,3 +12,5 @@ def test_is_direct_stock_price_query_rejects_non_quote_intents():
     assert not is_direct_stock_price_query("株価APIを作りたい")
     assert not is_direct_stock_price_query("株価とは何ですか")
     assert not is_direct_stock_price_query("NVIDIAの株価を分析して")
+    assert not is_direct_stock_price_query("NvidiaのGTCの後の株価をリサーチをもとに推測して")
+    assert not is_direct_stock_price_query("NVDAの株価を予測して")

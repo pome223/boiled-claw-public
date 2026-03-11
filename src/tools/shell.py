@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.context import resolve_tool_context
@@ -60,10 +61,22 @@ async def run_shell(
     """
     # ホワイトスペースを正規化してからポリシーチェック（空白2つ等の回避を防ぐ）
     normalized = " ".join(command.split())
+    audit_logger = get_audit_logger()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+
+    def _audit(result: str, return_code: int | None = None) -> None:
+        audit_logger.log_shell_command(
+            normalized,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=result,
+            return_code=return_code,
+        )
 
     policy = get_security_policy()
     allowed, reason = policy.is_command_allowed(normalized)
     if not allowed:
+        _audit(f"blocked:{reason}", -1)
         return {
             "error": f"Command blocked by security policy: {reason}",
             "stdout": "",
@@ -77,6 +90,7 @@ async def run_shell(
         tool_context,
     )
     if approval_error:
+        _audit(approval_error, -1)
         return {
             "error": approval_error,
             "stdout": "",
@@ -88,6 +102,7 @@ async def run_shell(
     try:
         tokens = shlex.split(normalized)
     except ValueError as e:
+        _audit(f"invalid:{e}", -1)
         return {
             "error": f"Invalid command syntax: {e}",
             "stdout": "",
@@ -96,6 +111,7 @@ async def run_shell(
         }
 
     if not tokens:
+        _audit("empty", -1)
         return {"error": "Empty command", "stdout": "", "stderr": "", "return_code": -1}
 
     # 先頭トークン（実行ファイル名）による追加チェック
@@ -105,6 +121,7 @@ async def run_shell(
         "truncate", "srm", "secure-delete",
     }
     if executable in BLOCKED_EXECUTABLES:
+        _audit(f"blocked_executable:{executable}", -1)
         return {
             "error": f"Executable '{executable}' is blocked for safety.",
             "stdout": "",
@@ -124,6 +141,10 @@ async def run_shell(
             timeout=timeout
         )
 
+        _audit(
+            "success" if process.returncode == 0 else "failed",
+            process.returncode,
+        )
         return {
             "stdout": stdout.decode("utf-8", errors="replace"),
             "stderr": stderr.decode("utf-8", errors="replace"),
@@ -131,6 +152,7 @@ async def run_shell(
         }
 
     except asyncio.TimeoutError:
+        _audit("timeout", -1)
         return {
             "error": f"Command timed out after {timeout} seconds",
             "stdout": "",
@@ -138,6 +160,7 @@ async def run_shell(
             "return_code": -1,
         }
     except FileNotFoundError:
+        _audit("not_found", -1)
         return {
             "error": f"Command not found: {tokens[0]}",
             "stdout": "",
@@ -145,6 +168,7 @@ async def run_shell(
             "return_code": -1,
         }
     except Exception as e:
+        _audit(f"error:{e}", -1)
         return {
             "error": str(e),
             "stdout": "",

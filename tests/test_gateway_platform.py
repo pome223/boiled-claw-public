@@ -183,7 +183,341 @@ async def test_run_agent_http_uses_runner_for_non_stock_query(monkeypatch, tmp_p
         message="Explain the ADK state model",
     )
 
-    assert result == {"type": "agent_message", "message": "runner response"}
+    assert result == {
+        "type": "agent_message",
+        "message": "runner response",
+        "ok": True,
+    }
+
+
+def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="boiled_claw",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        function_call=types.FunctionCall(
+                            id="fc-1",
+                            name="web_search",
+                            args={"query": "NVIDIA GTC"},
+                        )
+                    )
+                ],
+            ),
+        )
+        yield Event(
+            author="boiled_claw",
+            content=types.Content(
+                role="tool",
+                parts=[
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id="fc-1",
+                            name="web_search",
+                            response={"results": [{"title": "NVIDIA GTC", "url": "https://example.com"}]},
+                        )
+                    )
+                ],
+            ),
+        )
+        yield Event(
+            author="boiled_claw",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="grounded answer")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.runner, "run_async", _fake_run_async)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.send", "text": "NVIDIA を検索"})
+
+            tool_start = ws.receive_json()
+            tool_result = ws.receive_json()
+            done = ws.receive_json()
+
+            assert tool_start["event"] == "tool.start"
+            assert tool_start["tool_name"] == "web_search"
+            assert tool_start["request_id"] == "fc-1"
+            assert tool_result["event"] == "tool.result"
+            assert tool_result["tool_name"] == "web_search"
+            assert tool_result["ok"] is True
+            assert done["event"] == "chat.done"
+            assert done["text"] == "grounded answer"
+
+
+def test_websocket_forces_web_search_for_fresh_query(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    recorded = {}
+
+    async def _fake_routing_run_async(*, user_id, session_id, new_message):
+        text = new_message.parts[0].text
+        assert "[Current request]" in text
+        assert "今年日本へやってくる海外のアーティスト" in text
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        text=(
+                            '{"target":"specialist","specialist":"web_researcher",'
+                            '"handoff_mode":"preflight_then_root",'
+                            '"reason":"fresh research query","confidence":0.95,'
+                            '"dynamic_agent":{"instruction":"","mcp_servers":[],"mode":"run"}}'
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _fake_web_search(*, query, max_results=5, timelimit="", region="jp-jp", tool_context=None):
+        recorded["query"] = query
+        recorded["timelimit"] = timelimit
+        recorded["region"] = region
+        return {
+            "results": [
+                {
+                    "title": "Summer Sonic lineup",
+                    "snippet": "Headliners announced for Japan festivals",
+                    "url": "https://example.com/lineup",
+                }
+            ],
+            "query": query,
+            "meta": {"timelimit": timelimit, "region": region},
+        }
+
+    async def _fake_specialist_run_async(*, user_id, session_id, new_message):
+        text = new_message.parts[0].text
+        assert "[Grounding from web_search]" in text
+        assert "Summer Sonic lineup" in text
+        yield Event(
+            author="web_researcher",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="specialist findings")],
+            ),
+        )
+
+    async def _fake_root_run_async(*, user_id, session_id, new_message):
+        text = new_message.parts[0].text
+        assert "[Gateway routing]" in text
+        assert "Primary specialist: web_researcher" in text
+        assert "[Specialist output from web_researcher]" in text
+        assert "specialist findings" in text
+        yield Event(
+            author="boiled_claw",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="researched answer")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing_run_async)
+    monkeypatch.setattr(server_module, "web_search", _fake_web_search)
+    monkeypatch.setattr(
+        gateway.specialist_runners["web_researcher"],
+        "run_async",
+        _fake_specialist_run_async,
+    )
+    monkeypatch.setattr(gateway.runner, "run_async", _fake_root_run_async)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.send", "text": "今年日本へやってくる海外のアーティストで有名な人は"})
+
+            route_selected = ws.receive_json()
+            tool_start = ws.receive_json()
+            tool_result = ws.receive_json()
+            route_forwarded = ws.receive_json()
+            done = ws.receive_json()
+
+            assert recorded["query"] == "今年日本へやってくる海外のアーティストで有名な人は"
+            assert recorded["timelimit"] == "y"
+            assert route_selected["event"] == "system.event"
+            assert route_selected["source"] == "router"
+            assert route_selected["agent_name"] == "web_researcher"
+            assert tool_start["event"] == "tool.start"
+            assert tool_start["tool_name"] == "web_search"
+            assert tool_start["agent_name"] == "web_researcher"
+            assert tool_result["event"] == "tool.result"
+            assert tool_result["tool_name"] == "web_search"
+            assert tool_result["agent_name"] == "web_researcher"
+            assert route_forwarded["event"] == "system.event"
+            assert route_forwarded["source"] == "router"
+            assert route_forwarded["agent_name"] == "root_agent"
+            assert done["event"] == "chat.done"
+            assert done["text"] == "researched answer"
+
+
+def test_websocket_auto_routes_longform_research_to_control_loop(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_routing_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        text=(
+                            '{"target":"control_loop","specialist":null,'
+                            '"handoff_mode":"direct","reason":"long-form report",'
+                            '"confidence":0.94,'
+                            '"dynamic_agent":{"instruction":"","mcp_servers":[],"mode":"run"}}'
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+        assert goal == "中東情勢を詳細に調べてレポートを書いて"
+        assert user_id == "alice"
+        return ExecutionResult(
+            request_id="req-ctl-1",
+            session_id=session_id or "session-1",
+            user_id=user_id,
+            final_text="control loop answer",
+            plan_id="plan-ctl-1",
+            success=True,
+        )
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing_run_async)
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_run)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.send", "text": "中東情勢を詳細に調べてレポートを書いて"})
+
+            route_selected = ws.receive_json()
+            done = ws.receive_json()
+
+            assert route_selected["event"] == "system.event"
+            assert route_selected["source"] == "router"
+            assert route_selected["agent_name"] == "root_workflow"
+            assert "control loop" in route_selected["message"]
+            assert done["event"] == "chat.done"
+            assert done["text"] == "control loop answer"
+
+
+@pytest.mark.asyncio
+async def test_spawn_cron_target_auto_uses_routing_agent(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_routing_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        text=(
+                            '{"target":"specialist","specialist":"system_operator",'
+                            '"handoff_mode":"direct","reason":"shell task",'
+                            '"confidence":0.93,'
+                            '"dynamic_agent":{"instruction":"","mcp_servers":[],"mode":"run"}}'
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _fake_spawn(**kwargs):
+        assert kwargs["agent_name"] == "system_operator"
+        return {
+            "status": "accepted",
+            "run_id": "sub-123",
+            "agent_name": "system_operator",
+            "mode": "run",
+            "requester_session_id": kwargs["requester_session_id"],
+        }
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing_run_async)
+    monkeypatch.setattr(gateway.subagent_manager, "spawn", _fake_spawn)
+
+    result = await gateway._spawn_cron_target(
+        task="docker logs を見て",
+        agent_name="auto",
+        requester_session_id="sess-cron",
+        user_id="cron",
+        app_name="boiled-claw",
+        mode="run",
+    )
+
+    assert result["status"] == "accepted"
+    assert result["agent_name"] == "system_operator"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_http_routes_shell_request_to_system_operator(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    gateway._run_agent_http = server_module.GatewayServer._run_agent_http.__get__(
+        gateway,
+        server_module.GatewayServer,
+    )
+
+    async def _fake_routing_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        text=(
+                            '{"target":"specialist","specialist":"system_operator",'
+                            '"handoff_mode":"direct","reason":"shell task",'
+                            '"confidence":0.91,'
+                            '"dynamic_agent":{"instruction":"","mcp_servers":[],"mode":"run"}}'
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _fake_specialist_run_async(*, user_id, session_id, new_message):
+        assert "git status を見て" in new_message.parts[0].text
+        yield Event(
+            author="system_operator",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="system operator response")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing_run_async)
+    monkeypatch.setattr(
+        gateway.specialist_runners["system_operator"],
+        "run_async",
+        _fake_specialist_run_async,
+    )
+
+    result = await gateway._run_agent_http(
+        user_id="alice",
+        session_id="sess-shell",
+        message="git status を見て",
+    )
+
+    assert result == {
+        "type": "specialist",
+        "message": "system operator response",
+        "ok": True,
+    }
 
 
 def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):

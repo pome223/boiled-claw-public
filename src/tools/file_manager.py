@@ -7,6 +7,7 @@ from typing import Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.context import resolve_tool_context
@@ -41,7 +42,10 @@ async def _check_write_policy(
     return f"Tool approval denied: {detail}"
 
 
-async def read_file(path: str) -> dict:
+async def read_file(
+    path: str,
+    tool_context: Optional[ToolContext] = None,
+) -> dict:
     """
     ファイルを読み込む
 
@@ -51,24 +55,61 @@ async def read_file(path: str) -> dict:
     Returns:
         ファイルの内容
     """
+    audit_logger = get_audit_logger()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
     policy = get_security_policy()
     allowed, reason = policy.is_path_allowed(path, "read")
     if not allowed:
+        audit_logger.log_file_operation(
+            "read",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=f"blocked:{reason}",
+        )
         return {"error": f"Access denied: {reason}"}
 
     try:
         file_path = Path(path).expanduser().resolve()
         content = file_path.read_text(encoding="utf-8")
+        audit_logger.log_file_operation(
+            "read",
+            str(file_path),
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result="success",
+        )
         return {
             "path": str(file_path),
             "content": content,
             "size": len(content),
         }
     except FileNotFoundError:
+        audit_logger.log_file_operation(
+            "read",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result="not_found",
+        )
         return {"error": f"File not found: {path}"}
     except PermissionError:
+        audit_logger.log_file_operation(
+            "read",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result="permission_denied",
+        )
         return {"error": f"Permission denied: {path}"}
     except Exception as e:
+        audit_logger.log_file_operation(
+            "read",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=f"error:{e}",
+        )
         return {"error": str(e)}
 
 
@@ -87,28 +128,72 @@ async def write_file(
     Returns:
         書き込み結果
     """
+    audit_logger = get_audit_logger()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
     policy = get_security_policy()
     allowed, reason = policy.is_path_allowed(path, "write")
     if not allowed:
+        audit_logger.log_file_operation(
+            "write",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=f"blocked:{reason}",
+        )
         return {"error": f"Access denied: {reason}"}
     content_allowed, content_reason = policy.validate_file_content(content, path)
     if not content_allowed:
+        audit_logger.log_file_operation(
+            "write",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=f"blocked:{content_reason}",
+        )
         return {"error": f"Content blocked by security policy: {content_reason}"}
 
     approval_error = await _check_write_policy(path, content, tool_context)
     if approval_error:
+        audit_logger.log_file_operation(
+            "write",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=approval_error,
+        )
         return {"error": approval_error}
 
     try:
         file_path = Path(path).expanduser().resolve()
         file_path.parent.mkdir(parents=True, exist_ok=True)
         file_path.write_text(content, encoding="utf-8")
+        audit_logger.log_file_operation(
+            "write",
+            str(file_path),
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result="success",
+        )
         return {
             "path": str(file_path),
             "size": len(content),
             "success": True,
         }
     except PermissionError:
+        audit_logger.log_file_operation(
+            "write",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result="permission_denied",
+        )
         return {"error": f"Permission denied: {path}"}
     except Exception as e:
+        audit_logger.log_file_operation(
+            "write",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=f"error:{e}",
+        )
         return {"error": str(e)}

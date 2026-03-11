@@ -24,6 +24,8 @@ Server -> Client:
   chat.done           text, request_id?, aborted
   chat.token          text, request_id?
   chat.history        entries[], session_id
+  tool.start          tool_name, agent_name, args
+  tool.result         tool_name, agent_name, ok, result
   system.event        source, status, message, run_id?, agent_name?
   health.tick         active_sessions, ts
   cron.update         job_id, status, message
@@ -150,6 +152,33 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "v": {"type": "integer"},
             "text": {"type": "string"},
             "request_id": {"type": "string"},
+            "ts": {"type": "number"},
+        },
+    },
+    "tool.start": {
+        "type": "object",
+        "required": ["event", "tool_name", "agent_name"],
+        "properties": {
+            "event": {"const": "tool.start"},
+            "v": {"type": "integer"},
+            "request_id": {"type": "string"},
+            "tool_name": {"type": "string"},
+            "agent_name": {"type": "string"},
+            "args": {"type": "object"},
+            "ts": {"type": "number"},
+        },
+    },
+    "tool.result": {
+        "type": "object",
+        "required": ["event", "tool_name", "agent_name", "ok"],
+        "properties": {
+            "event": {"const": "tool.result"},
+            "v": {"type": "integer"},
+            "request_id": {"type": "string"},
+            "tool_name": {"type": "string"},
+            "agent_name": {"type": "string"},
+            "ok": {"type": "boolean"},
+            "result": {"type": "object"},
             "ts": {"type": "number"},
         },
     },
@@ -338,6 +367,34 @@ def ev_chat_done(
 def ev_chat_token(text: str, request_id: Optional[str] = None) -> dict[str, Any]:
     d = _base("chat.token", request_id)
     d["text"] = text
+    return d
+
+
+def ev_tool_start(
+    tool_name: str,
+    agent_name: str,
+    args: Optional[dict[str, Any]] = None,
+    request_id: Optional[str] = None,
+) -> dict[str, Any]:
+    d = _base("tool.start", request_id)
+    d["tool_name"] = tool_name
+    d["agent_name"] = agent_name
+    d["args"] = args or {}
+    return d
+
+
+def ev_tool_result(
+    tool_name: str,
+    agent_name: str,
+    ok: bool,
+    result: Optional[dict[str, Any]] = None,
+    request_id: Optional[str] = None,
+) -> dict[str, Any]:
+    d = _base("tool.result", request_id)
+    d["tool_name"] = tool_name
+    d["agent_name"] = agent_name
+    d["ok"] = ok
+    d["result"] = result or {}
     return d
 
 

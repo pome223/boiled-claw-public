@@ -10,9 +10,12 @@ from typing import List, Dict, Any, Optional
 from pathlib import Path
 import numpy as np
 
+from google.adk.agents.context import Context as ToolContext
 from google import genai
 from google.genai import types as genai_types
 from src.config.settings import get_settings
+from src.security.audit import AuditEventType, get_audit_logger
+from src.tools.context import resolve_tool_context
 
 DEFAULT_VECTOR_DIM = 768
 
@@ -343,6 +346,7 @@ async def memory_store(
     content: str,
     tags: Optional[str] = None,
     metadata: Optional[str] = None,
+    tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     """
     情報をメモリに保存する
@@ -355,6 +359,9 @@ async def memory_store(
     Returns:
         保存結果
     """
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_logger = get_audit_logger()
+
     try:
         store = get_memory_store()
 
@@ -373,24 +380,45 @@ async def memory_store(
             embedding=embedding,
         )
 
-        return {
+        payload = {
             "memory_id": memory_id,
             "content": content,
             "tags": tags_list,
             "success": True,
         }
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_STORE,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="store",
+            resource=str(memory_id),
+            result="success",
+            metadata={"tags": tags_list or []},
+        )
+        return payload
 
     except Exception as e:
-        return {
+        payload = {
             "error": str(e),
             "success": False,
         }
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_STORE,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="store",
+            resource=None,
+            result=f"error:{e}",
+            metadata={"tags": tags or ""},
+        )
+        return payload
 
 
 async def memory_search(
     query: Optional[str] = None,
     tags: Optional[str] = None,
     limit: int = 10,
+    tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     """
     メモリから情報を検索する
@@ -403,6 +431,9 @@ async def memory_search(
     Returns:
         検索結果
     """
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_logger = get_audit_logger()
+
     try:
         store = get_memory_store()
 
@@ -423,45 +454,93 @@ async def memory_search(
             embedding=query_embedding,
         )
 
-        return {
+        payload = {
             "results": results,
             "count": len(results),
             "query": query,
             "tags": tags_list,
             "success": True,
         }
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_SEARCH,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="search",
+            resource=query or "",
+            result="success",
+            metadata={"tags": tags_list or [], "count": len(results), "limit": limit},
+        )
+        return payload
 
     except Exception as e:
-        return {
+        payload = {
             "error": str(e),
             "success": False,
         }
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_SEARCH,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="search",
+            resource=query or "",
+            result=f"error:{e}",
+            metadata={"tags": tags or "", "limit": limit},
+        )
+        return payload
 
 
-async def memory_stats() -> Dict[str, Any]:
+async def memory_stats(
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
     """
     メモリ統計を取得する
 
     Returns:
         メモリ統計
     """
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_logger = get_audit_logger()
+
     try:
         store = get_memory_store()
         stats = store.get_stats()
 
-        return {
+        payload = {
             "stats": stats,
             "success": True,
         }
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_SEARCH,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="stats",
+            resource="memory",
+            result="success",
+            metadata=stats,
+        )
+        return payload
 
     except Exception as e:
-        return {
+        payload = {
             "error": str(e),
             "success": False,
         }
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_SEARCH,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="stats",
+            resource="memory",
+            result=f"error:{e}",
+            metadata={},
+        )
+        return payload
 
 
-async def memory_delete(memory_id: int) -> Dict[str, Any]:
+async def memory_delete(
+    memory_id: int,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
     """
     指定IDのメモリを削除する
 
@@ -471,9 +550,32 @@ async def memory_delete(memory_id: int) -> Dict[str, Any]:
     Returns:
         削除結果
     """
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_logger = get_audit_logger()
+
     try:
         store = get_memory_store()
         deleted = store.delete(memory_id)
-        return {"memory_id": memory_id, "deleted": deleted, "success": True}
+        payload = {"memory_id": memory_id, "deleted": deleted, "success": True}
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_STORE,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="delete",
+            resource=str(memory_id),
+            result="success" if deleted else "missing",
+            metadata={},
+        )
+        return payload
     except Exception as e:
-        return {"error": str(e), "success": False}
+        payload = {"error": str(e), "success": False}
+        audit_logger.log(
+            event_type=AuditEventType.MEMORY_STORE,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            action="delete",
+            resource=str(memory_id),
+            result=f"error:{e}",
+            metadata={},
+        )
+        return payload
