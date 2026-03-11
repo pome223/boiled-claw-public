@@ -9,6 +9,11 @@ from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
 
+from google.adk.agents.context import Context as ToolContext
+
+from src.security.audit import AuditEventType, get_audit_logger
+from src.tools.context import resolve_tool_context
+
 # Playwright は遅延インポート (インストールされていない場合のエラー回避)
 playwright = None
 async_playwright = None
@@ -62,6 +67,26 @@ _PRIVATE_NETWORKS = [
 _BLOCKED_HOSTS = {"localhost", "localhost.localdomain"}
 
 
+def _audit_browser_event(
+    *,
+    action: str,
+    resource: str,
+    result: str,
+    metadata: Dict[str, Any],
+    tool_context: Optional[ToolContext],
+) -> None:
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    get_audit_logger().log(
+        event_type=AuditEventType.BROWSER_NAVIGATE,
+        user_id=ctx.get("user_id") or None,
+        session_id=ctx.get("session_id") or None,
+        action=action,
+        resource=resource,
+        result=result,
+        metadata=metadata,
+    )
+
+
 def _validate_url(url: str) -> Tuple[bool, Optional[str]]:
     """URL の安全性を検証する (SSRF 対策)"""
     try:
@@ -103,7 +128,12 @@ async def get_browser_session() -> BrowserSession:
     return _browser_session
 
 
-async def browser_navigate(url: str, wait_for: str = "load", timeout: int = 30000) -> Dict[str, Any]:
+async def browser_navigate(
+    url: str,
+    wait_for: str = "load",
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
     """
     URLに移動してページを読み込む
 
@@ -116,13 +146,29 @@ async def browser_navigate(url: str, wait_for: str = "load", timeout: int = 3000
         ページ情報 (title, url, status)
     """
     if not PLAYWRIGHT_AVAILABLE:
-        return {
+        payload = {
             "error": "Playwright is not installed. Run: pip install playwright && playwright install"
         }
+        _audit_browser_event(
+            action="navigate",
+            resource=url,
+            result="error",
+            metadata={"reason": "playwright_missing"},
+            tool_context=tool_context,
+        )
+        return payload
 
     valid, reason = _validate_url(url)
     if not valid:
-        return {"error": f"URL blocked: {reason}", "url": url, "success": False}
+        payload = {"error": f"URL blocked: {reason}", "url": url, "success": False}
+        _audit_browser_event(
+            action="navigate",
+            resource=url,
+            result=f"blocked:{reason}",
+            metadata={"wait_for": wait_for, "timeout": timeout},
+            tool_context=tool_context,
+        )
+        return payload
 
     try:
         session = await get_browser_session()
@@ -130,24 +176,41 @@ async def browser_navigate(url: str, wait_for: str = "load", timeout: int = 3000
 
         response = await page.goto(url, wait_until=wait_for, timeout=timeout)
 
-        return {
+        payload = {
             "url": page.url,
             "title": await page.title(),
             "status": response.status if response else None,
             "success": True,
         }
+        _audit_browser_event(
+            action="navigate",
+            resource=url,
+            result="success",
+            metadata={"status": payload["status"], "title": payload["title"]},
+            tool_context=tool_context,
+        )
+        return payload
 
     except Exception as e:
-        return {
+        payload = {
             "error": str(e),
             "url": url,
             "success": False,
         }
+        _audit_browser_event(
+            action="navigate",
+            resource=url,
+            result=f"error:{e}",
+            metadata={"wait_for": wait_for, "timeout": timeout},
+            tool_context=tool_context,
+        )
+        return payload
 
 
 async def browser_screenshot(
     path: Optional[str] = None,
-    full_page: bool = False
+    full_page: bool = False,
+    tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     """
     現在のページのスクリーンショットを撮る
@@ -160,9 +223,17 @@ async def browser_screenshot(
         スクリーンショット情報
     """
     if not PLAYWRIGHT_AVAILABLE:
-        return {
+        payload = {
             "error": "Playwright is not installed. Run: pip install playwright && playwright install"
         }
+        _audit_browser_event(
+            action="screenshot",
+            resource=path or "",
+            result="error",
+            metadata={"reason": "playwright_missing"},
+            tool_context=tool_context,
+        )
+        return payload
 
     try:
         session = await get_browser_session()
@@ -176,20 +247,39 @@ async def browser_screenshot(
 
         await page.screenshot(path=path, full_page=full_page)
 
-        return {
+        payload = {
             "path": path,
             "full_page": full_page,
             "success": True,
         }
+        _audit_browser_event(
+            action="screenshot",
+            resource=path,
+            result="success",
+            metadata={"full_page": full_page},
+            tool_context=tool_context,
+        )
+        return payload
 
     except Exception as e:
-        return {
+        payload = {
             "error": str(e),
             "success": False,
         }
+        _audit_browser_event(
+            action="screenshot",
+            resource=path or "",
+            result=f"error:{e}",
+            metadata={"full_page": full_page},
+            tool_context=tool_context,
+        )
+        return payload
 
 
-async def browser_extract_text(selector: Optional[str] = None) -> Dict[str, Any]:
+async def browser_extract_text(
+    selector: Optional[str] = None,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
     """
     ページからテキストを抽出する
 
@@ -200,9 +290,17 @@ async def browser_extract_text(selector: Optional[str] = None) -> Dict[str, Any]
         抽出されたテキスト
     """
     if not PLAYWRIGHT_AVAILABLE:
-        return {
+        payload = {
             "error": "Playwright is not installed. Run: pip install playwright && playwright install"
         }
+        _audit_browser_event(
+            action="extract_text",
+            resource=selector or "body",
+            result="error",
+            metadata={"reason": "playwright_missing"},
+            tool_context=tool_context,
+        )
+        return payload
 
     try:
         session = await get_browser_session()
@@ -213,25 +311,49 @@ async def browser_extract_text(selector: Optional[str] = None) -> Dict[str, Any]
             if element:
                 text = await element.inner_text()
             else:
-                return {
+                payload = {
                     "error": f"Element not found: {selector}",
                     "success": False,
                 }
+                _audit_browser_event(
+                    action="extract_text",
+                    resource=selector,
+                    result="not_found",
+                    metadata={},
+                    tool_context=tool_context,
+                )
+                return payload
         else:
             text = await page.inner_text("body")
 
-        return {
+        payload = {
             "text": text,
             "selector": selector or "body",
             "length": len(text),
             "success": True,
         }
+        _audit_browser_event(
+            action="extract_text",
+            resource=payload["selector"],
+            result="success",
+            metadata={"length": payload["length"]},
+            tool_context=tool_context,
+        )
+        return payload
 
     except Exception as e:
-        return {
+        payload = {
             "error": str(e),
             "success": False,
         }
+        _audit_browser_event(
+            action="extract_text",
+            resource=selector or "body",
+            result=f"error:{e}",
+            metadata={},
+            tool_context=tool_context,
+        )
+        return payload
 
 
 async def browser_click(selector: str, timeout: int = 30000) -> Dict[str, Any]:

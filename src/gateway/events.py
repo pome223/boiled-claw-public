@@ -9,6 +9,8 @@ Server -> Client:
   chat.token      : streaming token
   chat.done       : agent response complete / abort confirmation
   chat.history    : transcript history response
+  tool.start      : tool invocation started
+  tool.result     : tool invocation finished
   system.event    : subagent / cron notification
   health.tick     : heartbeat (30s)
   cron.update     : cron job state change
@@ -31,6 +33,8 @@ from src.gateway.protocol import (
     ev_chat_done,
     ev_chat_token,
     ev_chat_history,
+    ev_tool_start,
+    ev_tool_result,
     ev_system_event,
     ev_health_tick,
     ev_cron_update,
@@ -49,6 +53,8 @@ __all__ = [
     "ev_chat_done",
     "ev_chat_token",
     "ev_chat_history",
+    "ev_tool_start",
+    "ev_tool_result",
     "ev_system_event",
     "ev_health_tick",
     "ev_cron_update",

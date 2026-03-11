@@ -939,6 +939,8 @@ function connect(targetSessionId = null) {
       if (evName === "chat.done") { handleChatDone(payload); return; }
       if (evName === "chat.token") { handleChatToken(payload); return; }
       if (evName === "chat.history") { handleChatHistory(payload); return; }
+      if (evName === "tool.start") { return; }
+      if (evName === "tool.result") { return; }
       if (evName === "system.event") { handleSystemEvent(payload); return; }
       if (evName === "health.tick") { handleHealthTick(payload); return; }
       if (evName === "cron.update") { handleCronUpdate(payload); return; }
