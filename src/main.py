@@ -290,7 +290,8 @@ def main():
 
     # API key check
     api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
+    requires_google_api = args.mode in {"cli", "web", "channels"}
+    if requires_google_api and not api_key:
         console.print(
             "[red]Error: GOOGLE_API_KEY is not set.[/red]\n"
             "Copy .env.example to .env and set your API key."

@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # Google AI / ADK
-    google_api_key: str = Field(..., description="Google AI API Key")
+    google_api_key: Optional[str] = Field(default="", description="Google AI API Key")
     google_genai_use_vertexai: bool = Field(default=False, description="Use Vertex AI")
 
     # Agent settings

@@ -137,6 +137,8 @@ docker compose up -d boiled-claw-gateway
 Gateway を Docker に残したまま host shell / file / browser を使う場合は、
 Host Bridge を **Docker 外の別プロセス** として起動します。
 
+この standalone bridge 自体には `GOOGLE_API_KEY` は不要です。
+
 ```bash
 # SSE で起動
 python -m src.main host-bridge --host 127.0.0.1 --port 8766
@@ -163,6 +165,7 @@ playwright install
 
 GUI automation 用の Desktop Bridge は skeleton だけ先に用意しています。
 現時点では capability surface と MCP server のみで、実際の Accessibility / click / type は未実装です。
+こちらも standalone bridge として起動でき、`GOOGLE_API_KEY` は不要です。
 
 ```bash
 python -m src.main desktop-bridge --host 127.0.0.1 --port 8767

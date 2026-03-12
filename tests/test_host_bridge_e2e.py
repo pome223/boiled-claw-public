@@ -30,7 +30,7 @@ def host_bridge_server(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    env.setdefault("GOOGLE_API_KEY", "test-key")
+    env.pop("GOOGLE_API_KEY", None)
     env["FILE_WORKSPACE_PATHS"] = str(workspace)
 
     proc = subprocess.Popen(
@@ -88,7 +88,7 @@ def host_bridge_server(tmp_path):
 
 @pytest.fixture
 def configured_host_bridge_env(monkeypatch, host_bridge_server):
-    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.setenv("HOST_BRIDGE_ENABLED", "true")
     monkeypatch.setenv("HOST_BRIDGE_URL", host_bridge_server["url"])
     monkeypatch.setenv("FILE_WORKSPACE_PATHS", str(host_bridge_server["workspace"]))
