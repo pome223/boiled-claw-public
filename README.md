@@ -11,6 +11,7 @@ OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベ
 - 🌐 **ブラウザ自動化** - Playwright によるスクレイピング、スクリーンショット
 - 💻 **シェル実行** - セキュリティポリシー付き安全なコマンド実行
 - 📁 **ファイル操作** - 読み書き対応
+- 🧩 **Host Bridge** - host OS 上の shell / file / browser を別プロセスで実行
 - 🧠 **メモリシステム** - SQLite + ベクトル検索
 - 💬 **マルチチャネル** - Telegram, Discord, WebSocket 対応
 - 🤝 **マルチエージェント委譲** - ADK sub_agents + AgentTool + sessions_spawn
@@ -129,6 +130,33 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 ```bash
 docker compose build --build-arg INSTALL_BROWSER=true boiled-claw-gateway
 docker compose up -d boiled-claw-gateway
+```
+
+### 5. Host Bridge を host OS で起動する
+
+Gateway を Docker に残したまま host shell / file / browser を使う場合は、
+Host Bridge を **Docker 外の別プロセス** として起動します。
+
+```bash
+# SSE で起動
+python -m src.main host-bridge --host 127.0.0.1 --port 8766
+
+# または console script
+boiled-claw-host-bridge --sse --host 127.0.0.1 --port 8766
+```
+
+`.env` には次を設定します。
+
+```bash
+HOST_BRIDGE_ENABLED=true
+HOST_BRIDGE_URL=http://127.0.0.1:8766/sse
+```
+
+Playwright を Host Bridge 側で使う場合は、host 側 Python 環境に browser extras を入れておきます。
+
+```bash
+pip install -e '.[browser]'
+playwright install
 ```
 
 ## プロジェクト構造
