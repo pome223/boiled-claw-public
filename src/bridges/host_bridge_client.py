@@ -11,6 +11,12 @@ from mcp.client.sse import sse_client
 from src.bridges.host_bridge_schema import (
     BridgePingResult,
     CapabilityListResult,
+    HostBrowserExtractTextRequest,
+    HostBrowserExtractTextResult,
+    HostBrowserNavigateRequest,
+    HostBrowserNavigateResult,
+    HostBrowserScreenshotRequest,
+    HostBrowserScreenshotResult,
     HostFileListRequest,
     HostFileListResult,
     HostFileReadRequest,
@@ -97,6 +103,24 @@ class HostBridgeClient:
     async def list_files(self, request: HostFileListRequest) -> HostFileListResult:
         payload = await self._call_tool("host.file.list", request.model_dump())
         return HostFileListResult.model_validate(payload)
+
+    async def navigate_browser(self, request: HostBrowserNavigateRequest) -> HostBrowserNavigateResult:
+        payload = await self._call_tool("host.browser.navigate", request.model_dump())
+        return HostBrowserNavigateResult.model_validate(payload)
+
+    async def screenshot_browser(
+        self,
+        request: HostBrowserScreenshotRequest,
+    ) -> HostBrowserScreenshotResult:
+        payload = await self._call_tool("host.browser.screenshot", request.model_dump())
+        return HostBrowserScreenshotResult.model_validate(payload)
+
+    async def extract_browser_text(
+        self,
+        request: HostBrowserExtractTextRequest,
+    ) -> HostBrowserExtractTextResult:
+        payload = await self._call_tool("host.browser.extract_text", request.model_dump())
+        return HostBrowserExtractTextResult.model_validate(payload)
 
 
 def get_host_bridge_client() -> Optional[HostBridgeClient]:

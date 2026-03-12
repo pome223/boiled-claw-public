@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from src.mcp_servers import host_bridge_server as server_module
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -33,6 +35,9 @@ class TestHostBridgeTools:
             "host.file.read",
             "host.file.write",
             "host.file.list",
+            "host.browser.navigate",
+            "host.browser.extract_text",
+            "host.browser.screenshot",
         }
 
     @pytest.mark.asyncio
@@ -50,6 +55,9 @@ class TestHostBridgeTools:
         assert "host.file.read" in text
         assert "host.file.write" in text
         assert "host.file.list" in text
+        assert "host.browser.navigate" in text
+        assert "host.browser.extract_text" in text
+        assert "host.browser.screenshot" in text
 
     @pytest.mark.asyncio
     async def test_host_shell_run_success(self, mcp):
@@ -135,6 +143,81 @@ class TestHostBridgeTools:
         assert "a.txt" in text
         assert "b.txt" in text
 
+    @pytest.mark.asyncio
+    async def test_host_browser_navigate_success(self, mcp, monkeypatch):
+        async def fake_navigate(url, wait_for="load", timeout=30000, tool_context=None):
+            return {
+                "url": url,
+                "title": "Bridge Example",
+                "status": 200,
+                "success": True,
+            }
+
+        monkeypatch.setattr(server_module.browser_tools, "_browser_navigate_local", fake_navigate)
+        result = await mcp.call_tool(
+            "host.browser.navigate",
+            {
+                "request_id": "req-browser-nav",
+                "session_id": "sess-browser-nav",
+                "user_id": "user-browser-nav",
+                "agent_name": "pytest",
+                "url": "https://example.com",
+            },
+        )
+        text = self._text(result)
+        assert "Bridge Example" in text
+        assert '"success": true' in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_browser_extract_text_success(self, mcp, monkeypatch):
+        async def fake_extract(selector=None, tool_context=None):
+            return {
+                "text": "bridge text",
+                "selector": selector or "body",
+                "length": 11,
+                "success": True,
+            }
+
+        monkeypatch.setattr(server_module.browser_tools, "_browser_extract_text_local", fake_extract)
+        result = await mcp.call_tool(
+            "host.browser.extract_text",
+            {
+                "request_id": "req-browser-text",
+                "session_id": "sess-browser-text",
+                "user_id": "user-browser-text",
+                "agent_name": "pytest",
+                "selector": "main",
+            },
+        )
+        text = self._text(result)
+        assert "bridge text" in text
+        assert "main" in text
+
+    @pytest.mark.asyncio
+    async def test_host_browser_screenshot_success(self, mcp, monkeypatch, tmp_path):
+        async def fake_screenshot(path=None, full_page=False, tool_context=None):
+            return {
+                "path": path or str(tmp_path / "capture.png"),
+                "full_page": full_page,
+                "success": True,
+            }
+
+        monkeypatch.setattr(server_module.browser_tools, "_browser_screenshot_local", fake_screenshot)
+        result = await mcp.call_tool(
+            "host.browser.screenshot",
+            {
+                "request_id": "req-browser-shot",
+                "session_id": "sess-browser-shot",
+                "user_id": "user-browser-shot",
+                "agent_name": "pytest",
+                "path": str(tmp_path / "capture.png"),
+                "full_page": True,
+            },
+        )
+        text = self._text(result)
+        assert "capture.png" in text
+        assert '"success": true' in text.lower()
+
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:
     proc = await asyncio.create_subprocess_exec(
@@ -197,6 +280,9 @@ async def test_stdio_tools_list():
         "host.file.read",
         "host.file.write",
         "host.file.list",
+        "host.browser.navigate",
+        "host.browser.extract_text",
+        "host.browser.screenshot",
     }
 
 

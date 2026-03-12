@@ -5,13 +5,23 @@ OpenClaw のブラウザ自動化機能を参考
 
 import asyncio
 import ipaddress
+import uuid
 from typing import Optional, Dict, Any, Tuple
 from pathlib import Path
 from urllib.parse import urlparse
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.bridges.host_bridge_client import HostBridgeError, get_host_bridge_client
+from src.bridges.host_bridge_schema import (
+    HostBrowserExtractTextRequest,
+    HostBrowserNavigateRequest,
+    HostBrowserScreenshotRequest,
+)
+from src.config.settings import get_settings
+from src.runtime.tool_events import emit_tool_result, emit_tool_start
 from src.security.audit import AuditEventType, get_audit_logger
+from src.security.tool_policy import get_tool_policy_engine
 from src.tools.context import resolve_tool_context
 
 # Playwright は遅延インポート (インストールされていない場合のエラー回避)
@@ -124,31 +134,62 @@ async def get_browser_session() -> BrowserSession:
     global _browser_session
     if _browser_session is None:
         _browser_session = BrowserSession()
-        await _browser_session.start()
+        await _browser_session.start(headless=get_settings().browser_headless)
     return _browser_session
 
 
-async def browser_navigate(
+async def _check_browser_policy(
+    tool_name: str,
+    args: dict[str, Any],
+    tool_context: Optional[ToolContext],
+) -> tuple[Optional[str], Optional[str]]:
+    if tool_context is None:
+        return None, None
+
+    ctx = resolve_tool_context(tool_context)
+    engine = get_tool_policy_engine()
+    action, reason = engine.evaluate(ctx["agent_name"], tool_name)
+    if action == "allow":
+        return None, None
+    if action == "deny":
+        return f"Tool blocked by policy: {reason}", None
+
+    approved, response_reason, approval_token = await engine.request_approval_with_id(
+        tool_name=tool_name,
+        agent_name=ctx["agent_name"],
+        args=args,
+        session_id=ctx["session_id"],
+        reason=reason,
+    )
+    if approved:
+        return None, approval_token
+    detail = response_reason or reason or "user rejected"
+    return f"Tool approval denied: {detail}", approval_token
+
+
+def _playwright_missing_payload() -> dict[str, Any]:
+    return {
+        "error": "Playwright is not installed. Run: pip install playwright && playwright install",
+        "success": False,
+    }
+
+
+def _default_screenshot_path() -> str:
+    screenshots_dir = Path("data/screenshots")
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    import time
+
+    return str(screenshots_dir / f"screenshot_{int(time.time())}.png")
+
+
+async def _browser_navigate_local(
     url: str,
     wait_for: str = "load",
     timeout: int = 30000,
     tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
-    """
-    URLに移動してページを読み込む
-
-    Args:
-        url: 移動先URL
-        wait_for: 待機イベント ('load', 'domcontentloaded', 'networkidle')
-        timeout: タイムアウト (ミリ秒)
-
-    Returns:
-        ページ情報 (title, url, status)
-    """
     if not PLAYWRIGHT_AVAILABLE:
-        payload = {
-            "error": "Playwright is not installed. Run: pip install playwright && playwright install"
-        }
+        payload = _playwright_missing_payload()
         _audit_browser_event(
             action="navigate",
             resource=url,
@@ -173,9 +214,7 @@ async def browser_navigate(
     try:
         session = await get_browser_session()
         page = session.page
-
         response = await page.goto(url, wait_until=wait_for, timeout=timeout)
-
         payload = {
             "url": page.url,
             "title": await page.title(),
@@ -190,13 +229,8 @@ async def browser_navigate(
             tool_context=tool_context,
         )
         return payload
-
     except Exception as e:
-        payload = {
-            "error": str(e),
-            "url": url,
-            "success": False,
-        }
+        payload = {"error": str(e), "url": url, "success": False}
         _audit_browser_event(
             action="navigate",
             resource=url,
@@ -207,25 +241,13 @@ async def browser_navigate(
         return payload
 
 
-async def browser_screenshot(
+async def _browser_screenshot_local(
     path: Optional[str] = None,
     full_page: bool = False,
     tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
-    """
-    現在のページのスクリーンショットを撮る
-
-    Args:
-        path: 保存先パス (指定しない場合は自動生成)
-        full_page: ページ全体をキャプチャ
-
-    Returns:
-        スクリーンショット情報
-    """
     if not PLAYWRIGHT_AVAILABLE:
-        payload = {
-            "error": "Playwright is not installed. Run: pip install playwright && playwright install"
-        }
+        payload = _playwright_missing_payload()
         _audit_browser_event(
             action="screenshot",
             resource=path or "",
@@ -238,34 +260,23 @@ async def browser_screenshot(
     try:
         session = await get_browser_session()
         page = session.page
-
-        if path is None:
-            screenshots_dir = Path("data/screenshots")
-            screenshots_dir.mkdir(parents=True, exist_ok=True)
-            import time
-            path = str(screenshots_dir / f"screenshot_{int(time.time())}.png")
-
-        await page.screenshot(path=path, full_page=full_page)
-
+        screenshot_path = path or _default_screenshot_path()
+        await page.screenshot(path=screenshot_path, full_page=full_page)
         payload = {
-            "path": path,
+            "path": screenshot_path,
             "full_page": full_page,
             "success": True,
         }
         _audit_browser_event(
             action="screenshot",
-            resource=path,
+            resource=screenshot_path,
             result="success",
             metadata={"full_page": full_page},
             tool_context=tool_context,
         )
         return payload
-
     except Exception as e:
-        payload = {
-            "error": str(e),
-            "success": False,
-        }
+        payload = {"error": str(e), "success": False}
         _audit_browser_event(
             action="screenshot",
             resource=path or "",
@@ -276,23 +287,12 @@ async def browser_screenshot(
         return payload
 
 
-async def browser_extract_text(
+async def _browser_extract_text_local(
     selector: Optional[str] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
-    """
-    ページからテキストを抽出する
-
-    Args:
-        selector: CSSセレクタ (指定しない場合はbody全体)
-
-    Returns:
-        抽出されたテキスト
-    """
     if not PLAYWRIGHT_AVAILABLE:
-        payload = {
-            "error": "Playwright is not installed. Run: pip install playwright && playwright install"
-        }
+        payload = _playwright_missing_payload()
         _audit_browser_event(
             action="extract_text",
             resource=selector or "body",
@@ -305,16 +305,12 @@ async def browser_extract_text(
     try:
         session = await get_browser_session()
         page = session.page
-
         if selector:
             element = await page.query_selector(selector)
             if element:
                 text = await element.inner_text()
             else:
-                payload = {
-                    "error": f"Element not found: {selector}",
-                    "success": False,
-                }
+                payload = {"error": f"Element not found: {selector}", "success": False}
                 _audit_browser_event(
                     action="extract_text",
                     resource=selector,
@@ -340,12 +336,8 @@ async def browser_extract_text(
             tool_context=tool_context,
         )
         return payload
-
     except Exception as e:
-        payload = {
-            "error": str(e),
-            "success": False,
-        }
+        payload = {"error": str(e), "success": False}
         _audit_browser_event(
             action="extract_text",
             resource=selector or "body",
@@ -354,6 +346,315 @@ async def browser_extract_text(
             tool_context=tool_context,
         )
         return payload
+
+
+async def browser_navigate(
+    url: str,
+    wait_for: str = "load",
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    """
+    URLに移動してページを読み込む
+
+    Args:
+        url: 移動先URL
+        wait_for: 待機イベント ('load', 'domcontentloaded', 'networkidle')
+        timeout: タイムアウト (ミリ秒)
+
+    Returns:
+        ページ情報 (title, url, status)
+    """
+    approval_error, approval_token = await _check_browser_policy(
+        "browser_navigate",
+        {"url": url, "wait_for": wait_for, "timeout": timeout},
+        tool_context,
+    )
+    if approval_error:
+        _audit_browser_event(
+            action="navigate",
+            resource=url,
+            result=approval_error,
+            metadata={"wait_for": wait_for, "timeout": timeout},
+            tool_context=tool_context,
+        )
+        return {"error": approval_error, "url": url, "success": False}
+
+    settings = get_settings()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    if settings.host_bridge_enabled:
+        request = HostBrowserNavigateRequest(
+            request_id=f"host-browser-nav-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=approval_token,
+            url=url,
+            wait_for=wait_for,
+            timeout=timeout,
+        )
+        try:
+            client = get_host_bridge_client()
+            if client is None:
+                raise HostBridgeError("Host Bridge is not enabled")
+            await emit_tool_start(
+                session_id=request.session_id,
+                tool_name="host.browser.navigate",
+                agent_name=request.agent_name,
+                args={"url": request.url, "wait_for": request.wait_for, "timeout": request.timeout},
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            result = await client.navigate_browser(request)
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.browser.navigate",
+                agent_name=request.agent_name,
+                ok=result.success,
+                result=result.model_dump(),
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            _audit_browser_event(
+                action="navigate",
+                resource=url,
+                result="bridge_success" if result.success else f"bridge_error:{result.error}",
+                metadata={
+                    "executor": "host_bridge",
+                    "request_id": request.request_id,
+                    "approval_token": approval_token,
+                },
+                tool_context=tool_context,
+            )
+            return result.model_dump(exclude_none=True)
+        except HostBridgeError as e:
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.browser.navigate",
+                agent_name=request.agent_name,
+                ok=False,
+                result={"error": str(e), "success": False, "url": url},
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            _audit_browser_event(
+                action="navigate",
+                resource=url,
+                result=f"bridge_error:{e}",
+                metadata={
+                    "executor": "host_bridge",
+                    "request_id": request.request_id,
+                    "approval_token": approval_token,
+                },
+                tool_context=tool_context,
+            )
+            return {"error": str(e), "success": False, "url": url}
+
+    return await _browser_navigate_local(url, wait_for, timeout, tool_context)
+
+
+async def browser_screenshot(
+    path: Optional[str] = None,
+    full_page: bool = False,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    """
+    現在のページのスクリーンショットを撮る
+
+    Args:
+        path: 保存先パス (指定しない場合は自動生成)
+        full_page: ページ全体をキャプチャ
+
+    Returns:
+        スクリーンショット情報
+    """
+    approval_error, approval_token = await _check_browser_policy(
+        "browser_screenshot",
+        {"path": path, "full_page": full_page},
+        tool_context,
+    )
+    if approval_error:
+        _audit_browser_event(
+            action="screenshot",
+            resource=path or "",
+            result=approval_error,
+            metadata={"full_page": full_page},
+            tool_context=tool_context,
+        )
+        return {"error": approval_error, "success": False}
+
+    settings = get_settings()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    if settings.host_bridge_enabled:
+        request = HostBrowserScreenshotRequest(
+            request_id=f"host-browser-shot-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=approval_token,
+            path=path,
+            full_page=full_page,
+        )
+        try:
+            client = get_host_bridge_client()
+            if client is None:
+                raise HostBridgeError("Host Bridge is not enabled")
+            await emit_tool_start(
+                session_id=request.session_id,
+                tool_name="host.browser.screenshot",
+                agent_name=request.agent_name,
+                args={"path": request.path, "full_page": request.full_page},
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            result = await client.screenshot_browser(request)
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.browser.screenshot",
+                agent_name=request.agent_name,
+                ok=result.success,
+                result=result.model_dump(),
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            _audit_browser_event(
+                action="screenshot",
+                resource=result.path or path or "",
+                result="bridge_success" if result.success else f"bridge_error:{result.error}",
+                metadata={
+                    "executor": "host_bridge",
+                    "request_id": request.request_id,
+                    "approval_token": approval_token,
+                    "full_page": full_page,
+                },
+                tool_context=tool_context,
+            )
+            return result.model_dump(exclude_none=True)
+        except HostBridgeError as e:
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.browser.screenshot",
+                agent_name=request.agent_name,
+                ok=False,
+                result={"error": str(e), "success": False},
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            _audit_browser_event(
+                action="screenshot",
+                resource=path or "",
+                result=f"bridge_error:{e}",
+                metadata={
+                    "executor": "host_bridge",
+                    "request_id": request.request_id,
+                    "approval_token": approval_token,
+                    "full_page": full_page,
+                },
+                tool_context=tool_context,
+            )
+            return {"error": str(e), "success": False}
+
+    return await _browser_screenshot_local(path, full_page, tool_context)
+
+
+async def browser_extract_text(
+    selector: Optional[str] = None,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    """
+    ページからテキストを抽出する
+
+    Args:
+        selector: CSSセレクタ (指定しない場合はbody全体)
+
+    Returns:
+        抽出されたテキスト
+    """
+    approval_error, approval_token = await _check_browser_policy(
+        "browser_extract_text",
+        {"selector": selector},
+        tool_context,
+    )
+    if approval_error:
+        _audit_browser_event(
+            action="extract_text",
+            resource=selector or "body",
+            result=approval_error,
+            metadata={},
+            tool_context=tool_context,
+        )
+        return {"error": approval_error, "success": False}
+
+    settings = get_settings()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    if settings.host_bridge_enabled:
+        request = HostBrowserExtractTextRequest(
+            request_id=f"host-browser-text-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=approval_token,
+            selector=selector,
+        )
+        try:
+            client = get_host_bridge_client()
+            if client is None:
+                raise HostBridgeError("Host Bridge is not enabled")
+            await emit_tool_start(
+                session_id=request.session_id,
+                tool_name="host.browser.extract_text",
+                agent_name=request.agent_name,
+                args={"selector": request.selector},
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            result = await client.extract_browser_text(request)
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.browser.extract_text",
+                agent_name=request.agent_name,
+                ok=result.success,
+                result=result.model_dump(),
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            _audit_browser_event(
+                action="extract_text",
+                resource=result.selector,
+                result="bridge_success" if result.success else f"bridge_error:{result.error}",
+                metadata={
+                    "executor": "host_bridge",
+                    "request_id": request.request_id,
+                    "approval_token": approval_token,
+                    "length": result.length,
+                },
+                tool_context=tool_context,
+            )
+            return result.model_dump(exclude_none=True)
+        except HostBridgeError as e:
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.browser.extract_text",
+                agent_name=request.agent_name,
+                ok=False,
+                result={"error": str(e), "success": False},
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
+            _audit_browser_event(
+                action="extract_text",
+                resource=selector or "body",
+                result=f"bridge_error:{e}",
+                metadata={
+                    "executor": "host_bridge",
+                    "request_id": request.request_id,
+                    "approval_token": approval_token,
+                },
+                tool_context=tool_context,
+            )
+            return {"error": str(e), "success": False}
+
+    return await _browser_extract_text_local(selector, tool_context)
 
 
 async def browser_click(selector: str, timeout: int = 30000) -> Dict[str, Any]:

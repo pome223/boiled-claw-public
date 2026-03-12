@@ -23,6 +23,12 @@ from src.bridges.host_bridge_schema import (
     BridgePingResult,
     CapabilityDescriptor,
     CapabilityListResult,
+    HostBrowserExtractTextRequest,
+    HostBrowserExtractTextResult,
+    HostBrowserNavigateRequest,
+    HostBrowserNavigateResult,
+    HostBrowserScreenshotRequest,
+    HostBrowserScreenshotResult,
     HostFileListRequest,
     HostFileListResult,
     HostFileReadRequest,
@@ -33,6 +39,7 @@ from src.bridges.host_bridge_schema import (
     HostShellRunResult,
 )
 from src.security.policy import get_security_policy
+from src.tools import browser as browser_tools
 
 
 _BLOCKED_EXECUTABLES = {
@@ -139,6 +146,27 @@ def _capabilities() -> CapabilityListResult:
                 risk="low",
                 requires_approval=False,
                 description="List a guarded directory on the host OS.",
+            ),
+            CapabilityDescriptor(
+                name="host.browser.navigate",
+                risk="medium",
+                requires_approval=True,
+                description="Navigate the host browser to a guarded URL.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
+                name="host.browser.extract_text",
+                risk="medium",
+                requires_approval=True,
+                description="Extract text from the current host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
+                name="host.browser.screenshot",
+                risk="medium",
+                requires_approval=True,
+                description="Capture a screenshot from the host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
             ),
         ]
     )
@@ -331,6 +359,90 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             path=path,
         )
         return _list_host_files(request).model_dump()
+
+    @mcp.tool(name="host.browser.navigate", description="Navigate the host browser to a guarded URL.")
+    async def host_browser_navigate(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        url: str,
+        wait_for: str = "load",
+        timeout: int = 30000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserNavigateRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            url=url,
+            wait_for=wait_for,
+            timeout=timeout,
+        )
+        payload = await browser_tools._browser_navigate_local(
+            request.url,
+            wait_for=request.wait_for,
+            timeout=request.timeout,
+            tool_context=None,
+        )
+        return HostBrowserNavigateResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.browser.extract_text",
+        description="Extract text from the current host browser page.",
+    )
+    async def host_browser_extract_text(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: Optional[str] = None,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserExtractTextRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+        )
+        payload = await browser_tools._browser_extract_text_local(
+            request.selector,
+            tool_context=None,
+        )
+        return HostBrowserExtractTextResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.browser.screenshot",
+        description="Capture a screenshot from the current host browser page.",
+    )
+    async def host_browser_screenshot(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        path: Optional[str] = None,
+        full_page: bool = False,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserScreenshotRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            path=path,
+            full_page=full_page,
+        )
+        payload = await browser_tools._browser_screenshot_local(
+            request.path,
+            full_page=request.full_page,
+            tool_context=None,
+        )
+        return HostBrowserScreenshotResult.model_validate(payload).model_dump()
 
     return mcp
 
