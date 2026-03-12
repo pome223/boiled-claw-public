@@ -159,6 +159,18 @@ pip install -e '.[browser]'
 playwright install
 ```
 
+### 6. Desktop Bridge skeleton
+
+GUI automation 用の Desktop Bridge は skeleton だけ先に用意しています。
+現時点では capability surface と MCP server のみで、実際の Accessibility / click / type は未実装です。
+
+```bash
+python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
+
+# または console script
+boiled-claw-desktop-bridge --sse --host 127.0.0.1 --port 8767
+```
+
 ## プロジェクト構造
 
 ```

@@ -138,6 +138,41 @@ def run_host_bridge(
     create_server(host=bind_host, port=bind_port).run(transport="sse")
 
 
+def run_desktop_bridge(
+    host: Optional[str] = None,
+    port: Optional[int] = None,
+    *,
+    transport: str = "sse",
+):
+    """Desktop Bridge skeleton を実行する。"""
+    from src.mcp_servers.desktop_bridge_server import create_server
+
+    bind_host = host or "127.0.0.1"
+    bind_port = port or 8767
+
+    if transport == "stdio":
+        console.print(
+            Panel(
+                "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
+                "Transport: stdio\n"
+                "[dim]Skeleton only. GUI automation is not implemented yet.[/dim]",
+                border_style="cyan",
+            )
+        )
+        create_server(host="stdio").run(transport="stdio")
+        return
+
+    console.print(
+        Panel(
+            "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
+            f"SSE endpoint: http://{bind_host}:{bind_port}/sse\n"
+            "[dim]Skeleton only. Run on the host OS when desktop automation lands.[/dim]",
+            border_style="cyan",
+        )
+    )
+    create_server(host=bind_host, port=bind_port).run(transport="sse")
+
+
 async def run_channels():
     """チャネルモードで実行する"""
     from src.config.settings import get_settings
@@ -239,8 +274,8 @@ def main():
         "mode",
         nargs="?",
         default="cli",
-        choices=["cli", "web", "channels", "host-bridge"],
-        help="Run mode: cli (default), web, channels, or host-bridge"
+        choices=["cli", "web", "channels", "host-bridge", "desktop-bridge"],
+        help="Run mode: cli (default), web, channels, host-bridge, or desktop-bridge"
     )
     parser.add_argument("--host", type=str, help="Web server host (default: 127.0.0.1)")
     parser.add_argument("--port", type=int, help="Web server port (default: 18789)")
@@ -248,7 +283,7 @@ def main():
         "--transport",
         choices=["sse", "stdio"],
         default="sse",
-        help="Transport for host-bridge mode (default: sse)",
+        help="Transport for bridge modes (default: sse)",
     )
 
     args = parser.parse_args()
@@ -271,6 +306,8 @@ def main():
         asyncio.run(run_channels())
     elif args.mode == "host-bridge":
         run_host_bridge(host=args.host, port=args.port, transport=args.transport)
+    elif args.mode == "desktop-bridge":
+        run_desktop_bridge(host=args.host, port=args.port, transport=args.transport)
 
 
 if __name__ == "__main__":
