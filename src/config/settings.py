@@ -75,6 +75,21 @@ class Settings(BaseSettings):
     browser_headless: bool = Field(default=True, description="Headless browser mode")
     browser_timeout: int = Field(default=30000, description="Browser timeout (ms)")
 
+    # Host Bridge settings
+    host_bridge_enabled: bool = Field(default=False, description="Enable Host Bridge execution")
+    host_bridge_url: Optional[str] = Field(
+        default=None,
+        description="Host Bridge MCP SSE endpoint URL",
+    )
+    host_bridge_timeout_seconds: int = Field(
+        default=5,
+        description="HTTP timeout for Host Bridge MCP connection",
+    )
+    host_bridge_sse_read_timeout_seconds: int = Field(
+        default=300,
+        description="SSE read timeout for Host Bridge MCP connection",
+    )
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # ディレクトリ作成

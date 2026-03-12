@@ -4,10 +4,14 @@
 
 import asyncio
 import shlex
+import uuid
 from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.bridges.host_bridge_client import HostBridgeError, get_host_bridge_client
+from src.bridges.host_bridge_schema import HostShellRunRequest, HostShellRunResult
+from src.config.settings import get_settings
 from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
@@ -97,6 +101,37 @@ async def run_shell(
             "stderr": "",
             "return_code": -1,
         }
+
+    settings = get_settings()
+    if settings.host_bridge_enabled:
+        request = HostShellRunRequest(
+            request_id=f"host-shell-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=None,
+            command=normalized,
+            timeout_seconds=timeout,
+            cwd=None,
+        )
+        try:
+            client = get_host_bridge_client()
+            if client is None:
+                raise HostBridgeError("Host Bridge is not enabled")
+            result = await client.run_shell(request)
+            _audit(
+                "bridge_success" if result.return_code == 0 else "bridge_failed",
+                result.return_code,
+            )
+            return result.model_dump()
+        except HostBridgeError as e:
+            _audit(f"bridge_error:{e}", -1)
+            return {
+                "error": str(e),
+                "stdout": "",
+                "stderr": "",
+                "return_code": -1,
+            }
 
     # コマンドをトークンに分解
     try:
