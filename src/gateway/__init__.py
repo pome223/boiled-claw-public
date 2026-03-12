@@ -1,13 +1,7 @@
-"""Gateway module"""
-from src.gateway.server import GatewayServer, create_gateway
-from src.gateway.session_manager import SessionManager
-from src.gateway.router import MessageRouter, Message, MessageType
+"""Gateway package.
 
-__all__ = [
-    "GatewayServer",
-    "create_gateway",
-    "SessionManager",
-    "MessageRouter",
-    "Message",
-    "MessageType",
-]
+Keep package import side effects minimal so protocol/helpers can be imported
+without pulling in the full gateway server runtime.
+"""
+
+__all__: list[str] = []

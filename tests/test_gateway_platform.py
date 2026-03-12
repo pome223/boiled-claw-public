@@ -11,6 +11,7 @@ import src.gateway.server as server_module
 import src.gateway.transcript as transcript_module
 import src.memory_lifecycle.adk_memory_service as adk_memory_module
 import src.memory_lifecycle.promoted_store as promoted_store_module
+import src.runtime.tool_events as tool_events_module
 import src.security.tool_policy as tool_policy_module
 from src.gateway.transcript import TranscriptStore
 
@@ -114,9 +115,11 @@ def test_gateway_lifespan_rebinds_runtime_hooks(monkeypatch, tmp_path):
         assert scheduler.spawn_fn is not None
         assert scheduler.notifier is not None
         assert gateway.tool_policy._notifier is not None
+        assert tool_events_module._tool_event_notifier is not None
         assert gateway._heartbeat_task is not None
 
     assert gateway.tool_policy._notifier is None
+    assert tool_events_module._tool_event_notifier is None
     assert gateway._heartbeat_task is None
 
     with TestClient(gateway.app):
@@ -124,6 +127,7 @@ def test_gateway_lifespan_rebinds_runtime_hooks(monkeypatch, tmp_path):
         assert scheduler.spawn_fn is not None
         assert scheduler.notifier is not None
         assert gateway.tool_policy._notifier is not None
+        assert tool_events_module._tool_event_notifier is not None
 
 
 def test_websocket_history_and_protocol_validation(monkeypatch, tmp_path):

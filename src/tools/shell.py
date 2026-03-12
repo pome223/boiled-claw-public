@@ -12,6 +12,7 @@ from google.adk.agents.context import Context as ToolContext
 from src.bridges.host_bridge_client import HostBridgeError, get_host_bridge_client
 from src.bridges.host_bridge_schema import HostShellRunRequest, HostShellRunResult
 from src.config.settings import get_settings
+from src.runtime.tool_events import emit_tool_result, emit_tool_start
 from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
@@ -67,6 +68,7 @@ async def run_shell(
     normalized = " ".join(command.split())
     audit_logger = get_audit_logger()
     ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_metadata: dict[str, Any] = {}
 
     def _audit(result: str, return_code: int | None = None) -> None:
         audit_logger.log_shell_command(
@@ -75,6 +77,7 @@ async def run_shell(
             session_id=ctx.get("session_id") or None,
             result=result,
             return_code=return_code,
+            metadata=audit_metadata,
         )
 
     policy = get_security_policy()
@@ -114,17 +117,51 @@ async def run_shell(
             timeout_seconds=timeout,
             cwd=None,
         )
+        audit_metadata = {
+            "executor": "host_bridge",
+            "request_id": request.request_id,
+            "approval_token": approval_token,
+        }
         try:
             client = get_host_bridge_client()
             if client is None:
                 raise HostBridgeError("Host Bridge is not enabled")
+            await emit_tool_start(
+                session_id=request.session_id,
+                tool_name="host.shell.run",
+                agent_name=request.agent_name,
+                args={
+                    "command": request.command,
+                    "timeout_seconds": request.timeout_seconds,
+                },
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
             result = await client.run_shell(request)
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.shell.run",
+                agent_name=request.agent_name,
+                ok=result.ok,
+                result=result.model_dump(),
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
             _audit(
                 "bridge_success" if result.return_code == 0 else "bridge_failed",
                 result.return_code,
             )
             return result.model_dump()
         except HostBridgeError as e:
+            await emit_tool_result(
+                session_id=request.session_id,
+                tool_name="host.shell.run",
+                agent_name=request.agent_name,
+                ok=False,
+                result={"error": str(e), "return_code": -1},
+                request_id=request.request_id,
+                metadata={"executor": "host_bridge"},
+            )
             _audit(f"bridge_error:{e}", -1)
             return {
                 "error": str(e),
