@@ -26,7 +26,14 @@ class TestHostBridgeTools:
     async def test_tools_list(self, mcp):
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
-        assert names == {"ping", "capabilities.list", "host.shell.run"}
+        assert names == {
+            "ping",
+            "capabilities.list",
+            "host.shell.run",
+            "host.file.read",
+            "host.file.write",
+            "host.file.list",
+        }
 
     @pytest.mark.asyncio
     async def test_ping(self, mcp):
@@ -40,6 +47,9 @@ class TestHostBridgeTools:
         result = await mcp.call_tool("capabilities.list", {})
         text = self._text(result)
         assert "host.shell.run" in text
+        assert "host.file.read" in text
+        assert "host.file.write" in text
+        assert "host.file.list" in text
 
     @pytest.mark.asyncio
     async def test_host_shell_run_success(self, mcp):
@@ -71,6 +81,59 @@ class TestHostBridgeTools:
         )
         text = self._text(result)
         assert "blocked" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_file_read_success(self, mcp, tmp_path):
+        target = tmp_path / "note.txt"
+        target.write_text("hello bridge", encoding="utf-8")
+        result = await mcp.call_tool(
+            "host.file.read",
+            {
+                "request_id": "req-read-1",
+                "session_id": "sess-read-1",
+                "user_id": "user-read-1",
+                "agent_name": "pytest",
+                "path": str(target),
+            },
+        )
+        text = self._text(result)
+        assert "hello bridge" in text
+
+    @pytest.mark.asyncio
+    async def test_host_file_write_success(self, mcp, tmp_path):
+        target = tmp_path / "written.txt"
+        result = await mcp.call_tool(
+            "host.file.write",
+            {
+                "request_id": "req-write-1",
+                "session_id": "sess-write-1",
+                "user_id": "user-write-1",
+                "agent_name": "pytest",
+                "path": str(target),
+                "content": "bridge write",
+            },
+        )
+        text = self._text(result)
+        assert "true" in text.lower()
+        assert target.read_text(encoding="utf-8") == "bridge write"
+
+    @pytest.mark.asyncio
+    async def test_host_file_list_success(self, mcp, tmp_path):
+        (tmp_path / "a.txt").write_text("a", encoding="utf-8")
+        (tmp_path / "b.txt").write_text("b", encoding="utf-8")
+        result = await mcp.call_tool(
+            "host.file.list",
+            {
+                "request_id": "req-list-1",
+                "session_id": "sess-list-1",
+                "user_id": "user-list-1",
+                "agent_name": "pytest",
+                "path": str(tmp_path),
+            },
+        )
+        text = self._text(result)
+        assert "a.txt" in text
+        assert "b.txt" in text
 
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:
@@ -127,7 +190,14 @@ async def test_stdio_tools_list():
     tools_resp = next((r for r in responses if r.get("id") == 1), None)
     assert tools_resp is not None
     names = {t["name"] for t in tools_resp["result"]["tools"]}
-    assert names == {"ping", "capabilities.list", "host.shell.run"}
+    assert names == {
+        "ping",
+        "capabilities.list",
+        "host.shell.run",
+        "host.file.read",
+        "host.file.write",
+        "host.file.list",
+    }
 
 
 @pytest.mark.asyncio

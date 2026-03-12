@@ -2,11 +2,15 @@
 ファイル操作ツール
 """
 
+import uuid
 from pathlib import Path
 from typing import Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.bridges.host_bridge_client import HostBridgeError, get_host_bridge_client
+from src.bridges.host_bridge_schema import HostFileReadRequest, HostFileWriteRequest
+from src.config.settings import get_settings
 from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
@@ -68,6 +72,39 @@ async def read_file(
             result=f"blocked:{reason}",
         )
         return {"error": f"Access denied: {reason}"}
+
+    settings = get_settings()
+    if settings.host_bridge_enabled:
+        request = HostFileReadRequest(
+            request_id=f"host-file-read-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=None,
+            path=path,
+        )
+        try:
+            client = get_host_bridge_client()
+            if client is None:
+                raise HostBridgeError("Host Bridge is not enabled")
+            result = await client.read_file(request)
+            audit_logger.log_file_operation(
+                "read",
+                result.path or path,
+                user_id=ctx.get("user_id") or None,
+                session_id=ctx.get("session_id") or None,
+                result="bridge_success" if result.ok else f"bridge_error:{result.error}",
+            )
+            return result.model_dump(exclude_none=True)
+        except HostBridgeError as e:
+            audit_logger.log_file_operation(
+                "read",
+                path,
+                user_id=ctx.get("user_id") or None,
+                session_id=ctx.get("session_id") or None,
+                result=f"bridge_error:{e}",
+            )
+            return {"error": str(e)}
 
     try:
         file_path = Path(path).expanduser().resolve()
@@ -162,6 +199,40 @@ async def write_file(
             result=approval_error,
         )
         return {"error": approval_error}
+
+    settings = get_settings()
+    if settings.host_bridge_enabled:
+        request = HostFileWriteRequest(
+            request_id=f"host-file-write-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=None,
+            path=path,
+            content=content,
+        )
+        try:
+            client = get_host_bridge_client()
+            if client is None:
+                raise HostBridgeError("Host Bridge is not enabled")
+            result = await client.write_file(request)
+            audit_logger.log_file_operation(
+                "write",
+                result.path or path,
+                user_id=ctx.get("user_id") or None,
+                session_id=ctx.get("session_id") or None,
+                result="bridge_success" if result.ok else f"bridge_error:{result.error}",
+            )
+            return result.model_dump(exclude_none=True)
+        except HostBridgeError as e:
+            audit_logger.log_file_operation(
+                "write",
+                path,
+                user_id=ctx.get("user_id") or None,
+                session_id=ctx.get("session_id") or None,
+                result=f"bridge_error:{e}",
+            )
+            return {"error": str(e)}
 
     try:
         file_path = Path(path).expanduser().resolve()

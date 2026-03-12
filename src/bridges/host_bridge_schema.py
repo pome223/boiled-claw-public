@@ -44,3 +44,61 @@ class HostShellRunResult(BaseModel):
     return_code: int = 0
     timed_out: bool = False
     error: Optional[str] = None
+
+
+class HostFileReadRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    path: str = Field(min_length=1)
+
+
+class HostFileReadResult(BaseModel):
+    ok: bool
+    path: Optional[str] = None
+    content: str = ""
+    size: int = 0
+    error: Optional[str] = None
+
+
+class HostFileWriteRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    path: str = Field(min_length=1)
+    content: str = ""
+
+
+class HostFileWriteResult(BaseModel):
+    ok: bool
+    path: Optional[str] = None
+    size: int = 0
+    success: bool = False
+    error: Optional[str] = None
+
+
+class HostFileListRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    path: str = Field(min_length=1)
+
+
+class HostFileEntry(BaseModel):
+    name: str
+    path: str
+    is_dir: bool
+    size: int
+
+
+class HostFileListResult(BaseModel):
+    ok: bool
+    path: Optional[str] = None
+    entries: list[HostFileEntry] = Field(default_factory=list)
+    error: Optional[str] = None

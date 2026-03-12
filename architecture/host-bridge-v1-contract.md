@@ -4,13 +4,16 @@
 
 Host Bridge v1 は、Gateway から host OS の capability を安全に呼び出すための最小 surface を定義する。
 
-この段階では次のみを対象にする。
+この段階では次を対象にする。
 
 - `ping`
 - `capabilities.list`
 - `host.shell.run`
+- `host.file.read`
+- `host.file.write`
+- `host.file.list`
 
-`file` と `browser` は v1 の後続 capability とし、同じ envelope に載せて追加する。
+`browser` は v1 の後続 capability とし、同じ envelope に載せて追加する。
 
 Transport は MCP over SSE を前提とする。
 ただし、開発とテストのため stdio transport でも同じ tool surface を提供する。
@@ -107,6 +110,81 @@ bridge 呼び出しは execution だけでなく、
 
 ---
 
+### `host.file.read`
+
+用途:
+
+- host OS 上の guarded file を読み込む
+
+入力:
+
+- `request_id`
+- `session_id`
+- `user_id`
+- `agent_name`
+- `approval_token`
+- `path`
+
+出力:
+
+- `ok`
+- `path`
+- `content`
+- `size`
+- `error`
+
+---
+
+### `host.file.write`
+
+用途:
+
+- host OS 上の guarded file に書き込む
+
+入力:
+
+- `request_id`
+- `session_id`
+- `user_id`
+- `agent_name`
+- `approval_token`
+- `path`
+- `content`
+
+出力:
+
+- `ok`
+- `path`
+- `size`
+- `success`
+- `error`
+
+---
+
+### `host.file.list`
+
+用途:
+
+- host OS 上の guarded directory を列挙する
+
+入力:
+
+- `request_id`
+- `session_id`
+- `user_id`
+- `agent_name`
+- `approval_token`
+- `path`
+
+出力:
+
+- `ok`
+- `path`
+- `entries`
+- `error`
+
+---
+
 ## Request Context
 
 `host.shell.run` では、以下の request context を引き回す。
@@ -159,7 +237,12 @@ Host Bridge v1 は、Gateway の approval の代替をしない。
 - `medium`
 - `high`
 
-v1 では `host.shell.run` を `medium` とする。
+v1 では次の risk を使う。
+
+- `host.shell.run` = `medium`
+- `host.file.read` = `low`
+- `host.file.write` = `medium`
+- `host.file.list` = `low`
 
 ---
 
@@ -167,9 +250,6 @@ v1 では `host.shell.run` を `medium` とする。
 
 v1 の envelope に、次の capability をそのまま追加できる形にしておく。
 
-- `host.file.read`
-- `host.file.write`
-- `host.file.list`
 - `host.browser.navigate`
 - `host.browser.extract_text`
 - `host.browser.screenshot`
@@ -186,14 +266,17 @@ v1 の envelope に、次の capability をそのまま追加できる形にし�
 v1 で最低限通すべきテストは次の通り。
 
 1. `ping` が成功する
-2. `capabilities.list` に `host.shell.run` が含まれる
+2. `capabilities.list` に shell / file capability が含まれる
 3. `host.shell.run` で安全な command が成功する
 4. `host.shell.run` で blocked command pattern が拒否される
-5. stdio transport でも `tools/list` と `tools/call` が通る
+5. `host.file.read` が成功する
+6. `host.file.write` が成功する
+7. `host.file.list` が成功する
+8. stdio transport でも `tools/list` と `tools/call` が通る
 
 ---
 
 ## Summary
 
 Host Bridge v1 は、MCP over SSE/stdio を transport とする最小 contract であり、
-まず `host.shell.run` を end-to-end で通すことを目的にする。
+まず `host.shell.run` と `host.file.*` を end-to-end で通すことを目的にする。

@@ -11,6 +11,12 @@ from mcp.client.sse import sse_client
 from src.bridges.host_bridge_schema import (
     BridgePingResult,
     CapabilityListResult,
+    HostFileListRequest,
+    HostFileListResult,
+    HostFileReadRequest,
+    HostFileReadResult,
+    HostFileWriteRequest,
+    HostFileWriteResult,
     HostShellRunRequest,
     HostShellRunResult,
 )
@@ -79,6 +85,18 @@ class HostBridgeClient:
     async def run_shell(self, request: HostShellRunRequest) -> HostShellRunResult:
         payload = await self._call_tool("host.shell.run", request.model_dump())
         return HostShellRunResult.model_validate(payload)
+
+    async def read_file(self, request: HostFileReadRequest) -> HostFileReadResult:
+        payload = await self._call_tool("host.file.read", request.model_dump())
+        return HostFileReadResult.model_validate(payload)
+
+    async def write_file(self, request: HostFileWriteRequest) -> HostFileWriteResult:
+        payload = await self._call_tool("host.file.write", request.model_dump())
+        return HostFileWriteResult.model_validate(payload)
+
+    async def list_files(self, request: HostFileListRequest) -> HostFileListResult:
+        payload = await self._call_tool("host.file.list", request.model_dump())
+        return HostFileListResult.model_validate(payload)
 
 
 def get_host_bridge_client() -> Optional[HostBridgeClient]:
