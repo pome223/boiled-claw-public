@@ -21,19 +21,19 @@ async def _check_write_policy(
     path: str,
     content: str,
     tool_context: Optional[ToolContext],
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     if tool_context is None:
-        return None
+        return None, None
 
     ctx = resolve_tool_context(tool_context)
     engine = get_tool_policy_engine()
     action, reason = engine.evaluate(ctx["agent_name"], "write_file")
     if action == "allow":
-        return None
+        return None, None
     if action == "deny":
-        return f"Tool blocked by policy: {reason}"
+        return f"Tool blocked by policy: {reason}", None
 
-    approved, response_reason = await engine.request_approval(
+    approved, response_reason, approval_token = await engine.request_approval_with_id(
         tool_name="write_file",
         agent_name=ctx["agent_name"],
         args={"path": str(Path(path).expanduser()), "size": len(content)},
@@ -41,9 +41,9 @@ async def _check_write_policy(
         reason=reason,
     )
     if approved:
-        return None
+        return None, approval_token
     detail = response_reason or reason or "user rejected"
-    return f"Tool approval denied: {detail}"
+    return f"Tool approval denied: {detail}", approval_token
 
 
 async def read_file(
@@ -189,7 +189,7 @@ async def write_file(
         )
         return {"error": f"Content blocked by security policy: {content_reason}"}
 
-    approval_error = await _check_write_policy(path, content, tool_context)
+    approval_error, approval_token = await _check_write_policy(path, content, tool_context)
     if approval_error:
         audit_logger.log_file_operation(
             "write",
@@ -207,7 +207,7 @@ async def write_file(
             session_id=ctx.get("session_id") or "standalone-session",
             user_id=ctx.get("user_id") or "standalone-user",
             agent_name=ctx.get("agent_name") or "unknown_agent",
-            approval_token=None,
+            approval_token=approval_token,
             path=path,
             content=content,
         )

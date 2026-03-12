@@ -57,12 +57,14 @@ async def test_run_shell_waits_for_approval(monkeypatch):
 @pytest.mark.asyncio
 async def test_run_shell_uses_host_bridge_when_enabled(monkeypatch):
     engine = ToolPolicyEngine()
+    seen = {}
 
     async def notifier(payload):
         engine.resolve_approval(payload["request_id"], True, "approved")
 
     class FakeClient:
         async def run_shell(self, request):
+            seen["shell_approval_token"] = request.approval_token
             return shell_module.HostShellRunResult(
                 ok=True,
                 stdout=f"bridge:{request.command}",
@@ -88,6 +90,7 @@ async def test_run_shell_uses_host_bridge_when_enabled(monkeypatch):
 
     assert result["return_code"] == 0
     assert result["stdout"] == "bridge:echo bridge"
+    assert seen["shell_approval_token"]
 
 
 @pytest.mark.asyncio
@@ -152,12 +155,14 @@ async def test_read_file_uses_host_bridge_when_enabled(monkeypatch):
 @pytest.mark.asyncio
 async def test_write_file_uses_host_bridge_when_enabled(monkeypatch, tmp_path):
     engine = ToolPolicyEngine()
+    seen = {}
 
     async def notifier(payload):
         engine.resolve_approval(payload["request_id"], True, "approved")
 
     class FakeClient:
         async def write_file(self, request):
+            seen["file_approval_token"] = request.approval_token
             from src.bridges.host_bridge_schema import HostFileWriteResult
 
             return HostFileWriteResult(
@@ -191,3 +196,4 @@ async def test_write_file_uses_host_bridge_when_enabled(monkeypatch, tmp_path):
 
     assert result["success"] is True
     assert result["size"] == len("bridge content")
+    assert seen["file_approval_token"]

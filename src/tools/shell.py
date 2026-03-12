@@ -22,19 +22,19 @@ async def _check_tool_policy(
     tool_name: str,
     args: dict[str, Any],
     tool_context: Optional[ToolContext],
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     if tool_context is None:
-        return None
+        return None, None
 
     ctx = resolve_tool_context(tool_context)
     engine = get_tool_policy_engine()
     action, reason = engine.evaluate(ctx["agent_name"], tool_name)
     if action == "allow":
-        return None
+        return None, None
     if action == "deny":
-        return f"Tool blocked by policy: {reason}"
+        return f"Tool blocked by policy: {reason}", None
 
-    approved, response_reason = await engine.request_approval(
+    approved, response_reason, approval_token = await engine.request_approval_with_id(
         tool_name=tool_name,
         agent_name=ctx["agent_name"],
         args=args,
@@ -42,9 +42,9 @@ async def _check_tool_policy(
         reason=reason,
     )
     if approved:
-        return None
+        return None, approval_token
     detail = response_reason or reason or "user rejected"
-    return f"Tool approval denied: {detail}"
+    return f"Tool approval denied: {detail}", approval_token
 
 
 async def run_shell(
@@ -88,7 +88,7 @@ async def run_shell(
             "return_code": -1,
         }
 
-    approval_error = await _check_tool_policy(
+    approval_error, approval_token = await _check_tool_policy(
         "run_shell",
         {"command": normalized, "timeout": timeout},
         tool_context,
@@ -109,7 +109,7 @@ async def run_shell(
             session_id=ctx.get("session_id") or "standalone-session",
             user_id=ctx.get("user_id") or "standalone-user",
             agent_name=ctx.get("agent_name") or "unknown_agent",
-            approval_token=None,
+            approval_token=approval_token,
             command=normalized,
             timeout_seconds=timeout,
             cwd=None,

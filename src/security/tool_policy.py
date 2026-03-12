@@ -221,11 +221,31 @@ class ToolPolicyEngine:
         reason: str = "",
         timeout: float = 300.0,
     ) -> Tuple[bool, str]:
+        approved, resolve_reason, _request_id = await self.request_approval_with_id(
+            tool_name=tool_name,
+            agent_name=agent_name,
+            args=args,
+            session_id=session_id,
+            reason=reason,
+            timeout=timeout,
+        )
+        return approved, resolve_reason
+
+    async def request_approval_with_id(
+        self,
+        *,
+        tool_name: str,
+        agent_name: str,
+        args: Optional[Dict[str, Any]] = None,
+        session_id: str,
+        reason: str = "",
+        timeout: float = 300.0,
+    ) -> Tuple[bool, str, str]:
         """Request approval and wait for a user response."""
         if not session_id:
-            return False, "approval requires a valid session_id"
+            return False, "approval requires a valid session_id", ""
         if self._notifier is None:
-            return False, "approval channel is unavailable"
+            return False, "approval channel is unavailable", ""
 
         request_id = uuid.uuid4().hex[:12]
         approval = self.create_approval_request(
@@ -246,20 +266,20 @@ class ToolPolicyEngine:
         except Exception as exc:
             self._pending_approvals.pop(request_id, None)
             self._approval_waiters.pop(request_id, None)
-            return False, f"failed to deliver approval request: {exc}"
+            return False, f"failed to deliver approval request: {exc}", request_id
 
         try:
             approved, resolve_reason = await asyncio.wait_for(waiter, timeout=timeout)
         except asyncio.TimeoutError:
             self._pending_approvals.pop(request_id, None)
             self._approval_waiters.pop(request_id, None)
-            return False, "approval timed out"
+            return False, "approval timed out", request_id
         except asyncio.CancelledError:
             self._pending_approvals.pop(request_id, None)
             self._approval_waiters.pop(request_id, None)
             raise
 
-        return approved, resolve_reason
+        return approved, resolve_reason, request_id
 
 
 @dataclass
