@@ -107,3 +107,9 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def reset_settings() -> None:
+    """Clear the cached settings instance."""
+    global _settings
+    _settings = None
