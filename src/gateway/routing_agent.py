@@ -37,6 +37,7 @@ Special cases:
 - browser extraction / page navigation / scraping should prefer specialist=browser_automator with handoff_mode="preflight_then_root".
 - desktop state inspection should prefer specialist=desktop_operator with handoff_mode="preflight_then_root".
 - desktop control requests (launch app / focus window / click / type / frontmost app / windows / screenshot / accessibility targeting) should prefer specialist=desktop_operator.
+- multi-step desktop automation, verification-heavy GUI flows, or requests that say "その後 / 次に / 手順 / verify" should prefer control_loop instead of direct desktop specialist execution.
 - skill requests should usually stay on root_agent unless the user explicitly wants a dedicated agent or MCP setup.
 - cron jobs with explicit targets should not be re-routed away from that explicit target.
 

@@ -55,6 +55,19 @@ _LONGFORM_KEYWORDS = {
     "多面的",
 }
 
+_SEQUENCE_KEYWORDS = {
+    "その後",
+    "してから",
+    "次に",
+    "順番に",
+    "手順",
+    "step by step",
+    "multi-step",
+    "verify",
+    "検証",
+    "確認しながら",
+}
+
 _BROWSER_KEYWORDS = {
     "url",
     "http://",
@@ -76,6 +89,10 @@ _DESKTOP_VIEW_KEYWORDS = {
     "スクリーンショット",
     "ウィンドウ",
     "前面アプリ",
+    "待って",
+    "wait",
+    "出るまで",
+    "現れるまで",
     "frontmost",
     "window",
     "screen",
@@ -91,6 +108,8 @@ _DESKTOP_CONTROL_KEYWORDS = {
     "入力",
     "打って",
     "押して",
+    "scroll",
+    "スクロール",
     "hotkey",
     "ショートカット",
     "起動",
@@ -99,6 +118,10 @@ _DESKTOP_CONTROL_KEYWORDS = {
     "切り替えて",
     "focus",
     "フォーカス",
+    "停止",
+    "止めて",
+    "emergency stop",
+    "panic",
 }
 
 _FILE_KEYWORDS = {
@@ -243,6 +266,7 @@ def heuristic_decision(message: str) -> RoutingDecision:
 
     has_research = _contains_any(normalized, _RESEARCH_KEYWORDS)
     has_longform = _contains_any(normalized, _LONGFORM_KEYWORDS)
+    has_sequence = _contains_any(normalized, _SEQUENCE_KEYWORDS)
     has_browser = _contains_any(normalized, _BROWSER_KEYWORDS)
     has_desktop_view = _contains_any(normalized, _DESKTOP_VIEW_KEYWORDS)
     has_desktop_control = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS)
@@ -264,6 +288,13 @@ def heuristic_decision(message: str) -> RoutingDecision:
             target="control_loop",
             reason="latest or research-heavy request with long-form output",
             confidence=0.82,
+        )
+
+    if has_desktop_control and (has_sequence or has_longform):
+        return RoutingDecision(
+            target="control_loop",
+            reason="multi-step or verification-heavy desktop automation request",
+            confidence=0.86,
         )
 
     if has_desktop_control:
