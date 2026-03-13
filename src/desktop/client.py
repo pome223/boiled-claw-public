@@ -13,9 +13,11 @@ from src.desktop.models import (
     DesktopClickRequest,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
+    DesktopLaunchAppRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
     DesktopTypeRequest,
@@ -64,15 +66,29 @@ def desktop_capabilities(
             name="desktop.control.click",
             risk="high",
             requires_approval=True,
-            description="Click on the host desktop.",
+            description="Click on the host desktop or a matched accessibility element.",
             implemented="desktop.control.click" in implemented_names,
         ),
         CapabilityDescriptor(
             name="desktop.control.type",
             risk="high",
             requires_approval=True,
-            description="Type text into the host desktop.",
+            description="Type text into the host desktop or a matched accessibility element.",
             implemented="desktop.control.type" in implemented_names,
+        ),
+        CapabilityDescriptor(
+            name="desktop.control.launch_app",
+            risk="high",
+            requires_approval=True,
+            description="Launch an app on the host desktop.",
+            implemented="desktop.control.launch_app" in implemented_names,
+        ),
+        CapabilityDescriptor(
+            name="desktop.control.focus_window",
+            risk="high",
+            requires_approval=True,
+            description="Focus a window or app on the host desktop.",
+            implemented="desktop.control.focus_window" in implemented_names,
         ),
         CapabilityDescriptor(
             name="desktop.control.hotkey",
@@ -127,6 +143,18 @@ class DesktopClient(ABC):
 
     @abstractmethod
     async def type_text(self, request: DesktopTypeRequest) -> DesktopControlResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def launch_app(
+        self, request: DesktopLaunchAppRequest
+    ) -> DesktopControlResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def focus_window(
+        self, request: DesktopFocusWindowRequest
+    ) -> DesktopControlResult:
         raise NotImplementedError
 
     @abstractmethod

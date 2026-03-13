@@ -38,6 +38,8 @@ class TestDesktopBridgeTools:
             "desktop.ax.snapshot",
             "desktop.control.click",
             "desktop.control.type",
+            "desktop.control.launch_app",
+            "desktop.control.focus_window",
             "desktop.control.hotkey",
             "desktop.control.drag",
         }
@@ -88,7 +90,12 @@ class TestDesktopBridgeTools:
 
         mcp = create_server(
             desktop_client=FakeDesktopClient(
-                implemented={"desktop.view.windows", "desktop.view.frontmost_app"},
+                implemented={
+                    "desktop.view.windows",
+                    "desktop.view.frontmost_app",
+                    "desktop.control.launch_app",
+                    "desktop.control.focus_window",
+                },
                 windows=[
                     DesktopWindowDescriptor(
                         window_id="w1",
@@ -119,13 +126,39 @@ class TestDesktopBridgeTools:
                 "agent_name": "pytest",
             },
         )
+        launch = await mcp.call_tool(
+            "desktop.control.launch_app",
+            {
+                "request_id": "req-injected-3",
+                "session_id": "sess-injected-3",
+                "user_id": "user-injected-3",
+                "agent_name": "pytest",
+                "app_name": "Safari",
+            },
+        )
+        focus = await mcp.call_tool(
+            "desktop.control.focus_window",
+            {
+                "request_id": "req-injected-4",
+                "session_id": "sess-injected-4",
+                "user_id": "user-injected-4",
+                "agent_name": "pytest",
+                "window_id": "w1",
+            },
+        )
 
         windows_text = self._text(windows)
         frontmost_text = self._text(frontmost)
+        launch_text = self._text(launch)
+        focus_text = self._text(focus)
         assert '"ok": true' in windows_text.lower()
         assert "Safari" in windows_text
         assert '"ok": true' in frontmost_text.lower()
         assert '"pid": 42' in frontmost_text
+        assert '"ok": true' in launch_text.lower()
+        assert "Safari" in launch_text
+        assert '"ok": true' in focus_text.lower()
+        assert "Injected" in focus_text
 
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:

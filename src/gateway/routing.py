@@ -93,8 +93,12 @@ _DESKTOP_CONTROL_KEYWORDS = {
     "押して",
     "hotkey",
     "ショートカット",
+    "起動",
+    "開いて",
     "アプリを開いて",
+    "切り替えて",
     "focus",
+    "フォーカス",
 }
 
 _FILE_KEYWORDS = {

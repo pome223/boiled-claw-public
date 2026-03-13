@@ -12,11 +12,14 @@ from src.desktop import (
     DesktopAxSnapshotRequest,
     DesktopClickRequest,
     DesktopDragRequest,
+    DesktopElementSelector,
     FakeDesktopClient,
     PyObjCDesktopClient,
     build_default_desktop_client,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
+    DesktopLaunchAppRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
     DesktopWindowsRequest,
@@ -24,19 +27,31 @@ from src.desktop import (
 
 
 class _FakeFrontmostApplication:
+    def __init__(self, name: str = "Safari", pid: int = 123):
+        self._name = name
+        self._pid = pid
+
     def localizedName(self):
-        return "Safari"
+        return self._name
 
     def processIdentifier(self):
-        return 123
+        return self._pid
+
+    def activateWithOptions_(self, _options):
+        _FakeWorkspace.last_activated_pid = self._pid
 
 
 class _FakeWorkspace:
+    last_activated_pid = None
+
     def frontmostApplication(self):
         return _FakeFrontmostApplication()
 
     def runningApplications(self):
-        return [_FakeFrontmostApplication()]
+        return [
+            _FakeFrontmostApplication(),
+            _FakeFrontmostApplication("Notes", 456),
+        ]
 
 
 class _FakeNSWorkspace:
@@ -76,8 +91,14 @@ class _FakeQuartz:
     kAXDescriptionAttribute = "AXDescription"
     kAXValueAttribute = "AXValue"
     kAXIdentifierAttribute = "AXIdentifier"
+    kAXPositionAttribute = "AXPosition"
+    kAXSizeAttribute = "AXSize"
+    kAXPressAction = "AXPress"
+    kAXRaiseAction = "AXRaise"
 
     posted = []
+    actions = []
+    set_values = []
 
     @staticmethod
     def CGWindowListCopyWindowInfo(option, null_window_id):
@@ -121,6 +142,18 @@ class _FakeQuartz:
             "AXDescription": "",
             "AXValue": None,
             "AXIdentifier": "open-button",
+            "AXPosition": {"x": 100, "y": 200},
+            "AXSize": {"x": 80, "y": 30},
+            "AXChildren": [],
+        }
+        text_field = {
+            "AXRole": "AXTextField",
+            "AXTitle": "Search",
+            "AXDescription": "",
+            "AXValue": "",
+            "AXIdentifier": "search-field",
+            "AXPosition": {"x": 120, "y": 260},
+            "AXSize": {"x": 220, "y": 28},
             "AXChildren": [],
         }
         window = {
@@ -129,7 +162,9 @@ class _FakeQuartz:
             "AXDescription": "",
             "AXValue": None,
             "AXIdentifier": "window-7",
-            "AXChildren": [button],
+            "AXPosition": {"x": 10, "y": 20},
+            "AXSize": {"x": 800, "y": 600},
+            "AXChildren": [button, text_field],
         }
         return {
             "AXRole": "AXApplication",
@@ -144,6 +179,17 @@ class _FakeQuartz:
     @staticmethod
     def AXUIElementCopyAttributeValue(element, attribute, _unused=None):
         return (0, element.get(attribute))
+
+    @classmethod
+    def AXUIElementPerformAction(cls, element, action):
+        cls.actions.append((action, element.get("AXIdentifier")))
+        return 0
+
+    @classmethod
+    def AXUIElementSetAttributeValue(cls, element, attribute, value):
+        cls.set_values.append((element.get("AXIdentifier"), attribute, value))
+        element[attribute] = value
+        return 0
 
     @classmethod
     def CGEventCreateMouseEvent(cls, _source, event_type, point, button):
@@ -295,6 +341,121 @@ async def test_pyobjc_client_type_posts_keyboard_events():
     assert len(_FakeQuartz.posted) == 4
     assert _FakeQuartz.posted[0][1]["text"] == "a"
     assert _FakeQuartz.posted[2][1]["text"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_click_selector_uses_ax_press():
+    _FakeQuartz.actions = []
+    client = PyObjCDesktopClient(
+        appkit_module=_FakeAppKit(),
+        quartz_module=_FakeQuartz(),
+    )
+
+    result = await client.click(
+        DesktopClickRequest(
+            request_id="req-click-selector",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="7",
+                role="AXButton",
+                identifier="open-button",
+            ),
+        )
+    )
+
+    assert result.ok is True
+    assert result.target is not None
+    assert result.target.identifier == "open-button"
+    assert _FakeQuartz.actions[-1] == (_FakeQuartz.kAXPressAction, "open-button")
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_type_selector_sets_ax_value():
+    _FakeQuartz.set_values = []
+    client = PyObjCDesktopClient(
+        appkit_module=_FakeAppKit(),
+        quartz_module=_FakeQuartz(),
+    )
+
+    result = await client.type_text(
+        DesktopTypeRequest(
+            request_id="req-type-selector",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            text="hello",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="7",
+                role="AXTextField",
+                identifier="search-field",
+            ),
+        )
+    )
+
+    assert result.ok is True
+    assert result.target is not None
+    assert result.target.identifier == "search-field"
+    assert _FakeQuartz.set_values[-1] == ("search-field", _FakeQuartz.kAXValueAttribute, "hello")
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_launch_app_uses_open_runner_and_activates(monkeypatch):
+    captured: list[list[str]] = []
+    _FakeWorkspace.last_activated_pid = None
+
+    def _runner(args: list[str]) -> None:
+        captured.append(args)
+
+    monkeypatch.setattr("src.desktop.pyobjc_client.shutil.which", lambda name: "/usr/bin/open" if name == "open" else None)
+    client = PyObjCDesktopClient(
+        appkit_module=_FakeAppKit(),
+        open_runner=_runner,
+    )
+
+    result = await client.launch_app(
+        DesktopLaunchAppRequest(
+            request_id="req-launch",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Notes",
+        )
+    )
+
+    assert result.ok is True
+    assert captured == [["open", "-a", "Notes"]]
+    assert _FakeWorkspace.last_activated_pid == 456
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_focus_window_raises_and_activates():
+    _FakeQuartz.actions = []
+    _FakeWorkspace.last_activated_pid = None
+    client = PyObjCDesktopClient(
+        appkit_module=_FakeAppKit(),
+        quartz_module=_FakeQuartz(),
+    )
+
+    result = await client.focus_window(
+        DesktopFocusWindowRequest(
+            request_id="req-focus",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Safari",
+            window_id="7",
+        )
+    )
+
+    assert result.ok is True
+    assert result.target is not None
+    assert result.target.window_id == "7"
+    assert (_FakeQuartz.kAXRaiseAction, "window-7") in _FakeQuartz.actions
+    assert _FakeWorkspace.last_activated_pid == 123
 
 
 @pytest.mark.asyncio

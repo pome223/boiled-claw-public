@@ -17,11 +17,14 @@ from src.desktop.models import (
     DesktopClickRequest,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
+    DesktopLaunchAppRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
+    DesktopTargetDescriptor,
     DesktopTypeRequest,
     DesktopWindowDescriptor,
     DesktopWindowsRequest,
@@ -52,6 +55,10 @@ class FakeDesktopClient(DesktopClient):
         self._screenshot_width = screenshot_width
         self._screenshot_height = screenshot_height
         self._ax_tree = dict(ax_tree or {})
+        self.last_click_request: DesktopClickRequest | None = None
+        self.last_type_request: DesktopTypeRequest | None = None
+        self.last_launch_request: DesktopLaunchAppRequest | None = None
+        self.last_focus_request: DesktopFocusWindowRequest | None = None
 
     async def capabilities(self) -> CapabilityListResult:
         return desktop_capabilities(self._implemented)
@@ -99,12 +106,53 @@ class FakeDesktopClient(DesktopClient):
         return DesktopAxSnapshotResult(ok=True, tree=self._ax_tree)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
-        del request
-        return self._control_result("desktop.control.click")
+        self.last_click_request = request
+        target = self._resolve_target_from_request(request.target)
+        return self._control_result("desktop.control.click", target=target)
 
     async def type_text(self, request: DesktopTypeRequest) -> DesktopControlResult:
-        del request
-        return self._control_result("desktop.control.type")
+        self.last_type_request = request
+        target = self._resolve_target_from_request(request.target)
+        return self._control_result("desktop.control.type", target=target)
+
+    async def launch_app(
+        self, request: DesktopLaunchAppRequest
+    ) -> DesktopControlResult:
+        self.last_launch_request = request
+        return self._control_result(
+            "desktop.control.launch_app",
+            target=DesktopTargetDescriptor(
+                app_name=request.app_name or "",
+                identifier=request.bundle_id or "",
+            ),
+        )
+
+    async def focus_window(
+        self, request: DesktopFocusWindowRequest
+    ) -> DesktopControlResult:
+        self.last_focus_request = request
+        target = None
+        for window in self._windows:
+            if request.window_id and window.window_id != request.window_id:
+                continue
+            if request.app_name and window.app_name != request.app_name:
+                continue
+            if request.title and window.title != request.title:
+                continue
+            target = DesktopTargetDescriptor(
+                app_name=window.app_name,
+                window_id=window.window_id,
+                title=window.title,
+                bounds=window.bounds,
+            )
+            break
+        if target is None and (request.app_name or request.title or request.window_id):
+            target = DesktopTargetDescriptor(
+                app_name=request.app_name or "",
+                window_id=request.window_id or "",
+                title=request.title or "",
+            )
+        return self._control_result("desktop.control.focus_window", target=target)
 
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
         del request
@@ -114,10 +162,42 @@ class FakeDesktopClient(DesktopClient):
         del request
         return self._control_result("desktop.control.drag")
 
-    def _control_result(self, capability: str) -> DesktopControlResult:
+    def _control_result(
+        self,
+        capability: str,
+        *,
+        target: DesktopTargetDescriptor | None = None,
+    ) -> DesktopControlResult:
         if capability not in self._implemented:
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
-        return DesktopControlResult(ok=True)
+        return DesktopControlResult(ok=True, target=target)
+
+    def _resolve_target_from_request(
+        self,
+        selector: Any,
+    ) -> DesktopTargetDescriptor | None:
+        if selector is None:
+            return None
+        for window in self._windows:
+            if selector.app_name and window.app_name != selector.app_name:
+                continue
+            if selector.window_id and window.window_id != selector.window_id:
+                continue
+            return DesktopTargetDescriptor(
+                app_name=window.app_name,
+                window_id=window.window_id,
+                title=window.title,
+                role=selector.role or "",
+                identifier=selector.identifier or "",
+                bounds=window.bounds,
+            )
+        return DesktopTargetDescriptor(
+            app_name=selector.app_name or "",
+            window_id=selector.window_id or "",
+            role=selector.role or "",
+            title=selector.title or "",
+            identifier=selector.identifier or "",
+        )
 
 
 __all__ = ["FakeDesktopClient"]

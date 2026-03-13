@@ -231,10 +231,17 @@ async def guarded_desktop_ax_snapshot(
 
 
 async def guarded_desktop_control_click(
-    x: int,
-    y: int,
+    x: int | None = None,
+    y: int | None = None,
     button: str = "left",
     click_count: int = 1,
+    app_name: str | None = None,
+    window_id: str | None = None,
+    role: str | None = None,
+    title: str | None = None,
+    identifier: str | None = None,
+    value_contains: str | None = None,
+    index: int = 0,
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
@@ -252,11 +259,25 @@ async def guarded_desktop_control_click(
         y=y,
         button=button,
         click_count=click_count,
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
     )
 
 
 async def guarded_desktop_control_type(
     text: str,
+    app_name: str | None = None,
+    window_id: str | None = None,
+    role: str | None = None,
+    title: str | None = None,
+    identifier: str | None = None,
+    value_contains: str | None = None,
+    index: int = 0,
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
@@ -269,7 +290,62 @@ async def guarded_desktop_control_type(
         _check_capability_in_plan(tool_context, "desktop.control.type")
 
     from src.tools.desktop import desktop_control_type
-    return await desktop_control_type(text=text)
+    return await desktop_control_type(
+        text=text,
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+    )
+
+
+async def guarded_desktop_control_launch_app(
+    app_name: str | None = None,
+    bundle_id: str | None = None,
+    wait_for_focus: bool = True,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.control.launch_app requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.control.launch_app")
+
+    from src.tools.desktop import desktop_control_launch_app
+    return await desktop_control_launch_app(
+        app_name=app_name,
+        bundle_id=bundle_id,
+        wait_for_focus=wait_for_focus,
+    )
+
+
+async def guarded_desktop_control_focus_window(
+    app_name: str | None = None,
+    window_id: str | None = None,
+    title: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.control.focus_window requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.control.focus_window")
+
+    from src.tools.desktop import desktop_control_focus_window
+    return await desktop_control_focus_window(
+        app_name=app_name,
+        window_id=window_id,
+        title=title,
+    )
 
 
 async def guarded_desktop_control_hotkey(

@@ -14,8 +14,10 @@ from src.control_loop.guarded_tools import (
     guarded_desktop_view_screenshot,
     guarded_desktop_ax_snapshot,
     guarded_desktop_control_click,
+    guarded_desktop_control_focus_window,
     guarded_desktop_control_type,
     guarded_desktop_control_hotkey,
+    guarded_desktop_control_launch_app,
     guarded_desktop_control_drag,
 )
 from src.control_loop.instructions import build_executor_instruction
@@ -39,6 +41,8 @@ executor_agent = LlmAgent(
         guarded_desktop_ax_snapshot,
         guarded_desktop_control_click,
         guarded_desktop_control_type,
+        guarded_desktop_control_launch_app,
+        guarded_desktop_control_focus_window,
         guarded_desktop_control_hotkey,
         guarded_desktop_control_drag,
     ],

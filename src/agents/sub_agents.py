@@ -12,7 +12,9 @@ from src.tools.desktop import (
     desktop_ax_snapshot,
     desktop_control_click,
     desktop_control_drag,
+    desktop_control_focus_window,
     desktop_control_hotkey,
+    desktop_control_launch_app,
     desktop_control_type,
     desktop_view_frontmost_app,
     desktop_view_screenshot,
@@ -161,6 +163,7 @@ desktop_agent = Agent(
 - control 系 tool は最小限に使う
 - 高リスク操作は承認が必要な場合がある
 - できるだけ app / window / AX 情報に基づいて行動する
+- 座標指定より、launch_app / focus_window / selector-aware click/type を優先する
 """,
     tools=[
         desktop_view_windows,
@@ -169,6 +172,8 @@ desktop_agent = Agent(
         desktop_ax_snapshot,
         desktop_control_click,
         desktop_control_type,
+        desktop_control_launch_app,
+        desktop_control_focus_window,
         desktop_control_hotkey,
         desktop_control_drag,
     ],

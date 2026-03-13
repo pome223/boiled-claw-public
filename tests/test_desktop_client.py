@@ -7,7 +7,10 @@ import pytest
 from src.desktop import (
     FakeDesktopClient,
     DesktopClickRequest,
+    DesktopElementSelector,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
+    DesktopLaunchAppRequest,
     DesktopWindowBounds,
     DesktopWindowDescriptor,
     DesktopWindowsRequest,
@@ -85,3 +88,64 @@ async def test_fake_desktop_client_returns_not_implemented_for_missing_control()
 
     assert result.ok is False
     assert "not implemented" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_tracks_selector_click_and_launch_focus():
+    client = FakeDesktopClient(
+        implemented={
+            "desktop.control.click",
+            "desktop.control.launch_app",
+            "desktop.control.focus_window",
+        },
+        windows=[
+            DesktopWindowDescriptor(
+                window_id="w1",
+                app_name="Safari",
+                title="Example",
+                bounds=DesktopWindowBounds(x=10, y=20, width=800, height=600),
+            )
+        ],
+    )
+
+    click = await client.click(
+        DesktopClickRequest(
+            request_id="req-click",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="w1",
+                title="Open",
+            ),
+        )
+    )
+    launch = await client.launch_app(
+        DesktopLaunchAppRequest(
+            request_id="req-launch",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Safari",
+        )
+    )
+    focus = await client.focus_window(
+        DesktopFocusWindowRequest(
+            request_id="req-focus",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            window_id="w1",
+        )
+    )
+
+    assert click.ok is True
+    assert click.target is not None
+    assert click.target.window_id == "w1"
+    assert launch.ok is True
+    assert launch.target is not None
+    assert launch.target.app_name == "Safari"
+    assert focus.ok is True
+    assert focus.target is not None
+    assert focus.target.title == "Example"

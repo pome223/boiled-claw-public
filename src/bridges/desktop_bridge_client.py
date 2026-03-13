@@ -18,9 +18,11 @@ from src.desktop import (
     DesktopClient,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
+    DesktopLaunchAppRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
     DesktopTypeRequest,
@@ -123,6 +125,18 @@ class DesktopBridgeClient(DesktopClient):
 
     async def type_text(self, request: DesktopTypeRequest) -> DesktopControlResult:
         payload = await self._call_tool("desktop.control.type", request.model_dump())
+        return DesktopControlResult.model_validate(payload)
+
+    async def launch_app(
+        self, request: DesktopLaunchAppRequest
+    ) -> DesktopControlResult:
+        payload = await self._call_tool("desktop.control.launch_app", request.model_dump())
+        return DesktopControlResult.model_validate(payload)
+
+    async def focus_window(
+        self, request: DesktopFocusWindowRequest
+    ) -> DesktopControlResult:
+        payload = await self._call_tool("desktop.control.focus_window", request.model_dump())
         return DesktopControlResult.model_validate(payload)
 
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:

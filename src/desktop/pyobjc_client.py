@@ -25,11 +25,15 @@ from src.desktop.models import (
     DesktopClickRequest,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopElementSelector,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
+    DesktopLaunchAppRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
+    DesktopTargetDescriptor,
     DesktopTypeRequest,
     DesktopWindowBounds,
     DesktopWindowDescriptor,
@@ -47,10 +51,12 @@ class PyObjCDesktopClient(DesktopClient):
         appkit_module: Any | None = None,
         quartz_module: Any | None = None,
         screenshot_runner: Any | None = None,
+        open_runner: Any | None = None,
     ) -> None:
         self._appkit = appkit_module
         self._quartz = quartz_module
         self._screenshot_runner = screenshot_runner or _default_screenshot_runner
+        self._open_runner = open_runner or _default_open_runner
 
     async def capabilities(self) -> CapabilityListResult:
         implemented = set()
@@ -63,6 +69,10 @@ class PyObjCDesktopClient(DesktopClient):
             implemented.add("desktop.control.drag")
         if _supports_text_input(self._quartz):
             implemented.add("desktop.control.type")
+        if _supports_open_command():
+            implemented.add("desktop.control.launch_app")
+        if _supports_focus_window(self._quartz, self._appkit):
+            implemented.add("desktop.control.focus_window")
         if _supports_hotkey(self._quartz):
             implemented.add("desktop.control.hotkey")
         if self._appkit is not None:
@@ -194,43 +204,141 @@ class PyObjCDesktopClient(DesktopClient):
         return DesktopAxSnapshotResult(ok=True, tree=tree)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
+        if request.target is not None:
+            resolved = self._resolve_element_target(request.target)
+            if resolved is None:
+                return DesktopControlResult(ok=False, error="desktop element not found")
+            descriptor = self._descriptor_for_element(
+                resolved["app_name"],
+                resolved["window_id"],
+                resolved["element"],
+            )
+            if _supports_ax_press(self._quartz) and _perform_ax_action(
+                self._quartz,
+                resolved["element"],
+                getattr(self._quartz, "kAXPressAction", "AXPress"),
+            ):
+                return DesktopControlResult(ok=True, target=descriptor)
+            center = _descriptor_center(descriptor)
+            if center is None:
+                return DesktopControlResult(
+                    ok=False,
+                    error="desktop element is not actionable",
+                    target=descriptor,
+                )
+            return self._post_click(
+                x=center[0],
+                y=center[1],
+                button=request.button,
+                click_count=request.click_count,
+                target=descriptor,
+            )
         if not _supports_mouse_click(self._quartz):
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
-
-        event_down_type, event_up_type, mouse_button = _mouse_event_spec(
-            self._quartz,
-            request.button,
+        return self._post_click(
+            x=int(request.x or 0),
+            y=int(request.y or 0),
+            button=request.button,
+            click_count=request.click_count,
         )
-        point = (request.x, request.y)
-        for _ in range(request.click_count):
-            down = self._quartz.CGEventCreateMouseEvent(
-                None,
-                event_down_type,
-                point,
-                mouse_button,
-            )
-            up = self._quartz.CGEventCreateMouseEvent(
-                None,
-                event_up_type,
-                point,
-                mouse_button,
-            )
-            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
-            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
-        return DesktopControlResult(ok=True)
 
     async def type_text(self, request: DesktopTypeRequest) -> DesktopControlResult:
+        if request.target is not None:
+            resolved = self._resolve_element_target(request.target)
+            if resolved is None:
+                return DesktopControlResult(ok=False, error="desktop element not found")
+            descriptor = self._descriptor_for_element(
+                resolved["app_name"],
+                resolved["window_id"],
+                resolved["element"],
+            )
+            if _supports_ax_set_value(self._quartz) and _set_ax_value(
+                self._quartz,
+                resolved["element"],
+                getattr(self._quartz, "kAXValueAttribute", "AXValue"),
+                request.text,
+            ):
+                return DesktopControlResult(ok=True, target=descriptor)
+            if not _supports_text_input(self._quartz):
+                return DesktopControlResult(
+                    ok=False,
+                    error="desktop element is not text-editable",
+                    target=descriptor,
+                )
+            if _supports_ax_press(self._quartz):
+                _perform_ax_action(
+                    self._quartz,
+                    resolved["element"],
+                    getattr(self._quartz, "kAXPressAction", "AXPress"),
+                )
+            return self._post_text(request.text, target=descriptor)
         if not _supports_text_input(self._quartz):
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        return self._post_text(request.text)
 
-        for character in request.text:
-            down = self._quartz.CGEventCreateKeyboardEvent(None, 0, True)
-            up = self._quartz.CGEventCreateKeyboardEvent(None, 0, False)
-            self._quartz.CGEventKeyboardSetUnicodeString(down, len(character), character)
-            self._quartz.CGEventKeyboardSetUnicodeString(up, len(character), character)
-            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
-            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
-        return DesktopControlResult(ok=True)
+    async def launch_app(
+        self, request: DesktopLaunchAppRequest
+    ) -> DesktopControlResult:
+        if not _supports_open_command():
+            return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        command = ["open"]
+        if request.bundle_id:
+            command.extend(["-b", request.bundle_id])
+        elif request.app_name:
+            command.extend(["-a", request.app_name])
+        try:
+            self._open_runner(command)
+        except Exception as exc:
+            return DesktopControlResult(ok=False, error=f"launch failed: {exc}")
+
+        target = DesktopTargetDescriptor(
+            app_name=request.app_name or "",
+            identifier=request.bundle_id or "",
+        )
+        if request.wait_for_focus and request.app_name:
+            resolved = self._resolve_target_application(request.app_name)
+            if resolved is not None:
+                self._activate_application(*resolved)
+                target.app_name = resolved[0]
+        return DesktopControlResult(ok=True, target=target)
+
+    async def focus_window(
+        self, request: DesktopFocusWindowRequest
+    ) -> DesktopControlResult:
+        if not _supports_focus_window(self._quartz, self._appkit):
+            return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+
+        app_name_hint = request.app_name
+        if app_name_hint is None and (request.window_id or request.title):
+            inferred = self._window_owner_for_query(request.window_id, request.title)
+            if inferred is not None:
+                app_name_hint = inferred[0]
+
+        resolved = self._resolve_target_application(app_name_hint)
+        if resolved is None:
+            return DesktopControlResult(
+                ok=False,
+                error=f"desktop app not found: {app_name_hint or 'frontmost'}",
+            )
+        app_name, pid = resolved
+        ax_root = self._quartz.AXUIElementCreateApplication(pid)
+        window = self._resolve_window_element(
+            ax_root,
+            request.window_id,
+            request.title,
+        )
+        target = DesktopTargetDescriptor(app_name=app_name)
+        if window is not None:
+            target = self._descriptor_for_element(app_name, request.window_id, window)
+            _perform_ax_action(
+                self._quartz,
+                window,
+                getattr(self._quartz, "kAXRaiseAction", "AXRaise"),
+            )
+        elif request.window_id or request.title:
+            return DesktopControlResult(ok=False, error="desktop window not found")
+        self._activate_application(app_name, pid)
+        return DesktopControlResult(ok=True, target=target)
 
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
         if not _supports_hotkey(self._quartz):
@@ -277,6 +385,113 @@ class PyObjCDesktopClient(DesktopClient):
         self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
         return DesktopControlResult(ok=True)
 
+    def _post_click(
+        self,
+        *,
+        x: int,
+        y: int,
+        button: str,
+        click_count: int,
+        target: DesktopTargetDescriptor | None = None,
+    ) -> DesktopControlResult:
+        if not _supports_mouse_click(self._quartz):
+            return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+
+        event_down_type, event_up_type, mouse_button = _mouse_event_spec(
+            self._quartz,
+            button,
+        )
+        point = (x, y)
+        for _ in range(click_count):
+            down = self._quartz.CGEventCreateMouseEvent(
+                None,
+                event_down_type,
+                point,
+                mouse_button,
+            )
+            up = self._quartz.CGEventCreateMouseEvent(
+                None,
+                event_up_type,
+                point,
+                mouse_button,
+            )
+            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
+            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
+        return DesktopControlResult(ok=True, target=target)
+
+    def _post_text(
+        self,
+        text: str,
+        *,
+        target: DesktopTargetDescriptor | None = None,
+    ) -> DesktopControlResult:
+        if not _supports_text_input(self._quartz):
+            return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        for character in text:
+            down = self._quartz.CGEventCreateKeyboardEvent(None, 0, True)
+            up = self._quartz.CGEventCreateKeyboardEvent(None, 0, False)
+            self._quartz.CGEventKeyboardSetUnicodeString(down, len(character), character)
+            self._quartz.CGEventKeyboardSetUnicodeString(up, len(character), character)
+            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
+            self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
+        return DesktopControlResult(ok=True, target=target)
+
+    def _activate_application(self, app_name: str, pid: int) -> None:
+        if self._appkit is None:
+            return
+        workspace = self._appkit.NSWorkspace.sharedWorkspace()
+        for app in workspace.runningApplications() or []:
+            name_getter = getattr(app, "localizedName", None)
+            pid_getter = getattr(app, "processIdentifier", None)
+            candidate_name = name_getter() if callable(name_getter) else ""
+            candidate_pid = pid_getter() if callable(pid_getter) else None
+            if int(candidate_pid or -1) != pid:
+                continue
+            activator = getattr(app, "activateWithOptions_", None)
+            if callable(activator):
+                activator(0)
+            return
+
+    def _resolve_element_target(
+        self,
+        selector: DesktopElementSelector,
+    ) -> dict[str, Any] | None:
+        if not _supports_ax_snapshot(self._quartz, self._appkit):
+            return None
+        app_name_hint = selector.app_name
+        window_id = selector.window_id
+        if app_name_hint is None and (selector.window_id or selector.title):
+            inferred = self._window_owner_for_query(selector.window_id, selector.title)
+            if inferred is not None:
+                app_name_hint = inferred[0]
+                window_id = inferred[1] or window_id
+
+        resolved = self._resolve_target_application(app_name_hint)
+        if resolved is None:
+            return None
+        app_name, pid = resolved
+        ax_root = self._quartz.AXUIElementCreateApplication(pid)
+        search_root = ax_root
+        if window_id or selector.title:
+            window = self._resolve_window_element(ax_root, window_id, selector.title)
+            if window is None:
+                return None
+            search_root = window
+            if window_id is None:
+                window_id = self._window_id_for_title(app_name, selector.title)
+
+        matches: list[Any] = []
+        self._collect_matching_elements(search_root, selector, matches, depth=0, max_depth=5)
+        if not matches:
+            return None
+        index = min(selector.index, len(matches) - 1)
+        return {
+            "app_name": app_name,
+            "pid": pid,
+            "window_id": window_id or "",
+            "element": matches[index],
+        }
+
     def _resolve_target_application(
         self,
         requested_app_name: str | None,
@@ -306,16 +521,22 @@ class PyObjCDesktopClient(DesktopClient):
             return None
         return (str(app_name or ""), int(pid))
 
-    def _resolve_window_element(self, ax_root: Any, window_id: str) -> Any | None:
+    def _resolve_window_element(
+        self,
+        ax_root: Any,
+        window_id: str | None,
+        title: str | None = None,
+    ) -> Any | None:
         if self._quartz is None:
-            return None
-        target_title = self._window_title_for_id(window_id)
-        if not target_title:
             return None
         windows = _ax_value(self._quartz, ax_root, self._quartz.kAXWindowsAttribute) or []
         for window in windows:
-            title = _ax_value(self._quartz, window, self._quartz.kAXTitleAttribute)
-            if str(title or "") == target_title:
+            window_title = _ax_value(self._quartz, window, self._quartz.kAXTitleAttribute)
+            if window_id:
+                target_title = self._window_title_for_id(window_id)
+                if target_title and str(window_title or "") == target_title:
+                    return window
+            if title and str(window_title or "") == str(title):
                 return window
         return None
 
@@ -332,6 +553,102 @@ class PyObjCDesktopClient(DesktopClient):
                 title = item.get("kCGWindowName", item.get("CGWindowName", ""))
                 return str(title or "")
         return None
+
+    def _window_id_for_title(self, app_name: str, title: str | None) -> str | None:
+        if self._quartz is None or not title:
+            return None
+        raw_windows = self._quartz.CGWindowListCopyWindowInfo(
+            getattr(self._quartz, "kCGWindowListOptionAll", 0),
+            getattr(self._quartz, "kCGNullWindowID", 0),
+        )
+        for item in raw_windows or []:
+            candidate_title = item.get("kCGWindowName", item.get("CGWindowName", ""))
+            candidate_app = item.get("kCGWindowOwnerName", item.get("CGWindowOwnerName", ""))
+            if str(candidate_title or "") != str(title):
+                continue
+            if app_name and str(candidate_app or "") != str(app_name):
+                continue
+            candidate_id = item.get("kCGWindowNumber", item.get("CGWindowNumber"))
+            return str(candidate_id)
+        return None
+
+    def _window_owner_for_query(
+        self,
+        window_id: str | None,
+        title: str | None,
+    ) -> tuple[str, str | None] | None:
+        if self._quartz is None or (window_id is None and title is None):
+            return None
+        raw_windows = self._quartz.CGWindowListCopyWindowInfo(
+            getattr(self._quartz, "kCGWindowListOptionAll", 0),
+            getattr(self._quartz, "kCGNullWindowID", 0),
+        )
+        for item in raw_windows or []:
+            candidate_id = item.get("kCGWindowNumber", item.get("CGWindowNumber"))
+            candidate_title = item.get("kCGWindowName", item.get("CGWindowName", ""))
+            if window_id is not None and str(candidate_id) != str(window_id):
+                continue
+            if title is not None and str(candidate_title or "") != str(title):
+                continue
+            candidate_app = item.get("kCGWindowOwnerName", item.get("CGWindowOwnerName", ""))
+            return str(candidate_app or ""), str(candidate_id) if candidate_id is not None else None
+        return None
+
+    def _descriptor_for_element(
+        self,
+        app_name: str,
+        window_id: str | None,
+        element: Any,
+    ) -> DesktopTargetDescriptor:
+        title = _stringify_ax_value(
+            _ax_value(self._quartz, element, self._quartz.kAXTitleAttribute)
+        ) if self._quartz is not None else ""
+        role = _stringify_ax_value(
+            _ax_value(self._quartz, element, self._quartz.kAXRoleAttribute)
+        ) if self._quartz is not None else ""
+        identifier = _stringify_ax_value(
+            _ax_value(
+                self._quartz,
+                element,
+                getattr(self._quartz, "kAXIdentifierAttribute", "AXIdentifier"),
+            )
+        ) if self._quartz is not None else ""
+        bounds = _ax_bounds(self._quartz, element)
+        return DesktopTargetDescriptor(
+            app_name=app_name,
+            window_id=window_id or "",
+            role=str(role or ""),
+            title=str(title or ""),
+            identifier=str(identifier or ""),
+            bounds=bounds,
+        )
+
+    def _collect_matching_elements(
+        self,
+        element: Any,
+        selector: DesktopElementSelector,
+        matches: list[Any],
+        *,
+        depth: int,
+        max_depth: int,
+    ) -> None:
+        if self._quartz is None:
+            return
+        if _element_matches(self._quartz, element, selector):
+            matches.append(element)
+        if depth >= max_depth:
+            return
+        children = _ax_value(self._quartz, element, self._quartz.kAXChildrenAttribute) or []
+        if not isinstance(children, (list, tuple)):
+            children = [children]
+        for child in children[:50]:
+            self._collect_matching_elements(
+                child,
+                selector,
+                matches,
+                depth=depth + 1,
+                max_depth=max_depth,
+            )
 
     def _serialize_ax_element(self, element: Any, *, depth: int, max_depth: int) -> dict[str, Any]:
         if self._quartz is None:
@@ -377,6 +694,15 @@ def _default_screenshot_runner(path: str) -> None:
     )
 
 
+def _default_open_runner(args: list[str]) -> None:
+    subprocess.run(
+        args,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+
+
 def _make_temp_screenshot_path() -> str:
     fd, path = tempfile.mkstemp(prefix="boiled-claw-desktop-", suffix=".png")
     Path(path).unlink(missing_ok=True)
@@ -404,6 +730,17 @@ def _supports_ax_snapshot(quartz_module: Any | None, appkit_module: Any | None) 
     )
 
 
+def _supports_open_command() -> bool:
+    return shutil.which("open") is not None
+
+
+def _supports_focus_window(quartz_module: Any | None, appkit_module: Any | None) -> bool:
+    return _supports_ax_snapshot(quartz_module, appkit_module) and hasattr(
+        quartz_module,
+        "AXUIElementPerformAction",
+    )
+
+
 def _supports_mouse_click(quartz_module: Any | None) -> bool:
     return (
         quartz_module is not None
@@ -425,6 +762,14 @@ def _supports_text_input(quartz_module: Any | None) -> bool:
 
 def _supports_hotkey(quartz_module: Any | None) -> bool:
     return _supports_text_input(quartz_module) and hasattr(quartz_module, "CGEventSetFlags")
+
+
+def _supports_ax_press(quartz_module: Any | None) -> bool:
+    return quartz_module is not None and hasattr(quartz_module, "AXUIElementPerformAction")
+
+
+def _supports_ax_set_value(quartz_module: Any | None) -> bool:
+    return quartz_module is not None and hasattr(quartz_module, "AXUIElementSetAttributeValue")
 
 
 def _mouse_event_spec(quartz_module: Any, button: str) -> tuple[int, int, int]:
@@ -466,6 +811,36 @@ def _ax_value(quartz_module: Any, element: Any, attribute: str) -> Any:
     return raw
 
 
+def _perform_ax_action(quartz_module: Any | None, element: Any, action: str) -> bool:
+    if quartz_module is None:
+        return False
+    performer = getattr(quartz_module, "AXUIElementPerformAction", None)
+    if not callable(performer):
+        return False
+    try:
+        raw = performer(element, action)
+    except Exception:
+        return False
+    if isinstance(raw, tuple):
+        return not raw or raw[0] in (0, None)
+    return raw in (0, None, True)
+
+
+def _set_ax_value(quartz_module: Any | None, element: Any, attribute: str, value: Any) -> bool:
+    if quartz_module is None:
+        return False
+    setter = getattr(quartz_module, "AXUIElementSetAttributeValue", None)
+    if not callable(setter):
+        return False
+    try:
+        raw = setter(element, attribute, value)
+    except Exception:
+        return False
+    if isinstance(raw, tuple):
+        return not raw or raw[0] in (0, None)
+    return raw in (0, None, True)
+
+
 def _stringify_ax_value(value: Any) -> Any:
     if isinstance(value, (str, int, float, bool)) or value is None:
         return value
@@ -474,6 +849,71 @@ def _stringify_ax_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _stringify_ax_value(val) for key, val in value.items()}
     return str(value)
+
+
+def _ax_bounds(quartz_module: Any | None, element: Any) -> DesktopWindowBounds:
+    if quartz_module is None:
+        return DesktopWindowBounds()
+    position = _ax_value(
+        quartz_module,
+        element,
+        getattr(quartz_module, "kAXPositionAttribute", "AXPosition"),
+    )
+    size = _ax_value(
+        quartz_module,
+        element,
+        getattr(quartz_module, "kAXSizeAttribute", "AXSize"),
+    )
+    pos = _coerce_point(position)
+    dim = _coerce_point(size)
+    return DesktopWindowBounds(
+        x=pos[0],
+        y=pos[1],
+        width=dim[0],
+        height=dim[1],
+    )
+
+
+def _descriptor_center(descriptor: DesktopTargetDescriptor) -> tuple[int, int] | None:
+    if descriptor.bounds.width <= 0 or descriptor.bounds.height <= 0:
+        return None
+    return (
+        descriptor.bounds.x + descriptor.bounds.width // 2,
+        descriptor.bounds.y + descriptor.bounds.height // 2,
+    )
+
+
+def _coerce_point(value: Any) -> tuple[int, int]:
+    if isinstance(value, dict):
+        return (int(value.get("x", 0) or 0), int(value.get("y", 0) or 0))
+    if isinstance(value, (list, tuple)) and len(value) >= 2:
+        return (int(value[0] or 0), int(value[1] or 0))
+    return (0, 0)
+
+
+def _element_matches(quartz_module: Any, element: Any, selector: DesktopElementSelector) -> bool:
+    role = str(_ax_value(quartz_module, element, quartz_module.kAXRoleAttribute) or "")
+    title = str(_ax_value(quartz_module, element, quartz_module.kAXTitleAttribute) or "")
+    identifier = str(
+        _ax_value(
+            quartz_module,
+            element,
+            getattr(quartz_module, "kAXIdentifierAttribute", "AXIdentifier"),
+        )
+        or ""
+    )
+    value = str(_stringify_ax_value(_ax_value(quartz_module, element, quartz_module.kAXValueAttribute)) or "")
+    if selector.role and role != selector.role:
+        return False
+    if selector.title and selector.title not in title:
+        return False
+    if selector.identifier and selector.identifier != identifier:
+        return False
+    if selector.value_contains and selector.value_contains not in value:
+        return False
+    if not any((selector.role, selector.title, selector.identifier, selector.value_contains, selector.window_id)):
+        return False
+    return True
 
 
 def _set_event_flags(quartz_module: Any, event: Any, flags: int) -> None:

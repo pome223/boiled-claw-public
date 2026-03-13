@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from src.bridges.host_bridge_schema import (
     BridgePingResult,
@@ -26,9 +26,44 @@ class DesktopRequestBase(BaseModel):
     approval_token: Optional[str] = None
 
 
+class DesktopWindowBounds(BaseModel):
+    x: int = 0
+    y: int = 0
+    width: int = 0
+    height: int = 0
+
+
+class DesktopElementSelector(BaseModel):
+    app_name: Optional[str] = None
+    window_id: Optional[str] = None
+    role: Optional[str] = None
+    title: Optional[str] = None
+    identifier: Optional[str] = None
+    value_contains: Optional[str] = None
+    index: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def validate_selector(self) -> "DesktopElementSelector":
+        if any((self.role, self.title, self.identifier, self.value_contains, self.window_id)):
+            return self
+        raise ValueError(
+            "desktop selector requires role, title, identifier, value_contains, or window_id"
+        )
+
+
+class DesktopTargetDescriptor(BaseModel):
+    app_name: str = ""
+    window_id: str = ""
+    role: str = ""
+    title: str = ""
+    identifier: str = ""
+    bounds: DesktopWindowBounds = Field(default_factory=DesktopWindowBounds)
+
+
 class DesktopControlResult(BaseModel):
     ok: bool
     error: Optional[str] = None
+    target: Optional[DesktopTargetDescriptor] = None
 
 
 class DesktopScreenshotRequest(DesktopRequestBase):
@@ -41,13 +76,6 @@ class DesktopScreenshotResult(BaseModel):
     width: int = 0
     height: int = 0
     error: Optional[str] = None
-
-
-class DesktopWindowBounds(BaseModel):
-    x: int = 0
-    y: int = 0
-    width: int = 0
-    height: int = 0
 
 
 class DesktopWindowDescriptor(BaseModel):
@@ -89,15 +117,49 @@ class DesktopAxSnapshotResult(BaseModel):
     error: Optional[str] = None
 
 
+class DesktopLaunchAppRequest(DesktopRequestBase):
+    app_name: Optional[str] = None
+    bundle_id: Optional[str] = None
+    wait_for_focus: bool = True
+
+    @model_validator(mode="after")
+    def validate_launch_target(self) -> "DesktopLaunchAppRequest":
+        if self.app_name or self.bundle_id:
+            return self
+        raise ValueError("desktop launch requires app_name or bundle_id")
+
+
+class DesktopFocusWindowRequest(DesktopRequestBase):
+    app_name: Optional[str] = None
+    window_id: Optional[str] = None
+    title: Optional[str] = None
+
+    @model_validator(mode="after")
+    def validate_focus_target(self) -> "DesktopFocusWindowRequest":
+        if self.app_name or self.window_id or self.title:
+            return self
+        raise ValueError("desktop focus requires app_name, window_id, or title")
+
+
 class DesktopClickRequest(DesktopRequestBase):
-    x: int
-    y: int
+    x: Optional[int] = None
+    y: Optional[int] = None
     button: Literal["left", "right", "middle"] = "left"
     click_count: int = Field(default=1, ge=1, le=4)
+    target: Optional[DesktopElementSelector] = None
+
+    @model_validator(mode="after")
+    def validate_click_target(self) -> "DesktopClickRequest":
+        if self.target is not None:
+            return self
+        if self.x is not None and self.y is not None:
+            return self
+        raise ValueError("desktop click requires coordinates or a selector target")
 
 
 class DesktopTypeRequest(DesktopRequestBase):
     text: str = Field(min_length=1)
+    target: Optional[DesktopElementSelector] = None
 
 
 class DesktopHotkeyRequest(DesktopRequestBase):
@@ -116,6 +178,8 @@ __all__ = [
     "CapabilityDescriptor",
     "CapabilityListResult",
     "DesktopRequestBase",
+    "DesktopElementSelector",
+    "DesktopTargetDescriptor",
     "DesktopControlResult",
     "DesktopScreenshotRequest",
     "DesktopScreenshotResult",
@@ -127,6 +191,8 @@ __all__ = [
     "DesktopFrontmostAppResult",
     "DesktopAxSnapshotRequest",
     "DesktopAxSnapshotResult",
+    "DesktopLaunchAppRequest",
+    "DesktopFocusWindowRequest",
     "DesktopClickRequest",
     "DesktopTypeRequest",
     "DesktopHotkeyRequest",

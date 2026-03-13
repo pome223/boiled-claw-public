@@ -47,6 +47,8 @@ click / type / drag のような操作は別 capability として扱う。
 
 ### Desktop control
 
+- `desktop.control.launch_app`
+- `desktop.control.focus_window`
 - `desktop.control.click`
 - `desktop.control.type`
 - `desktop.control.hotkey`
@@ -76,6 +78,18 @@ v1 では、desktop tool は以下のどちらかを返す。
 - 実装済み capability: `ok=true`
 - 未実装 capability: `ok=false`, `error="not implemented"`
 
+`desktop.control.click` と `desktop.control.type` は、
+単純な座標入力に加えて Accessibility selector による targeting を許可する。
+selector は次の scoping / matching field を持てる。
+
+- `app_name`
+- `window_id`
+- `role`
+- `title`
+- `identifier`
+- `value_contains`
+- `index`
+
 これにより、Gateway や routing 側は capability を先に認識できる一方、
 実装済みと誤解して危険な操作を進めることを防ぐ。
 
@@ -89,6 +103,8 @@ v1 では、desktop tool は以下のどちらかを返す。
 - `desktop.view.frontmost_app`: low
 - `desktop.view.screenshot`: medium
 - `desktop.ax.snapshot`: medium
+- `desktop.control.launch_app`: high
+- `desktop.control.focus_window`: high
 - `desktop.control.*`: high
 
 推奨 approval:
@@ -100,11 +116,10 @@ v1 では、desktop tool は以下のどちらかを返す。
 
 ## Non-Goals for v1
 
-- 完全な macOS Accessibility API 実装
 - 高精度な ScreenCaptureKit 実装
-- pointer / keyboard injection 実装
 - window move / resize 実装
 - image understanding / OCR
 - Gateway との実運用接続
 
-v1 では view 系 capability を先行導入し、control 系は未実装のまま残してよい。
+v1 では low-level desktop primitives を先に実装し、
+より高次の semantic targeting / OCR / vision-guided automation は後続フェーズに回す。

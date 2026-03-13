@@ -13,8 +13,11 @@ from src.config.settings import get_settings
 from src.desktop import (
     DesktopAxSnapshotRequest,
     DesktopClickRequest,
+    DesktopElementSelector,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
+    DesktopLaunchAppRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
     DesktopDragRequest,
@@ -80,6 +83,29 @@ def _executor_metadata() -> dict[str, Any]:
     return {
         "executor": "desktop_bridge" if settings.desktop_bridge_enabled else "local_desktop",
     }
+
+
+def _selector_from_fields(
+    *,
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+    index: int = 0,
+) -> DesktopElementSelector | None:
+    if not any((window_id, role, title, identifier, value_contains)):
+        return None
+    return DesktopElementSelector(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+    )
 
 
 async def desktop_view_windows(
@@ -314,15 +340,37 @@ async def desktop_ax_snapshot(
 
 
 async def desktop_control_click(
-    x: int,
-    y: int,
+    x: Optional[int] = None,
+    y: Optional[int] = None,
     button: str = "left",
     click_count: int = 1,
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+    index: int = 0,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
+    selector = _selector_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+    )
     approval_error, approval_token = await _check_desktop_policy(
         "desktop_control_click",
-        {"x": x, "y": y, "button": button, "click_count": click_count},
+        {
+            "x": x,
+            "y": y,
+            "button": button,
+            "click_count": click_count,
+            "selector": selector.model_dump(exclude_none=True) if selector else None,
+        },
         tool_context,
     )
     if approval_error:
@@ -339,11 +387,18 @@ async def desktop_control_click(
         y=y,
         button=button,
         click_count=click_count,
+        target=selector,
     )
     result, payload = await execute_desktop_call(
         request=request,
         tool_name="desktop.control.click",
-        args={"x": x, "y": y, "button": button, "click_count": click_count},
+        args={
+            "x": x,
+            "y": y,
+            "button": button,
+            "click_count": click_count,
+            "selector": selector.model_dump(exclude_none=True) if selector else None,
+        },
         get_client=get_desktop_client,
         invoke=lambda client, req: client.click(req),
         ok_getter=lambda result: result.ok,
@@ -363,6 +418,7 @@ async def desktop_control_click(
                 "approval_token": approval_token,
                 "button": button,
                 "click_count": click_count,
+                "selector": selector.model_dump(exclude_none=True) if selector else None,
             },
             tool_context=tool_context,
         )
@@ -379,19 +435,42 @@ async def desktop_control_click(
             "approval_token": approval_token,
             "button": button,
             "click_count": click_count,
+            "selector": selector.model_dump(exclude_none=True) if selector else None,
         },
         tool_context=tool_context,
     )
-    return {"success": True}
+    return {
+        "success": True,
+        "target": result.target.model_dump() if result.target else None,
+    }
 
 
 async def desktop_control_type(
     text: str,
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+    index: int = 0,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
+    selector = _selector_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+    )
     approval_error, approval_token = await _check_desktop_policy(
         "desktop_control_type",
-        {"text": text},
+        {
+            "text": text,
+            "selector": selector.model_dump(exclude_none=True) if selector else None,
+        },
         tool_context,
     )
     if approval_error:
@@ -405,11 +484,15 @@ async def desktop_control_type(
         agent_name=ctx.get("agent_name") or "unknown_agent",
         approval_token=approval_token,
         text=text,
+        target=selector,
     )
     result, payload = await execute_desktop_call(
         request=request,
         tool_name="desktop.control.type",
-        args={"text": text},
+        args={
+            "text": text,
+            "selector": selector.model_dump(exclude_none=True) if selector else None,
+        },
         get_client=get_desktop_client,
         invoke=lambda client, req: client.type_text(req),
         ok_getter=lambda result: result.ok,
@@ -428,6 +511,7 @@ async def desktop_control_type(
                 "request_id": request.request_id,
                 "approval_token": approval_token,
                 "length": len(text),
+                "selector": selector.model_dump(exclude_none=True) if selector else None,
             },
             tool_context=tool_context,
         )
@@ -443,10 +527,162 @@ async def desktop_control_type(
             "request_id": request.request_id,
             "approval_token": approval_token,
             "length": len(text),
+            "selector": selector.model_dump(exclude_none=True) if selector else None,
         },
         tool_context=tool_context,
     )
-    return {"success": True}
+    return {
+        "success": True,
+        "target": result.target.model_dump() if result.target else None,
+    }
+
+
+async def desktop_control_launch_app(
+    app_name: Optional[str] = None,
+    bundle_id: Optional[str] = None,
+    wait_for_focus: bool = True,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    approval_error, approval_token = await _check_desktop_policy(
+        "desktop_control_launch_app",
+        {
+            "app_name": app_name,
+            "bundle_id": bundle_id,
+            "wait_for_focus": wait_for_focus,
+        },
+        tool_context,
+    )
+    if approval_error:
+        return {"error": approval_error}
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopLaunchAppRequest(
+        request_id=f"desktop-launch-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+        app_name=app_name,
+        bundle_id=bundle_id,
+        wait_for_focus=wait_for_focus,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.control.launch_app",
+        args={
+            "app_name": app_name,
+            "bundle_id": bundle_id,
+            "wait_for_focus": wait_for_focus,
+        },
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.launch_app(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop launch failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_CONTROL,
+            action="launch_app",
+            resource=app_name or bundle_id or "desktop",
+            result=error,
+            metadata={
+                **_executor_metadata(),
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+                "wait_for_focus": wait_for_focus,
+            },
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_CONTROL,
+        action="launch_app",
+        resource=app_name or bundle_id or "desktop",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "approval_token": approval_token,
+            "wait_for_focus": wait_for_focus,
+        },
+        tool_context=tool_context,
+    )
+    return {
+        "success": True,
+        "target": result.target.model_dump() if result.target else None,
+    }
+
+
+async def desktop_control_focus_window(
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    title: Optional[str] = None,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    approval_error, approval_token = await _check_desktop_policy(
+        "desktop_control_focus_window",
+        {"app_name": app_name, "window_id": window_id, "title": title},
+        tool_context,
+    )
+    if approval_error:
+        return {"error": approval_error}
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopFocusWindowRequest(
+        request_id=f"desktop-focus-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+        app_name=app_name,
+        window_id=window_id,
+        title=title,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.control.focus_window",
+        args={"app_name": app_name, "window_id": window_id, "title": title},
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.focus_window(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop focus failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_CONTROL,
+            action="focus_window",
+            resource=title or window_id or app_name or "desktop",
+            result=error,
+            metadata={
+                **_executor_metadata(),
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+            },
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_CONTROL,
+        action="focus_window",
+        resource=title or window_id or app_name or "desktop",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "approval_token": approval_token,
+        },
+        tool_context=tool_context,
+    )
+    return {
+        "success": True,
+        "target": result.target.model_dump() if result.target else None,
+    }
 
 
 async def desktop_control_hotkey(

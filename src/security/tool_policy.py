@@ -70,6 +70,8 @@ _DEFAULT_RULES: List[ToolRule] = [
     ToolRule("desktop_view_screenshot", "approve", "desktop screenshots need approval"),
     ToolRule("desktop_ax_snapshot", "approve", "accessibility snapshots need approval"),
     ToolRule("desktop_control_*", "approve", "desktop control needs approval"),
+    ToolRule("desktop_control_launch_app", "approve", "desktop app launch needs approval"),
+    ToolRule("desktop_control_focus_window", "approve", "desktop focus changes need approval"),
     ToolRule("stock_price", "allow", "stock price lookup is safe"),
     ToolRule("subagents_*", "approve", "subagent operations need approval"),
     ToolRule("sessions_*", "approve", "session operations need approval"),

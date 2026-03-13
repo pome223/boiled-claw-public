@@ -21,8 +21,11 @@ from src.desktop import (
     DesktopClient,
     DesktopClickRequest,
     DesktopDragRequest,
+    DesktopElementSelector,
+    DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
+    DesktopLaunchAppRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
     DesktopWindowsRequest,
@@ -145,16 +148,45 @@ def create_server(
         )
         return (await client.ax_snapshot(request)).model_dump()
 
+    def _selector(
+        *,
+        app_name: Optional[str] = None,
+        window_id: Optional[str] = None,
+        role: Optional[str] = None,
+        title: Optional[str] = None,
+        identifier: Optional[str] = None,
+        value_contains: Optional[str] = None,
+        index: int = 0,
+    ) -> Optional[DesktopElementSelector]:
+        if not any((window_id, role, title, identifier, value_contains)):
+            return None
+        return DesktopElementSelector(
+            app_name=app_name,
+            window_id=window_id,
+            role=role,
+            title=title,
+            identifier=identifier,
+            value_contains=value_contains,
+            index=index,
+        )
+
     @mcp.tool(name="desktop.control.click", description="Click on the host desktop.")
     async def desktop_control_click(
         request_id: str,
         session_id: str,
         user_id: str,
         agent_name: str,
-        x: int,
-        y: int,
+        x: Optional[int] = None,
+        y: Optional[int] = None,
         button: str = "left",
         click_count: int = 1,
+        app_name: Optional[str] = None,
+        window_id: Optional[str] = None,
+        role: Optional[str] = None,
+        title: Optional[str] = None,
+        identifier: Optional[str] = None,
+        value_contains: Optional[str] = None,
+        index: int = 0,
         approval_token: Optional[str] = None,
     ) -> dict:
         request = DesktopClickRequest(
@@ -167,6 +199,15 @@ def create_server(
             y=y,
             button=button,
             click_count=click_count,
+            target=_selector(
+                app_name=app_name,
+                window_id=window_id,
+                role=role,
+                title=title,
+                identifier=identifier,
+                value_contains=value_contains,
+                index=index,
+            ),
         )
         return (await client.click(request)).model_dump()
 
@@ -177,6 +218,13 @@ def create_server(
         user_id: str,
         agent_name: str,
         text: str,
+        app_name: Optional[str] = None,
+        window_id: Optional[str] = None,
+        role: Optional[str] = None,
+        title: Optional[str] = None,
+        identifier: Optional[str] = None,
+        value_contains: Optional[str] = None,
+        index: int = 0,
         approval_token: Optional[str] = None,
     ) -> dict:
         request = DesktopTypeRequest(
@@ -186,8 +234,66 @@ def create_server(
             agent_name=agent_name,
             approval_token=approval_token,
             text=text,
+            target=_selector(
+                app_name=app_name,
+                window_id=window_id,
+                role=role,
+                title=title,
+                identifier=identifier,
+                value_contains=value_contains,
+                index=index,
+            ),
         )
         return (await client.type_text(request)).model_dump()
+
+    @mcp.tool(name="desktop.control.launch_app", description="Launch an app on the host desktop.")
+    async def desktop_control_launch_app(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        app_name: Optional[str] = None,
+        bundle_id: Optional[str] = None,
+        wait_for_focus: bool = True,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopLaunchAppRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            app_name=app_name,
+            bundle_id=bundle_id,
+            wait_for_focus=wait_for_focus,
+        )
+        return (await client.launch_app(request)).model_dump()
+
+    @mcp.tool(
+        name="desktop.control.focus_window",
+        description="Focus an app or window on the host desktop.",
+    )
+    async def desktop_control_focus_window(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        app_name: Optional[str] = None,
+        window_id: Optional[str] = None,
+        title: Optional[str] = None,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopFocusWindowRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            app_name=app_name,
+            window_id=window_id,
+            title=title,
+        )
+        return (await client.focus_window(request)).model_dump()
 
     @mcp.tool(name="desktop.control.hotkey", description="Send a hotkey to the host desktop.")
     async def desktop_control_hotkey(

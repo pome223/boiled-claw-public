@@ -211,6 +211,55 @@ async def test_guarded_desktop_control_click_requires_human_approved():
         )
 
 
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_launch_app_requires_human_approved():
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.launch_app"}]
+            },
+        }
+    )
+
+    with pytest.raises(PermissionError, match="human_approved"):
+        await guarded_tools_module.guarded_desktop_control_launch_app(
+            app_name="Safari",
+            tool_context=tool_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_type_passes_selector(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.type"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_type(**kwargs):
+        seen.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_control_type", _fake_type)
+
+    result = await guarded_tools_module.guarded_desktop_control_type(
+        text="hello",
+        app_name="Safari",
+        window_id="w1",
+        role="AXTextField",
+        identifier="search-field",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["identifier"] == "search-field"
+
+
 def test_policy_judge_requires_human_for_desktop_control():
     callback_context = SimpleNamespace(
         state={

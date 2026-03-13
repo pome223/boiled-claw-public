@@ -39,6 +39,8 @@ _HUMAN_REQUIRED_CAPS: set[str] = {
     "desktop.ax.snapshot",
     "desktop.control.click",
     "desktop.control.type",
+    "desktop.control.launch_app",
+    "desktop.control.focus_window",
     "desktop.control.hotkey",
     "desktop.control.drag",
 }

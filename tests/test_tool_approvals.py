@@ -560,3 +560,88 @@ async def test_desktop_drag_waits_for_approval(monkeypatch):
 
     assert result["success"] is True
     assert seen["approval_token"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_click_selector_passes_target(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeDesktopClient:
+        async def click(self, request):
+            seen["target"] = request.target.model_dump()
+            return DesktopControlResult(ok=True)
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(desktop_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=True),
+    )
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_control_click(
+        app_name="Safari",
+        window_id="w1",
+        role="AXButton",
+        identifier="open-button",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["target"]["identifier"] == "open-button"
+
+
+@pytest.mark.asyncio
+async def test_desktop_launch_and_focus_wait_for_approval(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeDesktopClient:
+        async def launch_app(self, request):
+            seen["launch_token"] = request.approval_token
+            return DesktopControlResult(ok=True)
+
+        async def focus_window(self, request):
+            seen["focus_token"] = request.approval_token
+            return DesktopControlResult(ok=True)
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(desktop_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=True),
+    )
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    launch = await desktop_module.desktop_control_launch_app(
+        app_name="Safari",
+        tool_context=tool_context,
+    )
+    focus = await desktop_module.desktop_control_focus_window(
+        window_id="w1",
+        tool_context=tool_context,
+    )
+
+    assert launch["success"] is True
+    assert focus["success"] is True
+    assert seen["launch_token"]
+    assert seen["focus_token"]
