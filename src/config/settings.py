@@ -90,6 +90,24 @@ class Settings(BaseSettings):
         description="SSE read timeout for Host Bridge MCP connection",
     )
 
+    # Desktop Bridge settings
+    desktop_bridge_enabled: bool = Field(
+        default=False,
+        description="Enable Desktop Bridge execution",
+    )
+    desktop_bridge_url: Optional[str] = Field(
+        default=None,
+        description="Desktop Bridge MCP SSE endpoint URL",
+    )
+    desktop_bridge_timeout_seconds: int = Field(
+        default=5,
+        description="HTTP timeout for Desktop Bridge MCP connection",
+    )
+    desktop_bridge_sse_read_timeout_seconds: int = Field(
+        default=300,
+        description="SSE read timeout for Desktop Bridge MCP connection",
+    )
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # ディレクトリ作成

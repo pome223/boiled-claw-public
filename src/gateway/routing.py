@@ -9,6 +9,7 @@ VALID_SPECIALISTS = {
     "web_researcher",
     "file_manager",
     "browser_automator",
+    "desktop_operator",
     "system_operator",
     "memory_keeper",
 }
@@ -54,6 +55,19 @@ _LONGFORM_KEYWORDS = {
     "多面的",
 }
 
+_SEQUENCE_KEYWORDS = {
+    "その後",
+    "してから",
+    "次に",
+    "順番に",
+    "手順",
+    "step by step",
+    "multi-step",
+    "verify",
+    "検証",
+    "確認しながら",
+}
+
 _BROWSER_KEYWORDS = {
     "url",
     "http://",
@@ -66,6 +80,53 @@ _BROWSER_KEYWORDS = {
     "抽出",
     "navigate",
     "browse",
+}
+
+_DESKTOP_VIEW_KEYWORDS = {
+    "画面",
+    "スクリーン",
+    "スクショ",
+    "スクリーンショット",
+    "ウィンドウ",
+    "前面アプリ",
+    "待って",
+    "wait",
+    "出るまで",
+    "現れるまで",
+    "frontmost",
+    "window",
+    "screen",
+    "desktop",
+}
+
+_DESKTOP_CONTROL_KEYWORDS = {
+    "クリック",
+    "click",
+    "drag",
+    "ドラッグ",
+    "type",
+    "入力",
+    "打って",
+    "押して",
+    "scroll",
+    "スクロール",
+    "hotkey",
+    "ショートカット",
+    "起動",
+    "開いて",
+    "アプリを開いて",
+    "切り替えて",
+    "focus",
+    "フォーカス",
+}
+
+_DESKTOP_RUNTIME_KEYWORDS = {
+    "停止",
+    "止めて",
+    "emergency stop",
+    "panic",
+    "abort desktop",
+    "abort gui",
 }
 
 _FILE_KEYWORDS = {
@@ -210,7 +271,11 @@ def heuristic_decision(message: str) -> RoutingDecision:
 
     has_research = _contains_any(normalized, _RESEARCH_KEYWORDS)
     has_longform = _contains_any(normalized, _LONGFORM_KEYWORDS)
+    has_sequence = _contains_any(normalized, _SEQUENCE_KEYWORDS)
     has_browser = _contains_any(normalized, _BROWSER_KEYWORDS)
+    has_desktop_view = _contains_any(normalized, _DESKTOP_VIEW_KEYWORDS)
+    has_desktop_control = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS)
+    has_desktop_runtime = _contains_any(normalized, _DESKTOP_RUNTIME_KEYWORDS)
     has_file = _contains_any(normalized, _FILE_KEYWORDS)
     has_system = _contains_any(normalized, _SYSTEM_KEYWORDS)
     has_memory = _contains_any(normalized, _MEMORY_KEYWORDS)
@@ -229,6 +294,40 @@ def heuristic_decision(message: str) -> RoutingDecision:
             target="control_loop",
             reason="latest or research-heavy request with long-form output",
             confidence=0.82,
+        )
+
+    if has_desktop_runtime:
+        return RoutingDecision(
+            target="specialist",
+            specialist="desktop_operator",
+            handoff_mode="direct",
+            reason="desktop runtime safety request",
+            confidence=0.84,
+        )
+
+    if has_desktop_control and (has_sequence or has_longform):
+        return RoutingDecision(
+            target="control_loop",
+            reason="multi-step or verification-heavy desktop automation request",
+            confidence=0.86,
+        )
+
+    if has_desktop_control:
+        return RoutingDecision(
+            target="specialist",
+            specialist="desktop_operator",
+            handoff_mode="direct",
+            reason="desktop control request",
+            confidence=0.83,
+        )
+
+    if has_desktop_view:
+        return RoutingDecision(
+            target="specialist",
+            specialist="desktop_operator",
+            handoff_mode="preflight_then_root",
+            reason="desktop state inspection request",
+            confidence=0.8,
         )
 
     if has_browser:

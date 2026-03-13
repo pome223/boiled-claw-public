@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from src.desktop import FakeDesktopClient, DesktopWindowDescriptor
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -18,7 +20,7 @@ class TestDesktopBridgeTools:
     def mcp(self):
         from src.mcp_servers.desktop_bridge_server import create_server
 
-        return create_server()
+        return create_server(desktop_client=FakeDesktopClient())
 
     def _text(self, result) -> str:
         return "".join(c.text for c in result if hasattr(c, "text"))
@@ -30,13 +32,22 @@ class TestDesktopBridgeTools:
         assert names == {
             "ping",
             "capabilities.list",
+            "desktop.runtime.status",
+            "desktop.runtime.stop",
+            "desktop.runtime.clear_stop",
             "desktop.view.screenshot",
             "desktop.view.windows",
+            "desktop.wait.window",
             "desktop.view.frontmost_app",
+            "desktop.ax.find",
+            "desktop.wait.element",
             "desktop.ax.snapshot",
             "desktop.control.click",
             "desktop.control.type",
+            "desktop.control.launch_app",
+            "desktop.control.focus_window",
             "desktop.control.hotkey",
+            "desktop.control.scroll",
             "desktop.control.drag",
         }
 
@@ -44,6 +55,7 @@ class TestDesktopBridgeTools:
     async def test_capabilities_list(self, mcp):
         result = await mcp.call_tool("capabilities.list", {})
         text = self._text(result)
+        assert "desktop.ax.find" in text
         assert "desktop.view.screenshot" in text
         assert "desktop.control.click" in text
         assert '"implemented": false' in text.lower()
@@ -79,6 +91,170 @@ class TestDesktopBridgeTools:
         text = self._text(result)
         assert '"ok": false' in text.lower()
         assert "not implemented" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_server_uses_injected_desktop_client(self):
+        from src.mcp_servers.desktop_bridge_server import create_server
+
+        mcp = create_server(
+            desktop_client=FakeDesktopClient(
+                implemented={
+                    "desktop.ax.find",
+                    "desktop.wait.window",
+                    "desktop.wait.element",
+                    "desktop.control.scroll",
+                    "desktop.view.windows",
+                    "desktop.view.frontmost_app",
+                    "desktop.control.launch_app",
+                    "desktop.control.focus_window",
+                },
+                windows=[
+                    DesktopWindowDescriptor(
+                        window_id="w1",
+                        app_name="Safari",
+                        title="Injected",
+                    )
+                ],
+                frontmost_app_name="Safari",
+                frontmost_pid=42,
+            )
+        )
+
+        windows = await mcp.call_tool(
+            "desktop.view.windows",
+            {
+                "request_id": "req-injected-1",
+                "session_id": "sess-injected-1",
+                "user_id": "user-injected-1",
+                "agent_name": "pytest",
+            },
+        )
+        frontmost = await mcp.call_tool(
+            "desktop.view.frontmost_app",
+            {
+                "request_id": "req-injected-2",
+                "session_id": "sess-injected-2",
+                "user_id": "user-injected-2",
+                "agent_name": "pytest",
+            },
+        )
+        runtime_status = await mcp.call_tool(
+            "desktop.runtime.status",
+            {
+                "request_id": "req-runtime-status",
+                "session_id": "sess-runtime-status",
+                "user_id": "user-runtime-status",
+                "agent_name": "pytest",
+            },
+        )
+        runtime_stop = await mcp.call_tool(
+            "desktop.runtime.stop",
+            {
+                "request_id": "req-runtime-stop",
+                "session_id": "sess-runtime-stop",
+                "user_id": "user-runtime-stop",
+                "agent_name": "pytest",
+                "reason": "stop from test",
+            },
+        )
+        runtime_clear = await mcp.call_tool(
+            "desktop.runtime.clear_stop",
+            {
+                "request_id": "req-runtime-clear",
+                "session_id": "sess-runtime-clear",
+                "user_id": "user-runtime-clear",
+                "agent_name": "pytest",
+            },
+        )
+        found = await mcp.call_tool(
+            "desktop.ax.find",
+            {
+                "request_id": "req-injected-find",
+                "session_id": "sess-injected-find",
+                "user_id": "user-injected-find",
+                "agent_name": "pytest",
+                "window_id": "w1",
+                "title": "Injected",
+            },
+        )
+        waited_window = await mcp.call_tool(
+            "desktop.wait.window",
+            {
+                "request_id": "req-injected-wait-window",
+                "session_id": "sess-injected-wait-window",
+                "user_id": "user-injected-wait-window",
+                "agent_name": "pytest",
+                "window_id": "w1",
+            },
+        )
+        waited_element = await mcp.call_tool(
+            "desktop.wait.element",
+            {
+                "request_id": "req-injected-wait-element",
+                "session_id": "sess-injected-wait-element",
+                "user_id": "user-injected-wait-element",
+                "agent_name": "pytest",
+                "window_id": "w1",
+                "title": "Injected",
+            },
+        )
+        launch = await mcp.call_tool(
+            "desktop.control.launch_app",
+            {
+                "request_id": "req-injected-3",
+                "session_id": "sess-injected-3",
+                "user_id": "user-injected-3",
+                "agent_name": "pytest",
+                "app_name": "Safari",
+            },
+        )
+        focus = await mcp.call_tool(
+            "desktop.control.focus_window",
+            {
+                "request_id": "req-injected-4",
+                "session_id": "sess-injected-4",
+                "user_id": "user-injected-4",
+                "agent_name": "pytest",
+                "window_id": "w1",
+            },
+        )
+        scroll = await mcp.call_tool(
+            "desktop.control.scroll",
+            {
+                "request_id": "req-injected-scroll",
+                "session_id": "sess-injected-scroll",
+                "user_id": "user-injected-scroll",
+                "agent_name": "pytest",
+                "delta_y": -3,
+            },
+        )
+
+        windows_text = self._text(windows)
+        frontmost_text = self._text(frontmost)
+        runtime_status_text = self._text(runtime_status)
+        runtime_stop_text = self._text(runtime_stop)
+        runtime_clear_text = self._text(runtime_clear)
+        found_text = self._text(found)
+        waited_window_text = self._text(waited_window)
+        waited_element_text = self._text(waited_element)
+        launch_text = self._text(launch)
+        focus_text = self._text(focus)
+        scroll_text = self._text(scroll)
+        assert '"ok": true' in windows_text.lower()
+        assert "Safari" in windows_text
+        assert '"ok": true' in frontmost_text.lower()
+        assert '"pid": 42' in frontmost_text
+        assert '"stopped": false' in runtime_status_text.lower()
+        assert '"stopped": true' in runtime_stop_text.lower()
+        assert '"stopped": false' in runtime_clear_text.lower()
+        assert '"matched": true' in found_text.lower()
+        assert '"matched": true' in waited_window_text.lower()
+        assert '"matched": true' in waited_element_text.lower()
+        assert '"ok": true' in launch_text.lower()
+        assert "Safari" in launch_text
+        assert '"ok": true' in focus_text.lower()
+        assert "Injected" in focus_text
+        assert '"ok": true' in scroll_text.lower()
 
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:
@@ -139,5 +315,11 @@ async def test_desktop_stdio_tools_list():
     tools_resp = next((r for r in responses if r.get("id") == 1), None)
     assert tools_resp is not None
     names = {t["name"] for t in tools_resp["result"]["tools"]}
+    assert "desktop.runtime.status" in names
+    assert "desktop.runtime.stop" in names
+    assert "desktop.runtime.clear_stop" in names
     assert "desktop.view.windows" in names
+    assert "desktop.wait.window" in names
+    assert "desktop.wait.element" in names
+    assert "desktop.control.scroll" in names
     assert "desktop.control.drag" in names

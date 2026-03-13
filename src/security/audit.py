@@ -18,6 +18,8 @@ class AuditEventType(Enum):
     FILE_WRITE = "file_write"
     WEB_SEARCH = "web_search"
     BROWSER_NAVIGATE = "browser_navigate"
+    DESKTOP_VIEW = "desktop_view"
+    DESKTOP_CONTROL = "desktop_control"
     MEMORY_STORE = "memory_store"
     MEMORY_SEARCH = "memory_search"
     AGENT_MESSAGE = "agent_message"

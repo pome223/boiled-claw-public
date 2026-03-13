@@ -30,7 +30,11 @@ OpenClaw の control plane / execution plane 分離に影響を受けつつ、bo
 
 - **Gateway (Docker / control plane)**: routing、session、transcript、cron、approvals、UI event stream
 - **Host Bridge (host OS / execution plane)**: shell、file、browser を host 上の別プロセスで実行
-- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation と Accessibility 向けの skeleton
+- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation、Accessibility、emergency stop 向けの runtime
+
+desktop 側の core は `src/desktop/` にあり、bridge は adapter としてぶら下がる構成です。
+共通の capability / ping schema は `src/bridges/common_schema.py` に置き、desktop runtime が
+host bridge schema に依存しないようにしています。
 
 ```
 boiled-claw/
@@ -43,8 +47,9 @@ boiled-claw/
 │   ├── host.file.read / write / list
 │   └── host.browser.navigate / extract_text / screenshot
 ├── Desktop Bridge
+│   ├── desktop.runtime.*
 │   ├── desktop.view.*
-│   └── desktop.control.*   (skeleton only)
+│   └── desktop.control.*   (high-risk, approval + stop aware)
 ├── MCP Servers
 │   └── sample / host_bridge / desktop_bridge
 └── Skills / Memory / Channels / Security
@@ -165,17 +170,40 @@ pip install -e '.[browser]'
 playwright install
 ```
 
-### 6. Desktop Bridge skeleton
+### 6. Desktop Bridge
 
-GUI automation 用の Desktop Bridge は skeleton だけ先に用意しています。
-現時点では capability surface と MCP server のみで、実際の Accessibility / click / type は未実装です。
+Desktop Bridge は `DesktopClient` を呼ぶ thin adapter です。
+現時点では macOS 向けの `pyobjc` 実装が入り、
+`runtime.status` / `runtime.stop` / `runtime.clear_stop` による emergency stop 管理と、
+`frontmost_app` / `windows` / `screenshot` / `ax_find` / `ax_snapshot` に加えて、
+`wait_window` / `wait_element`、`launch_app` / `focus_window` / `click` / `type` / `hotkey` / `scroll` / `drag` まで扱えます。
+`click` と `type` は座標指定だけでなく、Accessibility selector を使った targeting にも対応します。
+スクリーンショットは Phase 1 では `screencapture` を使う pragmatic fallback です。将来的には native companion 側で
+ScreenCaptureKit に置き換えても `DesktopClient` surface は変えない前提です。
 こちらも standalone bridge として起動でき、`GOOGLE_API_KEY` は不要です。
+
+desktop request の routing は次のように分かれます。
+
+- 単発の desktop view / runtime safety: `desktop_operator`
+- 単発の desktop control: `desktop_operator`
+- 複数手順で verify を伴う desktop automation: `control_loop`
+
+```bash
+pip install -e '.[desktop]'
+```
 
 ```bash
 python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
 
 # または console script
 boiled-claw-desktop-bridge --sse --host 127.0.0.1 --port 8767
+```
+
+Gateway から Desktop Bridge を使うときは `.env` に次を設定します。
+
+```bash
+DESKTOP_BRIDGE_ENABLED=true
+DESKTOP_BRIDGE_URL=http://127.0.0.1:8767/sse
 ```
 
 ## プロジェクト構造
@@ -194,10 +222,17 @@ boiled-claw/
 │   │   ├── session_manager.py  # セッション管理
 │   │   └── router.py           # メッセージルーティング
 │   ├── bridges/
+│   │   ├── common_schema.py         # Bridge/runtime 共通 schema
 │   │   ├── host_bridge_schema.py     # Host Bridge contract
 │   │   ├── host_bridge_client.py     # Host Bridge MCP client
 │   │   ├── host_bridge_exec.py       # Host Bridge 共通実行ヘルパー
 │   │   └── desktop_bridge_schema.py  # Desktop Bridge contract
+│   ├── desktop/
+│   │   ├── client.py           # Desktop runtime interface
+│   │   ├── runtime.py          # emergency stop / runtime state
+│   │   ├── fake_client.py      # contract test 用 fake runtime
+│   │   ├── pyobjc_client.py    # macOS pyobjc 実装
+│   │   └── factory.py          # runtime factory
 │   ├── tools/
 │   │   ├── web_search.py       # Web検索
 │   │   ├── shell.py            # シェル実行
@@ -209,7 +244,7 @@ boiled-claw/
 │   ├── mcp_servers/
 │   │   ├── sample_server.py         # サンプル MCP サーバー
 │   │   ├── host_bridge_server.py    # Host Bridge MCP server
-│   │   └── desktop_bridge_server.py # Desktop Bridge skeleton server
+│   │   └── desktop_bridge_server.py # Desktop Bridge adapter server
 │   ├── channels/
 │   │   ├── base.py             # チャネル基底クラス
 │   │   ├── registry.py         # チャネルレジストリ

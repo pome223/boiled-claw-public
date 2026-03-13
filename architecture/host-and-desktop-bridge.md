@@ -413,6 +413,8 @@ Bridge との接続方式は次のいずれかを想定する。
 - GUI assistance を追加する
 - screen-aware task を扱えるようにする
 
+実装方式の詳細は [desktop-agent-implementation-strategy.md](./desktop-agent-implementation-strategy.md) を参照。
+
 ### Phase 4: Verified desktop automation
 
 実装対象:

@@ -4,8 +4,9 @@
 
 Desktop Bridge v1 は、GUI automation を Host Bridge から論理分離するための最小 contract を定義する。
 
-この段階では、**tool surface と request / response shape の固定**だけを先に行い、
-実際の macOS Accessibility / Screen Recording / pointer control までは実装しない。
+この段階では、まず **tool surface と request / response shape** を固定する。
+実装は段階導入とし、view 系 capability を先に追加し、
+macOS Accessibility / pointer control の本格実装は後続フェーズに回す。
 
 Transport は Host Bridge と同じく MCP over SSE を前提にし、stdio でも同じ surface を提供する。
 
@@ -36,19 +37,28 @@ click / type / drag のような操作は別 capability として扱う。
 
 - `ping`
 - `capabilities.list`
+- `desktop.runtime.status`
+- `desktop.runtime.stop`
+- `desktop.runtime.clear_stop`
 
 ### Desktop view
 
 - `desktop.view.screenshot`
 - `desktop.view.windows`
+- `desktop.wait.window`
 - `desktop.view.frontmost_app`
+- `desktop.ax.find`
+- `desktop.wait.element`
 - `desktop.ax.snapshot`
 
 ### Desktop control
 
+- `desktop.control.launch_app`
+- `desktop.control.focus_window`
 - `desktop.control.click`
 - `desktop.control.type`
 - `desktop.control.hotkey`
+- `desktop.control.scroll`
 - `desktop.control.drag`
 
 ---
@@ -70,10 +80,22 @@ Desktop Bridge 側は approval の最終判断をしない。
 
 ## Result Model
 
-v1 skeleton では、desktop tool は以下のどちらかを返す。
+v1 では、desktop tool は以下のどちらかを返す。
 
 - 実装済み capability: `ok=true`
-- skeleton / 未実装: `ok=false`, `error="not implemented"`
+- 未実装 capability: `ok=false`, `error="not implemented"`
+
+`desktop.control.click` と `desktop.control.type` は、
+単純な座標入力に加えて Accessibility selector による targeting を許可する。
+selector は次の scoping / matching field を持てる。
+
+- `app_name`
+- `window_id`
+- `role`
+- `title`
+- `identifier`
+- `value_contains`
+- `index`
 
 これにより、Gateway や routing 側は capability を先に認識できる一方、
 実装済みと誤解して危険な操作を進めることを防ぐ。
@@ -84,14 +106,24 @@ v1 skeleton では、desktop tool は以下のどちらかを返す。
 
 推奨リスク分類:
 
+- `desktop.runtime.status`: low
+- `desktop.runtime.stop`: low
+- `desktop.runtime.clear_stop`: high
 - `desktop.view.windows`: low
+- `desktop.wait.window`: low
 - `desktop.view.frontmost_app`: low
+- `desktop.ax.find`: low
+- `desktop.wait.element`: low
 - `desktop.view.screenshot`: medium
 - `desktop.ax.snapshot`: medium
+- `desktop.control.launch_app`: high
+- `desktop.control.focus_window`: high
 - `desktop.control.*`: high
 
 推奨 approval:
 
+- stop/status 系は allow
+- clear_stop は approve
 - view 系は基本 approve
 - control 系は常に approve
 
@@ -99,11 +131,10 @@ v1 skeleton では、desktop tool は以下のどちらかを返す。
 
 ## Non-Goals for v1
 
-- macOS Accessibility API 実装
-- Screen Recording 実装
-- pointer / keyboard injection 実装
+- 高精度な ScreenCaptureKit 実装
 - window move / resize 実装
 - image understanding / OCR
 - Gateway との実運用接続
 
-v1 は **skeleton only** とする。
+v1 では low-level desktop primitives を先に実装し、
+より高次の semantic targeting / OCR / vision-guided automation は後続フェーズに回す。

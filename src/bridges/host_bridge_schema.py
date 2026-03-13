@@ -5,25 +5,11 @@ from __future__ import annotations
 from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
-
-
-class BridgePingResult(BaseModel):
-    ok: bool = True
-    service: str = "host-bridge"
-    version: str = "v1"
-    transport: str
-
-
-class CapabilityDescriptor(BaseModel):
-    name: str
-    risk: Literal["low", "medium", "high"]
-    requires_approval: bool
-    description: str
-    implemented: bool = True
-
-
-class CapabilityListResult(BaseModel):
-    capabilities: list[CapabilityDescriptor]
+from src.bridges.common_schema import (
+    BridgePingResult,
+    CapabilityDescriptor,
+    CapabilityListResult,
+)
 
 
 class HostShellRunRequest(BaseModel):

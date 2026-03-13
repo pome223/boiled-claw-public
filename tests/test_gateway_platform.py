@@ -427,6 +427,78 @@ def test_websocket_auto_routes_longform_research_to_control_loop(monkeypatch, tm
             assert done["text"] == "control loop answer"
 
 
+def test_websocket_auto_routes_desktop_query_to_desktop_operator(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_routing_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        text=(
+                            '{"target":"specialist","specialist":"desktop_operator",'
+                            '"handoff_mode":"preflight_then_root",'
+                            '"reason":"desktop inspection request","confidence":0.92,'
+                            '"dynamic_agent":{"instruction":"","mcp_servers":[],"mode":"run"}}'
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _fake_specialist_run_async(*, user_id, session_id, new_message):
+        text = new_message.parts[0].text
+        assert "前面アプリとウィンドウを確認して" in text
+        yield Event(
+            author="desktop_operator",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="desktop findings")],
+            ),
+        )
+
+    async def _fake_root_run_async(*, user_id, session_id, new_message):
+        text = new_message.parts[0].text
+        assert "Primary specialist: desktop_operator" in text
+        assert "desktop findings" in text
+        yield Event(
+            author="boiled_claw",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="desktop answer")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing_run_async)
+    monkeypatch.setattr(
+        gateway.specialist_runners["desktop_operator"],
+        "run_async",
+        _fake_specialist_run_async,
+    )
+    monkeypatch.setattr(gateway.runner, "run_async", _fake_root_run_async)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.send", "text": "前面アプリとウィンドウを確認してまとめて"})
+
+            route_selected = ws.receive_json()
+            route_forwarded = ws.receive_json()
+            done = ws.receive_json()
+
+            assert route_selected["event"] == "system.event"
+            assert route_selected["source"] == "router"
+            assert route_selected["agent_name"] == "desktop_operator"
+            assert route_forwarded["event"] == "system.event"
+            assert route_forwarded["agent_name"] == "root_agent"
+            assert done["event"] == "chat.done"
+            assert done["text"] == "desktop answer"
+
+
 @pytest.mark.asyncio
 async def test_spawn_cron_target_auto_uses_routing_agent(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
