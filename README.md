@@ -32,6 +32,10 @@ OpenClaw の control plane / execution plane 分離に影響を受けつつ、bo
 - **Host Bridge (host OS / execution plane)**: shell、file、browser を host 上の別プロセスで実行
 - **Desktop Bridge (host OS / desktop capability plane)**: GUI automation、Accessibility、emergency stop 向けの runtime
 
+desktop 側の core は `src/desktop/` にあり、bridge は adapter としてぶら下がる構成です。
+共通の capability / ping schema は `src/bridges/common_schema.py` に置き、desktop runtime が
+host bridge schema に依存しないようにしています。
+
 ```
 boiled-claw/
 ├── Gateway
@@ -174,7 +178,15 @@ Desktop Bridge は `DesktopClient` を呼ぶ thin adapter です。
 `frontmost_app` / `windows` / `screenshot` / `ax_find` / `ax_snapshot` に加えて、
 `wait_window` / `wait_element`、`launch_app` / `focus_window` / `click` / `type` / `hotkey` / `scroll` / `drag` まで扱えます。
 `click` と `type` は座標指定だけでなく、Accessibility selector を使った targeting にも対応します。
+スクリーンショットは Phase 1 では `screencapture` を使う pragmatic fallback です。将来的には native companion 側で
+ScreenCaptureKit に置き換えても `DesktopClient` surface は変えない前提です。
 こちらも standalone bridge として起動でき、`GOOGLE_API_KEY` は不要です。
+
+desktop request の routing は次のように分かれます。
+
+- 単発の desktop view / runtime safety: `desktop_operator`
+- 単発の desktop control: `desktop_operator`
+- 複数手順で verify を伴う desktop automation: `control_loop`
 
 ```bash
 pip install -e '.[desktop]'
@@ -210,6 +222,7 @@ boiled-claw/
 │   │   ├── session_manager.py  # セッション管理
 │   │   └── router.py           # メッセージルーティング
 │   ├── bridges/
+│   │   ├── common_schema.py         # Bridge/runtime 共通 schema
 │   │   ├── host_bridge_schema.py     # Host Bridge contract
 │   │   ├── host_bridge_client.py     # Host Bridge MCP client
 │   │   ├── host_bridge_exec.py       # Host Bridge 共通実行ヘルパー
