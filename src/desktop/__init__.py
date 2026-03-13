@@ -12,8 +12,10 @@ from src.desktop.models import (
     DesktopAxSnapshotRequest,
     DesktopAxSnapshotResult,
     DesktopClickRequest,
+    DesktopClearStopRequest,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopEmergencyStopRequest,
     DesktopElementSelector,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
@@ -21,6 +23,8 @@ from src.desktop.models import (
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
     DesktopRequestBase,
+    DesktopRuntimeStatusRequest,
+    DesktopRuntimeStatusResult,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
@@ -36,6 +40,12 @@ from src.desktop.models import (
     DesktopWindowsResult,
 )
 from src.desktop.pyobjc_client import PyObjCDesktopClient
+from src.desktop.runtime import (
+    DesktopRuntimeSnapshot,
+    DesktopRuntimeState,
+    DesktopRuntimeStoppedError,
+    get_default_desktop_runtime_state,
+)
 
 __all__ = [
     "DESKTOP_NOT_IMPLEMENTED",
@@ -52,8 +62,10 @@ __all__ = [
     "DesktopAxSnapshotRequest",
     "DesktopAxSnapshotResult",
     "DesktopClickRequest",
+    "DesktopClearStopRequest",
     "DesktopControlResult",
     "DesktopDragRequest",
+    "DesktopEmergencyStopRequest",
     "DesktopElementSelector",
     "DesktopFocusWindowRequest",
     "DesktopFrontmostAppRequest",
@@ -61,6 +73,11 @@ __all__ = [
     "DesktopHotkeyRequest",
     "DesktopLaunchAppRequest",
     "DesktopRequestBase",
+    "DesktopRuntimeSnapshot",
+    "DesktopRuntimeState",
+    "DesktopRuntimeStatusRequest",
+    "DesktopRuntimeStatusResult",
+    "DesktopRuntimeStoppedError",
     "DesktopScrollRequest",
     "DesktopScreenshotRequest",
     "DesktopScreenshotResult",
@@ -74,4 +91,5 @@ __all__ = [
     "DesktopWindowDescriptor",
     "DesktopWindowsRequest",
     "DesktopWindowsResult",
+    "get_default_desktop_runtime_state",
 ]

@@ -13,12 +13,15 @@ from src.config.settings import get_settings
 from src.desktop import (
     DesktopAxFindRequest,
     DesktopAxSnapshotRequest,
+    DesktopClearStopRequest,
     DesktopClickRequest,
+    DesktopEmergencyStopRequest,
     DesktopElementSelector,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopRuntimeStatusRequest,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
@@ -159,6 +162,174 @@ async def desktop_view_windows(
         tool_context=tool_context,
     )
     return {"windows": [window.model_dump() for window in result.windows]}
+
+
+async def desktop_runtime_status(
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopRuntimeStatusRequest(
+        request_id=f"desktop-runtime-status-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=None,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.runtime.status",
+        args={},
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.runtime_status(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop runtime status failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_VIEW,
+            action="runtime_status",
+            resource="desktop_runtime",
+            result=error,
+            metadata={**_executor_metadata(), "request_id": request.request_id},
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_VIEW,
+        action="runtime_status",
+        resource="desktop_runtime",
+        result="success",
+        metadata={**_executor_metadata(), "request_id": request.request_id},
+        tool_context=tool_context,
+    )
+    return {
+        "stopped": result.stopped,
+        "reason": result.reason,
+        "stopped_at": result.stopped_at,
+    }
+
+
+async def desktop_runtime_stop(
+    reason: Optional[str] = None,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopEmergencyStopRequest(
+        request_id=f"desktop-runtime-stop-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=None,
+        reason=reason,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.runtime.stop",
+        args={"reason": reason},
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.emergency_stop(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop emergency stop failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_CONTROL,
+            action="runtime_stop",
+            resource="desktop_runtime",
+            result=error,
+            metadata={**_executor_metadata(), "request_id": request.request_id},
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_CONTROL,
+        action="runtime_stop",
+        resource="desktop_runtime",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "reason": result.reason,
+        },
+        tool_context=tool_context,
+    )
+    return {
+        "success": True,
+        "stopped": result.stopped,
+        "reason": result.reason,
+        "stopped_at": result.stopped_at,
+    }
+
+
+async def desktop_runtime_clear_stop(
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    approval_error, approval_token = await _check_desktop_policy(
+        "desktop_runtime_clear_stop",
+        {},
+        tool_context,
+    )
+    if approval_error:
+        return {"error": approval_error}
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopClearStopRequest(
+        request_id=f"desktop-runtime-clear-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.runtime.clear_stop",
+        args={},
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.clear_stop(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop clear stop failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_CONTROL,
+            action="runtime_clear_stop",
+            resource="desktop_runtime",
+            result=error,
+            metadata={
+                **_executor_metadata(),
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+            },
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_CONTROL,
+        action="runtime_clear_stop",
+        resource="desktop_runtime",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "approval_token": approval_token,
+        },
+        tool_context=tool_context,
+    )
+    return {
+        "success": True,
+        "stopped": result.stopped,
+        "reason": result.reason,
+        "stopped_at": result.stopped_at,
+    }
 
 
 async def desktop_wait_window(

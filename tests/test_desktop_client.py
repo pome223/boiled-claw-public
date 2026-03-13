@@ -7,10 +7,13 @@ import pytest
 from src.desktop import (
     DesktopAxFindRequest,
     DesktopClickRequest,
+    DesktopClearStopRequest,
+    DesktopEmergencyStopRequest,
     DesktopElementSelector,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopLaunchAppRequest,
+    DesktopRuntimeStatusRequest,
     DesktopScrollRequest,
     DesktopWaitElementRequest,
     DesktopWaitWindowRequest,
@@ -30,6 +33,9 @@ async def test_fake_desktop_client_reports_implemented_capabilities():
     capabilities = await client.capabilities()
     by_name = {cap.name: cap for cap in capabilities.capabilities}
 
+    assert by_name["desktop.runtime.status"].implemented is True
+    assert by_name["desktop.runtime.stop"].implemented is True
+    assert by_name["desktop.runtime.clear_stop"].implemented is True
     assert by_name["desktop.view.windows"].implemented is True
     assert by_name["desktop.view.frontmost_app"].implemented is True
     assert by_name["desktop.control.click"].implemented is False
@@ -230,3 +236,62 @@ async def test_fake_desktop_client_waits_and_scrolls_when_capabilities_exist():
     assert waited_element.matched is True
     assert waited_element.target is not None
     assert scrolled.ok is True
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_emergency_stop_blocks_control_until_cleared():
+    client = FakeDesktopClient(implemented={"desktop.control.click"})
+
+    stopped = await client.emergency_stop(
+        DesktopEmergencyStopRequest(
+            request_id="req-stop",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            reason="halt",
+        )
+    )
+    status = await client.runtime_status(
+        DesktopRuntimeStatusRequest(
+            request_id="req-status",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+    blocked = await client.click(
+        DesktopClickRequest(
+            request_id="req-click",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            x=1,
+            y=2,
+        )
+    )
+    cleared = await client.clear_stop(
+        DesktopClearStopRequest(
+            request_id="req-clear",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+    resumed = await client.click(
+        DesktopClickRequest(
+            request_id="req-click-2",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            x=1,
+            y=2,
+        )
+    )
+
+    assert stopped.stopped is True
+    assert stopped.reason == "halt"
+    assert status.stopped is True
+    assert blocked.ok is False
+    assert "stopped" in (blocked.error or "").lower()
+    assert cleared.stopped is False
+    assert resumed.ok is True

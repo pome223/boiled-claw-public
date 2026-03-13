@@ -12,7 +12,9 @@ from src.desktop import (
     DesktopAxFindRequest,
     DesktopAxSnapshotRequest,
     DesktopClickRequest,
+    DesktopClearStopRequest,
     DesktopDragRequest,
+    DesktopEmergencyStopRequest,
     DesktopElementSelector,
     FakeDesktopClient,
     PyObjCDesktopClient,
@@ -21,6 +23,7 @@ from src.desktop import (
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopRuntimeStatusRequest,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
@@ -594,6 +597,53 @@ async def test_pyobjc_client_scroll_posts_scroll_event():
     assert _FakeQuartz.posted[0][1]["kind"] == "scroll"
     assert _FakeQuartz.posted[0][1]["delta_x"] == 2
     assert _FakeQuartz.posted[0][1]["delta_y"] == -4
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_emergency_stop_blocks_control_until_cleared():
+    client = PyObjCDesktopClient(quartz_module=_FakeQuartz())
+
+    stopped = await client.emergency_stop(
+        DesktopEmergencyStopRequest(
+            request_id="req-stop",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            reason="abort run",
+        )
+    )
+    status = await client.runtime_status(
+        DesktopRuntimeStatusRequest(
+            request_id="req-status",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+    blocked = await client.click(
+        DesktopClickRequest(
+            request_id="req-click-stop",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            x=10,
+            y=20,
+        )
+    )
+    cleared = await client.clear_stop(
+        DesktopClearStopRequest(
+            request_id="req-clear",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+
+    assert stopped.stopped is True
+    assert status.stopped is True
+    assert blocked.ok is False
+    assert "stopped" in (blocked.error or "").lower()
+    assert cleared.stopped is False
 
 
 @pytest.mark.asyncio

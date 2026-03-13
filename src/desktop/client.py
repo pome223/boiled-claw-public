@@ -15,11 +15,15 @@ from src.desktop.models import (
     DesktopClickRequest,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopEmergencyStopRequest,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopClearStopRequest,
+    DesktopRuntimeStatusRequest,
+    DesktopRuntimeStatusResult,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
@@ -41,6 +45,27 @@ def desktop_capabilities(
 ) -> CapabilityListResult:
     implemented_names = set(implemented or ())
     descriptors = [
+        CapabilityDescriptor(
+            name="desktop.runtime.status",
+            risk="low",
+            requires_approval=False,
+            description="Inspect desktop runtime emergency stop state.",
+            implemented="desktop.runtime.status" in implemented_names,
+        ),
+        CapabilityDescriptor(
+            name="desktop.runtime.stop",
+            risk="low",
+            requires_approval=False,
+            description="Trigger desktop runtime emergency stop.",
+            implemented="desktop.runtime.stop" in implemented_names,
+        ),
+        CapabilityDescriptor(
+            name="desktop.runtime.clear_stop",
+            risk="high",
+            requires_approval=True,
+            description="Clear desktop runtime emergency stop and re-enable control.",
+            implemented="desktop.runtime.clear_stop" in implemented_names,
+        ),
         CapabilityDescriptor(
             name="desktop.view.screenshot",
             risk="medium",
@@ -148,6 +173,24 @@ class DesktopClient(ABC):
 
     @abstractmethod
     async def capabilities(self) -> CapabilityListResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def runtime_status(
+        self, request: DesktopRuntimeStatusRequest
+    ) -> DesktopRuntimeStatusResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def emergency_stop(
+        self, request: DesktopEmergencyStopRequest
+    ) -> DesktopRuntimeStatusResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def clear_stop(
+        self, request: DesktopClearStopRequest
+    ) -> DesktopRuntimeStatusResult:
         raise NotImplementedError
 
     @abstractmethod

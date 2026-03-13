@@ -182,6 +182,9 @@ cross-platform abstraction を最初から作らない。
 - `desktop.view.windows`
 - `desktop.view.frontmost_app`
 - `desktop.view.screenshot`
+- `desktop.runtime.status`
+- `desktop.runtime.stop`
+- `desktop.runtime.clear_stop`
 - `desktop.control.launch_app`
 - `desktop.control.focus_window`
 - `desktop.control.click`
@@ -195,6 +198,9 @@ cross-platform abstraction を最初から作らない。
 - OCR
 - image matching
 - vision-model-guided clicking
+
+現在の実装では `scroll` も入っているが、
+observer ベースの同期や advanced vision はまだ後続フェーズとする。
 
 ### Typed primitives, not free-form shell
 

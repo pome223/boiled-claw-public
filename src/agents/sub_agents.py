@@ -18,6 +18,9 @@ from src.tools.desktop import (
     desktop_control_launch_app,
     desktop_control_scroll,
     desktop_control_type,
+    desktop_runtime_clear_stop,
+    desktop_runtime_status,
+    desktop_runtime_stop,
     desktop_wait_element,
     desktop_wait_window,
     desktop_view_frontmost_app,
@@ -170,6 +173,7 @@ desktop_agent = Agent(
 - できるだけ app / window / AX 情報に基づいて行動する
 - `desktop_ax_find` を使って、full snapshot の前に対象要素の存在確認を行う
 - 座標指定より、launch_app / focus_window / selector-aware click/type を優先する
+- 制御不能になったら `desktop_runtime_stop` を最優先し、復帰前に `desktop_runtime_status` を確認する
 """,
     tools=[
         desktop_view_windows,
@@ -179,6 +183,9 @@ desktop_agent = Agent(
         desktop_ax_find,
         desktop_wait_element,
         desktop_ax_snapshot,
+        desktop_runtime_status,
+        desktop_runtime_stop,
+        desktop_runtime_clear_stop,
         desktop_control_click,
         desktop_control_type,
         desktop_control_launch_app,

@@ -6,6 +6,7 @@ import src.bridges.host_bridge_exec as bridge_exec_module
 import src.bridges.desktop_exec as desktop_exec_module
 from src.desktop import (
     DesktopAxFindResult,
+    DesktopRuntimeStatusResult,
     DesktopControlResult,
     DesktopWaitElementResult,
     DesktopWindowDescriptor,
@@ -535,6 +536,31 @@ async def test_desktop_wait_element_is_allowed_without_approval(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_desktop_runtime_stop_is_allowed_without_approval(monkeypatch):
+    class FakeDesktopClient:
+        async def emergency_stop(self, request):
+            return DesktopRuntimeStatusResult(
+                ok=True,
+                stopped=True,
+                reason=request.reason,
+                changed=True,
+            )
+
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=False),
+    )
+
+    result = await desktop_module.desktop_runtime_stop(reason="panic")
+
+    assert result["success"] is True
+    assert result["stopped"] is True
+    assert result["reason"] == "panic"
+
+
+@pytest.mark.asyncio
 async def test_desktop_click_waits_for_approval(monkeypatch):
     engine = ToolPolicyEngine()
     seen = {}
@@ -672,6 +698,39 @@ async def test_desktop_scroll_waits_for_approval(monkeypatch):
     )
 
     result = await desktop_module.desktop_control_scroll(delta_y=-5, tool_context=tool_context)
+
+    assert result["success"] is True
+    assert seen["approval_token"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_runtime_clear_stop_waits_for_approval(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeDesktopClient:
+        async def clear_stop(self, request):
+            seen["approval_token"] = request.approval_token
+            return DesktopRuntimeStatusResult(ok=True, stopped=False, changed=True)
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(desktop_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=True),
+    )
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_runtime_clear_stop(tool_context=tool_context)
 
     assert result["success"] is True
     assert seen["approval_token"]

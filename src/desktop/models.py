@@ -26,6 +26,26 @@ class DesktopRequestBase(BaseModel):
     approval_token: Optional[str] = None
 
 
+class DesktopRuntimeStatusRequest(DesktopRequestBase):
+    pass
+
+
+class DesktopEmergencyStopRequest(DesktopRequestBase):
+    reason: Optional[str] = None
+
+
+class DesktopClearStopRequest(DesktopRequestBase):
+    pass
+
+
+class DesktopRuntimeStatusResult(BaseModel):
+    ok: bool = True
+    stopped: bool = False
+    reason: Optional[str] = None
+    stopped_at: Optional[float] = None
+    changed: bool = False
+
+
 class DesktopWindowBounds(BaseModel):
     x: int = 0
     y: int = 0
@@ -234,6 +254,10 @@ __all__ = [
     "CapabilityDescriptor",
     "CapabilityListResult",
     "DesktopRequestBase",
+    "DesktopRuntimeStatusRequest",
+    "DesktopEmergencyStopRequest",
+    "DesktopClearStopRequest",
+    "DesktopRuntimeStatusResult",
     "DesktopElementSelector",
     "DesktopTargetDescriptor",
     "DesktopControlResult",

@@ -20,13 +20,16 @@ from src.desktop import (
     DesktopAxSnapshotRequest,
     build_default_desktop_client,
     DesktopClient,
+    DesktopClearStopRequest,
     DesktopClickRequest,
     DesktopDragRequest,
+    DesktopEmergencyStopRequest,
     DesktopElementSelector,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopRuntimeStatusRequest,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
@@ -66,6 +69,68 @@ def create_server(
     @mcp.tool(name="capabilities.list", description="List Desktop Bridge capabilities.")
     async def list_capabilities() -> dict:
         return (await client.capabilities()).model_dump()
+
+    @mcp.tool(
+        name="desktop.runtime.status",
+        description="Inspect desktop runtime emergency stop state.",
+    )
+    async def desktop_runtime_status(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopRuntimeStatusRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+        )
+        return (await client.runtime_status(request)).model_dump()
+
+    @mcp.tool(
+        name="desktop.runtime.stop",
+        description="Trigger desktop runtime emergency stop.",
+    )
+    async def desktop_runtime_stop(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        reason: Optional[str] = None,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopEmergencyStopRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            reason=reason,
+        )
+        return (await client.emergency_stop(request)).model_dump()
+
+    @mcp.tool(
+        name="desktop.runtime.clear_stop",
+        description="Clear desktop runtime emergency stop.",
+    )
+    async def desktop_runtime_clear_stop(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopClearStopRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+        )
+        return (await client.clear_stop(request)).model_dump()
 
     @mcp.tool(
         name="desktop.view.screenshot",

@@ -19,6 +19,9 @@ from src.tools.desktop import (
     desktop_control_launch_app,
     desktop_control_scroll,
     desktop_control_type,
+    desktop_runtime_clear_stop,
+    desktop_runtime_status,
+    desktop_runtime_stop,
     desktop_wait_element,
     desktop_wait_window,
     desktop_view_frontmost_app,
@@ -125,6 +128,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - desktop_ax_find で selector に一致する UI 要素を確認
 - desktop_wait_element で selector の出現を待てる
 - desktop_ax_snapshot で Accessibility tree を取得
+- desktop_runtime_status / stop / clear_stop で緊急停止状態を扱える
 - desktop_control_launch_app / focus_window でアプリやウィンドウを前面化できる
 - desktop_control_click / type は座標だけでなく Accessibility selector でも指定できる
 - desktop_control_scroll で前面 UI をスクロールできる
@@ -164,6 +168,9 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         desktop_ax_find,
         desktop_wait_element,
         desktop_ax_snapshot,
+        desktop_runtime_status,
+        desktop_runtime_stop,
+        desktop_runtime_clear_stop,
         desktop_control_click,
         desktop_control_type,
         desktop_control_launch_app,

@@ -37,13 +37,18 @@ click / type / drag のような操作は別 capability として扱う。
 
 - `ping`
 - `capabilities.list`
+- `desktop.runtime.status`
+- `desktop.runtime.stop`
+- `desktop.runtime.clear_stop`
 
 ### Desktop view
 
 - `desktop.view.screenshot`
 - `desktop.view.windows`
+- `desktop.wait.window`
 - `desktop.view.frontmost_app`
 - `desktop.ax.find`
+- `desktop.wait.element`
 - `desktop.ax.snapshot`
 
 ### Desktop control
@@ -53,6 +58,7 @@ click / type / drag のような操作は別 capability として扱う。
 - `desktop.control.click`
 - `desktop.control.type`
 - `desktop.control.hotkey`
+- `desktop.control.scroll`
 - `desktop.control.drag`
 
 ---
@@ -100,9 +106,14 @@ selector は次の scoping / matching field を持てる。
 
 推奨リスク分類:
 
+- `desktop.runtime.status`: low
+- `desktop.runtime.stop`: low
+- `desktop.runtime.clear_stop`: high
 - `desktop.view.windows`: low
+- `desktop.wait.window`: low
 - `desktop.view.frontmost_app`: low
 - `desktop.ax.find`: low
+- `desktop.wait.element`: low
 - `desktop.view.screenshot`: medium
 - `desktop.ax.snapshot`: medium
 - `desktop.control.launch_app`: high
@@ -111,6 +122,8 @@ selector は次の scoping / matching field を持てる。
 
 推奨 approval:
 
+- stop/status 系は allow
+- clear_stop は approve
 - view 系は基本 approve
 - control 系は常に approve
 

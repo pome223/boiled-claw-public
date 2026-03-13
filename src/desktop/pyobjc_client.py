@@ -28,12 +28,16 @@ from src.desktop.models import (
     DesktopClickRequest,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopEmergencyStopRequest,
     DesktopElementSelector,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopClearStopRequest,
+    DesktopRuntimeStatusRequest,
+    DesktopRuntimeStatusResult,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
@@ -48,6 +52,11 @@ from src.desktop.models import (
     DesktopWindowsRequest,
     DesktopWindowsResult,
 )
+from src.desktop.runtime import (
+    DesktopRuntimeState,
+    DesktopRuntimeStoppedError,
+    get_default_desktop_runtime_state,
+)
 
 
 class PyObjCDesktopClient(DesktopClient):
@@ -60,14 +69,19 @@ class PyObjCDesktopClient(DesktopClient):
         quartz_module: Any | None = None,
         screenshot_runner: Any | None = None,
         open_runner: Any | None = None,
+        runtime_state: DesktopRuntimeState | None = None,
     ) -> None:
         self._appkit = appkit_module
         self._quartz = quartz_module
         self._screenshot_runner = screenshot_runner or _default_screenshot_runner
         self._open_runner = open_runner or _default_open_runner
+        self._runtime_state = runtime_state or get_default_desktop_runtime_state()
 
     async def capabilities(self) -> CapabilityListResult:
         implemented = set()
+        implemented.add("desktop.runtime.status")
+        implemented.add("desktop.runtime.stop")
+        implemented.add("desktop.runtime.clear_stop")
         if self._quartz is not None:
             implemented.add("desktop.view.windows")
             implemented.add("desktop.wait.window")
@@ -93,6 +107,43 @@ class PyObjCDesktopClient(DesktopClient):
         if shutil.which("screencapture"):
             implemented.add("desktop.view.screenshot")
         return desktop_capabilities(implemented)
+
+    async def runtime_status(
+        self, request: DesktopRuntimeStatusRequest
+    ) -> DesktopRuntimeStatusResult:
+        del request
+        snapshot = self._runtime_state.snapshot()
+        return DesktopRuntimeStatusResult(
+            ok=True,
+            stopped=snapshot.stopped,
+            reason=snapshot.reason,
+            stopped_at=snapshot.stopped_at,
+        )
+
+    async def emergency_stop(
+        self, request: DesktopEmergencyStopRequest
+    ) -> DesktopRuntimeStatusResult:
+        snapshot = self._runtime_state.emergency_stop(request.reason)
+        return DesktopRuntimeStatusResult(
+            ok=True,
+            stopped=snapshot.stopped,
+            reason=snapshot.reason,
+            stopped_at=snapshot.stopped_at,
+            changed=True,
+        )
+
+    async def clear_stop(
+        self, request: DesktopClearStopRequest
+    ) -> DesktopRuntimeStatusResult:
+        del request
+        snapshot = self._runtime_state.clear_stop()
+        return DesktopRuntimeStatusResult(
+            ok=True,
+            stopped=snapshot.stopped,
+            reason=snapshot.reason,
+            stopped_at=snapshot.stopped_at,
+            changed=True,
+        )
 
     async def screenshot(
         self, request: DesktopScreenshotRequest
@@ -293,6 +344,9 @@ class PyObjCDesktopClient(DesktopClient):
             await asyncio.sleep(request.poll_interval_seconds)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         if request.target is not None:
             resolved = self._resolve_element_target(request.target)
             if resolved is None:
@@ -332,6 +386,9 @@ class PyObjCDesktopClient(DesktopClient):
         )
 
     async def type_text(self, request: DesktopTypeRequest) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         if request.target is not None:
             resolved = self._resolve_element_target(request.target)
             if resolved is None:
@@ -368,6 +425,9 @@ class PyObjCDesktopClient(DesktopClient):
     async def launch_app(
         self, request: DesktopLaunchAppRequest
     ) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         if not _supports_open_command():
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
         command = ["open"]
@@ -394,6 +454,9 @@ class PyObjCDesktopClient(DesktopClient):
     async def focus_window(
         self, request: DesktopFocusWindowRequest
     ) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         if not _supports_focus_window(self._quartz, self._appkit):
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
 
@@ -430,6 +493,9 @@ class PyObjCDesktopClient(DesktopClient):
         return DesktopControlResult(ok=True, target=target)
 
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         if not _supports_hotkey(self._quartz):
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
 
@@ -446,6 +512,9 @@ class PyObjCDesktopClient(DesktopClient):
         return DesktopControlResult(ok=True)
 
     async def scroll(self, request: DesktopScrollRequest) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         if not _supports_scroll(self._quartz):
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
         event = self._quartz.CGEventCreateScrollWheelEvent(
@@ -459,6 +528,9 @@ class PyObjCDesktopClient(DesktopClient):
         return DesktopControlResult(ok=True)
 
     async def drag(self, request: DesktopDragRequest) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         if not _supports_mouse_click(self._quartz):
             return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
 
@@ -520,6 +592,13 @@ class PyObjCDesktopClient(DesktopClient):
             self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
             self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
         return DesktopControlResult(ok=True, target=target)
+
+    def _blocked_control_result(self) -> DesktopControlResult | None:
+        try:
+            self._runtime_state.ensure_active()
+        except DesktopRuntimeStoppedError as exc:
+            return DesktopControlResult(ok=False, error=str(exc))
+        return None
 
     def _post_text(
         self,

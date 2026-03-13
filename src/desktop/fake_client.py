@@ -19,11 +19,15 @@ from src.desktop.models import (
     DesktopClickRequest,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopEmergencyStopRequest,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopClearStopRequest,
+    DesktopRuntimeStatusRequest,
+    DesktopRuntimeStatusResult,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
@@ -37,6 +41,7 @@ from src.desktop.models import (
     DesktopWindowsRequest,
     DesktopWindowsResult,
 )
+from src.desktop.runtime import DesktopRuntimeState
 
 
 class FakeDesktopClient(DesktopClient):
@@ -53,6 +58,7 @@ class FakeDesktopClient(DesktopClient):
         screenshot_width: int = 0,
         screenshot_height: int = 0,
         ax_tree: dict[str, Any] | None = None,
+        runtime_state: DesktopRuntimeState | None = None,
     ) -> None:
         self._implemented = set(implemented or ())
         self._windows = list(windows or [])
@@ -62,13 +68,58 @@ class FakeDesktopClient(DesktopClient):
         self._screenshot_width = screenshot_width
         self._screenshot_height = screenshot_height
         self._ax_tree = dict(ax_tree or {})
+        self._runtime_state = runtime_state or DesktopRuntimeState()
         self.last_click_request: DesktopClickRequest | None = None
         self.last_type_request: DesktopTypeRequest | None = None
         self.last_launch_request: DesktopLaunchAppRequest | None = None
         self.last_focus_request: DesktopFocusWindowRequest | None = None
 
     async def capabilities(self) -> CapabilityListResult:
-        return desktop_capabilities(self._implemented)
+        return desktop_capabilities(
+            self._implemented
+            | {
+                "desktop.runtime.status",
+                "desktop.runtime.stop",
+                "desktop.runtime.clear_stop",
+            }
+        )
+
+    async def runtime_status(
+        self, request: DesktopRuntimeStatusRequest
+    ) -> DesktopRuntimeStatusResult:
+        del request
+        snapshot = self._runtime_state.snapshot()
+        return DesktopRuntimeStatusResult(
+            ok=True,
+            stopped=snapshot.stopped,
+            reason=snapshot.reason,
+            stopped_at=snapshot.stopped_at,
+        )
+
+    async def emergency_stop(
+        self, request: DesktopEmergencyStopRequest
+    ) -> DesktopRuntimeStatusResult:
+        snapshot = self._runtime_state.emergency_stop(request.reason)
+        return DesktopRuntimeStatusResult(
+            ok=True,
+            stopped=snapshot.stopped,
+            reason=snapshot.reason,
+            stopped_at=snapshot.stopped_at,
+            changed=True,
+        )
+
+    async def clear_stop(
+        self, request: DesktopClearStopRequest
+    ) -> DesktopRuntimeStatusResult:
+        del request
+        snapshot = self._runtime_state.clear_stop()
+        return DesktopRuntimeStatusResult(
+            ok=True,
+            stopped=snapshot.stopped,
+            reason=snapshot.reason,
+            stopped_at=snapshot.stopped_at,
+            changed=True,
+        )
 
     async def screenshot(
         self, request: DesktopScreenshotRequest
@@ -144,11 +195,17 @@ class FakeDesktopClient(DesktopClient):
         return DesktopWaitElementResult(ok=True, matched=target is not None, target=target)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         self.last_click_request = request
         target = self._resolve_target_from_request(request.target)
         return self._control_result("desktop.control.click", target=target)
 
     async def type_text(self, request: DesktopTypeRequest) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         self.last_type_request = request
         target = self._resolve_target_from_request(request.target)
         return self._control_result("desktop.control.type", target=target)
@@ -156,6 +213,9 @@ class FakeDesktopClient(DesktopClient):
     async def launch_app(
         self, request: DesktopLaunchAppRequest
     ) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         self.last_launch_request = request
         return self._control_result(
             "desktop.control.launch_app",
@@ -168,6 +228,9 @@ class FakeDesktopClient(DesktopClient):
     async def focus_window(
         self, request: DesktopFocusWindowRequest
     ) -> DesktopControlResult:
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         self.last_focus_request = request
         target = None
         for window in self._windows:
@@ -194,14 +257,23 @@ class FakeDesktopClient(DesktopClient):
 
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
         del request
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         return self._control_result("desktop.control.hotkey")
 
     async def scroll(self, request: DesktopScrollRequest) -> DesktopControlResult:
         del request
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         return self._control_result("desktop.control.scroll")
 
     async def drag(self, request: DesktopDragRequest) -> DesktopControlResult:
         del request
+        blocked = self._blocked_control_result()
+        if blocked is not None:
+            return blocked
         return self._control_result("desktop.control.drag")
 
     def _control_result(
@@ -240,6 +312,13 @@ class FakeDesktopClient(DesktopClient):
             title=selector.title or "",
             identifier=selector.identifier or "",
         )
+
+    def _blocked_control_result(self) -> DesktopControlResult | None:
+        snapshot = self._runtime_state.snapshot()
+        if not snapshot.stopped:
+            return None
+        detail = snapshot.reason or "Emergency stop requested"
+        return DesktopControlResult(ok=False, error=f"desktop runtime stopped: {detail}")
 
 
 __all__ = ["FakeDesktopClient"]

@@ -32,6 +32,9 @@ class TestDesktopBridgeTools:
         assert names == {
             "ping",
             "capabilities.list",
+            "desktop.runtime.status",
+            "desktop.runtime.stop",
+            "desktop.runtime.clear_stop",
             "desktop.view.screenshot",
             "desktop.view.windows",
             "desktop.wait.window",
@@ -135,6 +138,34 @@ class TestDesktopBridgeTools:
                 "agent_name": "pytest",
             },
         )
+        runtime_status = await mcp.call_tool(
+            "desktop.runtime.status",
+            {
+                "request_id": "req-runtime-status",
+                "session_id": "sess-runtime-status",
+                "user_id": "user-runtime-status",
+                "agent_name": "pytest",
+            },
+        )
+        runtime_stop = await mcp.call_tool(
+            "desktop.runtime.stop",
+            {
+                "request_id": "req-runtime-stop",
+                "session_id": "sess-runtime-stop",
+                "user_id": "user-runtime-stop",
+                "agent_name": "pytest",
+                "reason": "stop from test",
+            },
+        )
+        runtime_clear = await mcp.call_tool(
+            "desktop.runtime.clear_stop",
+            {
+                "request_id": "req-runtime-clear",
+                "session_id": "sess-runtime-clear",
+                "user_id": "user-runtime-clear",
+                "agent_name": "pytest",
+            },
+        )
         found = await mcp.call_tool(
             "desktop.ax.find",
             {
@@ -200,6 +231,9 @@ class TestDesktopBridgeTools:
 
         windows_text = self._text(windows)
         frontmost_text = self._text(frontmost)
+        runtime_status_text = self._text(runtime_status)
+        runtime_stop_text = self._text(runtime_stop)
+        runtime_clear_text = self._text(runtime_clear)
         found_text = self._text(found)
         waited_window_text = self._text(waited_window)
         waited_element_text = self._text(waited_element)
@@ -210,6 +244,9 @@ class TestDesktopBridgeTools:
         assert "Safari" in windows_text
         assert '"ok": true' in frontmost_text.lower()
         assert '"pid": 42' in frontmost_text
+        assert '"stopped": false' in runtime_status_text.lower()
+        assert '"stopped": true' in runtime_stop_text.lower()
+        assert '"stopped": false' in runtime_clear_text.lower()
         assert '"matched": true' in found_text.lower()
         assert '"matched": true' in waited_window_text.lower()
         assert '"matched": true' in waited_element_text.lower()
@@ -278,6 +315,9 @@ async def test_desktop_stdio_tools_list():
     tools_resp = next((r for r in responses if r.get("id") == 1), None)
     assert tools_resp is not None
     names = {t["name"] for t in tools_resp["result"]["tools"]}
+    assert "desktop.runtime.status" in names
+    assert "desktop.runtime.stop" in names
+    assert "desktop.runtime.clear_stop" in names
     assert "desktop.view.windows" in names
     assert "desktop.wait.window" in names
     assert "desktop.wait.element" in names

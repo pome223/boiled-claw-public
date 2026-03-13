@@ -17,14 +17,18 @@ from src.desktop import (
     DesktopAxSnapshotRequest,
     DesktopAxSnapshotResult,
     DesktopClickRequest,
+    DesktopClearStopRequest,
     DesktopClient,
     DesktopControlResult,
     DesktopDragRequest,
+    DesktopEmergencyStopRequest,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopRuntimeStatusRequest,
+    DesktopRuntimeStatusResult,
     DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
@@ -103,6 +107,24 @@ class DesktopBridgeClient(DesktopClient):
 
     async def capabilities(self) -> CapabilityListResult:
         return CapabilityListResult.model_validate(await self._call_tool("capabilities.list"))
+
+    async def runtime_status(
+        self, request: DesktopRuntimeStatusRequest
+    ) -> DesktopRuntimeStatusResult:
+        payload = await self._call_tool("desktop.runtime.status", request.model_dump())
+        return DesktopRuntimeStatusResult.model_validate(payload)
+
+    async def emergency_stop(
+        self, request: DesktopEmergencyStopRequest
+    ) -> DesktopRuntimeStatusResult:
+        payload = await self._call_tool("desktop.runtime.stop", request.model_dump())
+        return DesktopRuntimeStatusResult.model_validate(payload)
+
+    async def clear_stop(
+        self, request: DesktopClearStopRequest
+    ) -> DesktopRuntimeStatusResult:
+        payload = await self._call_tool("desktop.runtime.clear_stop", request.model_dump())
+        return DesktopRuntimeStatusResult.model_validate(payload)
 
     async def screenshot(
         self, request: DesktopScreenshotRequest

@@ -30,7 +30,7 @@ OpenClaw の control plane / execution plane 分離に影響を受けつつ、bo
 
 - **Gateway (Docker / control plane)**: routing、session、transcript、cron、approvals、UI event stream
 - **Host Bridge (host OS / execution plane)**: shell、file、browser を host 上の別プロセスで実行
-- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation と Accessibility 向けの runtime
+- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation、Accessibility、emergency stop 向けの runtime
 
 ```
 boiled-claw/
@@ -43,8 +43,9 @@ boiled-claw/
 │   ├── host.file.read / write / list
 │   └── host.browser.navigate / extract_text / screenshot
 ├── Desktop Bridge
+│   ├── desktop.runtime.*
 │   ├── desktop.view.*
-│   └── desktop.control.*   (high-risk, still expanding)
+│   └── desktop.control.*   (high-risk, approval + stop aware)
 ├── MCP Servers
 │   └── sample / host_bridge / desktop_bridge
 └── Skills / Memory / Channels / Security
@@ -169,8 +170,9 @@ playwright install
 
 Desktop Bridge は `DesktopClient` を呼ぶ thin adapter です。
 現時点では macOS 向けの `pyobjc` 実装が入り、
+`runtime.status` / `runtime.stop` / `runtime.clear_stop` による emergency stop 管理と、
 `frontmost_app` / `windows` / `screenshot` / `ax_find` / `ax_snapshot` に加えて、
-`launch_app` / `focus_window` / `click` / `type` / `hotkey` / `drag` まで扱えます。
+`wait_window` / `wait_element`、`launch_app` / `focus_window` / `click` / `type` / `hotkey` / `scroll` / `drag` まで扱えます。
 `click` と `type` は座標指定だけでなく、Accessibility selector を使った targeting にも対応します。
 こちらも standalone bridge として起動でき、`GOOGLE_API_KEY` は不要です。
 
@@ -212,6 +214,12 @@ boiled-claw/
 │   │   ├── host_bridge_client.py     # Host Bridge MCP client
 │   │   ├── host_bridge_exec.py       # Host Bridge 共通実行ヘルパー
 │   │   └── desktop_bridge_schema.py  # Desktop Bridge contract
+│   ├── desktop/
+│   │   ├── client.py           # Desktop runtime interface
+│   │   ├── runtime.py          # emergency stop / runtime state
+│   │   ├── fake_client.py      # contract test 用 fake runtime
+│   │   ├── pyobjc_client.py    # macOS pyobjc 実装
+│   │   └── factory.py          # runtime factory
 │   ├── tools/
 │   │   ├── web_search.py       # Web検索
 │   │   ├── shell.py            # シェル実行
