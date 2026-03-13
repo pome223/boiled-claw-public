@@ -26,24 +26,28 @@ OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベ
 
 ## アーキテクチャ
 
-OpenClaw の本質的アーキテクチャを Python で再現:
+OpenClaw の control plane / execution plane 分離に影響を受けつつ、boiled-claw では次の 3 層で構成しています。
+
+- **Gateway (Docker / control plane)**: routing、session、transcript、cron、approvals、UI event stream
+- **Host Bridge (host OS / execution plane)**: shell、file、browser を host 上の別プロセスで実行
+- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation と Accessibility 向けの skeleton
 
 ```
 boiled-claw/
-├── Gateway (typed WS control plane + transcript + cron + approvals)
-├── Agents (Gemini 3.0 Flash ベース)
-│   ├── Root Agent (メイン)
-│   ├── Sub Agents (Web, File, System, Memory, Browser)
-│   └── Dynamic Agents (実行時生成 + MCP ツールアタッチ)
+├── Gateway
+│   ├── typed WS / HTTP protocol
+│   ├── transcript / cron / approvals
+│   └── routing_agent / root_agent / control_loop
+├── Host Bridge
+│   ├── host.shell.run
+│   ├── host.file.read / write / list
+│   └── host.browser.navigate / extract_text / screenshot
+├── Desktop Bridge
+│   ├── desktop.view.*
+│   └── desktop.control.*   (skeleton only)
 ├── MCP Servers
-│   └── Sample Server (echo, add, current_time, reverse_text)
-├── Channels (12+ 統合可能)
-│   ├── Telegram
-│   ├── Discord
-│   └── WebSocket
-├── Memory (SQLite + ベクトル検索)
-├── Security (監査ログ + tool policy + approvals)
-└── Skills (プラグイン拡張)
+│   └── sample / host_bridge / desktop_bridge
+└── Skills / Memory / Channels / Security
 ```
 
 ## セットアップ
@@ -189,6 +193,11 @@ boiled-claw/
 │   │   ├── transcript.py       # 永続 transcript / history
 │   │   ├── session_manager.py  # セッション管理
 │   │   └── router.py           # メッセージルーティング
+│   ├── bridges/
+│   │   ├── host_bridge_schema.py     # Host Bridge contract
+│   │   ├── host_bridge_client.py     # Host Bridge MCP client
+│   │   ├── host_bridge_exec.py       # Host Bridge 共通実行ヘルパー
+│   │   └── desktop_bridge_schema.py  # Desktop Bridge contract
 │   ├── tools/
 │   │   ├── web_search.py       # Web検索
 │   │   ├── shell.py            # シェル実行
@@ -198,7 +207,9 @@ boiled-claw/
 │   │   ├── memory.py           # メモリツール
 │   │   └── subagents.py        # サブエージェント・動的エージェント管理
 │   ├── mcp_servers/
-│   │   └── sample_server.py    # サンプル MCP サーバー (FastMCP)
+│   │   ├── sample_server.py         # サンプル MCP サーバー
+│   │   ├── host_bridge_server.py    # Host Bridge MCP server
+│   │   └── desktop_bridge_server.py # Desktop Bridge skeleton server
 │   ├── channels/
 │   │   ├── base.py             # チャネル基底クラス
 │   │   ├── registry.py         # チャネルレジストリ
