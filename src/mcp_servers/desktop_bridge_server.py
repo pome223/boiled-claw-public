@@ -1,7 +1,8 @@
 """
-Desktop Bridge MCP server skeleton.
+Desktop Bridge MCP server adapter.
 
 GUI / Accessibility capabilities live here, separate from Host Bridge.
+This server delegates to a DesktopClient implementation.
 
 起動方法:
   python -m src.mcp_servers.desktop_bridge_server
@@ -16,6 +17,7 @@ from typing import Optional
 from src.desktop import (
     BridgePingResult,
     DesktopAxSnapshotRequest,
+    build_default_desktop_client,
     DesktopClient,
     DesktopClickRequest,
     DesktopDragRequest,
@@ -24,7 +26,6 @@ from src.desktop import (
     DesktopScreenshotRequest,
     DesktopTypeRequest,
     DesktopWindowsRequest,
-    FakeDesktopClient,
 )
 
 
@@ -45,7 +46,7 @@ def create_server(
     )
 
     transport_hint = "sse" if host != "stdio" else "stdio"
-    client = desktop_client or FakeDesktopClient()
+    client = desktop_client or build_default_desktop_client()
 
     @mcp.tool(name="ping", description="Desktop Bridge health probe.")
     def ping() -> dict:

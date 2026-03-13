@@ -4,8 +4,9 @@
 
 Desktop Bridge v1 は、GUI automation を Host Bridge から論理分離するための最小 contract を定義する。
 
-この段階では、**tool surface と request / response shape の固定**だけを先に行い、
-実際の macOS Accessibility / Screen Recording / pointer control までは実装しない。
+この段階では、まず **tool surface と request / response shape** を固定する。
+実装は段階導入とし、view 系 capability を先に追加し、
+macOS Accessibility / pointer control の本格実装は後続フェーズに回す。
 
 Transport は Host Bridge と同じく MCP over SSE を前提にし、stdio でも同じ surface を提供する。
 
@@ -70,10 +71,10 @@ Desktop Bridge 側は approval の最終判断をしない。
 
 ## Result Model
 
-v1 skeleton では、desktop tool は以下のどちらかを返す。
+v1 では、desktop tool は以下のどちらかを返す。
 
 - 実装済み capability: `ok=true`
-- skeleton / 未実装: `ok=false`, `error="not implemented"`
+- 未実装 capability: `ok=false`, `error="not implemented"`
 
 これにより、Gateway や routing 側は capability を先に認識できる一方、
 実装済みと誤解して危険な操作を進めることを防ぐ。
@@ -99,11 +100,11 @@ v1 skeleton では、desktop tool は以下のどちらかを返す。
 
 ## Non-Goals for v1
 
-- macOS Accessibility API 実装
-- Screen Recording 実装
+- 完全な macOS Accessibility API 実装
+- 高精度な ScreenCaptureKit 実装
 - pointer / keyboard injection 実装
 - window move / resize 実装
 - image understanding / OCR
 - Gateway との実運用接続
 
-v1 は **skeleton only** とする。
+v1 では view 系 capability を先行導入し、control 系は未実装のまま残してよい。

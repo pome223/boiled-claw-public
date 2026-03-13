@@ -20,7 +20,7 @@ class TestDesktopBridgeTools:
     def mcp(self):
         from src.mcp_servers.desktop_bridge_server import create_server
 
-        return create_server()
+        return create_server(desktop_client=FakeDesktopClient())
 
     def _text(self, result) -> str:
         return "".join(c.text for c in result if hasattr(c, "text"))

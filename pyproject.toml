@@ -25,12 +25,20 @@ telegram = ["python-telegram-bot>=21.0"]
 discord = ["discord.py>=2.3.0"]
 slack = ["slack-bolt>=1.18.0"]
 browser = ["playwright>=1.40.0"]
+desktop = [
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-AppKit>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+]
 redis = ["redis>=5.0.0"]
 all = [
     "python-telegram-bot>=21.0",
     "discord.py>=2.3.0",
     "slack-bolt>=1.18.0",
     "playwright>=1.40.0",
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-AppKit>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
     "redis>=5.0.0",
 ]
 dev = [

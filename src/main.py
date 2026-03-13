@@ -144,7 +144,7 @@ def run_desktop_bridge(
     *,
     transport: str = "sse",
 ):
-    """Desktop Bridge skeleton を実行する。"""
+    """Desktop Bridge を実行する。"""
     from src.mcp_servers.desktop_bridge_server import create_server
 
     bind_host = host or "127.0.0.1"
@@ -155,7 +155,7 @@ def run_desktop_bridge(
             Panel(
                 "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
                 "Transport: stdio\n"
-                "[dim]Skeleton only. GUI automation is not implemented yet.[/dim]",
+                "[dim]Desktop client adapter. Control capabilities are still incomplete.[/dim]",
                 border_style="cyan",
             )
         )
@@ -166,7 +166,7 @@ def run_desktop_bridge(
         Panel(
             "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
             f"SSE endpoint: http://{bind_host}:{bind_port}/sse\n"
-            "[dim]Skeleton only. Run on the host OS when desktop automation lands.[/dim]",
+            "[dim]Run on the host OS. View-only desktop capabilities can be enabled first.[/dim]",
             border_style="cyan",
         )
     )

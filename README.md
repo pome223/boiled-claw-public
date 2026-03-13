@@ -30,7 +30,7 @@ OpenClaw の control plane / execution plane 分離に影響を受けつつ、bo
 
 - **Gateway (Docker / control plane)**: routing、session、transcript、cron、approvals、UI event stream
 - **Host Bridge (host OS / execution plane)**: shell、file、browser を host 上の別プロセスで実行
-- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation と Accessibility 向けの skeleton
+- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation と Accessibility 向けの runtime
 
 ```
 boiled-claw/
@@ -44,7 +44,7 @@ boiled-claw/
 │   └── host.browser.navigate / extract_text / screenshot
 ├── Desktop Bridge
 │   ├── desktop.view.*
-│   └── desktop.control.*   (skeleton only)
+│   └── desktop.control.*   (high-risk, still expanding)
 ├── MCP Servers
 │   └── sample / host_bridge / desktop_bridge
 └── Skills / Memory / Channels / Security
@@ -165,11 +165,17 @@ pip install -e '.[browser]'
 playwright install
 ```
 
-### 6. Desktop Bridge skeleton
+### 6. Desktop Bridge
 
-GUI automation 用の Desktop Bridge は skeleton だけ先に用意しています。
-現時点では capability surface と MCP server のみで、実際の Accessibility / click / type は未実装です。
+Desktop Bridge は `DesktopClient` を呼ぶ thin adapter です。
+現時点では macOS 向けの view-only 実装を先行しており、`pyobjc` extras が入っていれば
+`frontmost_app` / `windows` / `screenshot` を host 側で扱えます。
+Accessibility tree や click / type などの control 系 capability はまだ未実装です。
 こちらも standalone bridge として起動でき、`GOOGLE_API_KEY` は不要です。
+
+```bash
+pip install -e '.[desktop]'
+```
 
 ```bash
 python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
@@ -209,7 +215,7 @@ boiled-claw/
 │   ├── mcp_servers/
 │   │   ├── sample_server.py         # サンプル MCP サーバー
 │   │   ├── host_bridge_server.py    # Host Bridge MCP server
-│   │   └── desktop_bridge_server.py # Desktop Bridge skeleton server
+│   │   └── desktop_bridge_server.py # Desktop Bridge adapter server
 │   ├── channels/
 │   │   ├── base.py             # チャネル基底クラス
 │   │   ├── registry.py         # チャネルレジストリ
