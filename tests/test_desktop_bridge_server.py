@@ -9,6 +9,8 @@ from pathlib import Path
 
 import pytest
 
+from src.desktop import FakeDesktopClient, DesktopWindowDescriptor
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -79,6 +81,51 @@ class TestDesktopBridgeTools:
         text = self._text(result)
         assert '"ok": false' in text.lower()
         assert "not implemented" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_server_uses_injected_desktop_client(self):
+        from src.mcp_servers.desktop_bridge_server import create_server
+
+        mcp = create_server(
+            desktop_client=FakeDesktopClient(
+                implemented={"desktop.view.windows", "desktop.view.frontmost_app"},
+                windows=[
+                    DesktopWindowDescriptor(
+                        window_id="w1",
+                        app_name="Safari",
+                        title="Injected",
+                    )
+                ],
+                frontmost_app_name="Safari",
+                frontmost_pid=42,
+            )
+        )
+
+        windows = await mcp.call_tool(
+            "desktop.view.windows",
+            {
+                "request_id": "req-injected-1",
+                "session_id": "sess-injected-1",
+                "user_id": "user-injected-1",
+                "agent_name": "pytest",
+            },
+        )
+        frontmost = await mcp.call_tool(
+            "desktop.view.frontmost_app",
+            {
+                "request_id": "req-injected-2",
+                "session_id": "sess-injected-2",
+                "user_id": "user-injected-2",
+                "agent_name": "pytest",
+            },
+        )
+
+        windows_text = self._text(windows)
+        frontmost_text = self._text(frontmost)
+        assert '"ok": true' in windows_text.lower()
+        assert "Safari" in windows_text
+        assert '"ok": true' in frontmost_text.lower()
+        assert '"pid": 42' in frontmost_text
 
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:

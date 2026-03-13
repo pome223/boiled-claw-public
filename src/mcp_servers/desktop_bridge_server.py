@@ -13,98 +13,27 @@ from __future__ import annotations
 import argparse
 from typing import Optional
 
-from src.bridges.desktop_bridge_schema import (
+from src.desktop import (
     BridgePingResult,
-    CapabilityDescriptor,
-    CapabilityListResult,
     DesktopAxSnapshotRequest,
-    DesktopAxSnapshotResult,
+    DesktopClient,
     DesktopClickRequest,
-    DesktopControlResult,
     DesktopDragRequest,
     DesktopFrontmostAppRequest,
-    DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopScreenshotRequest,
-    DesktopScreenshotResult,
     DesktopTypeRequest,
     DesktopWindowsRequest,
-    DesktopWindowsResult,
-)
-
-_NOT_IMPLEMENTED = (
-    "Desktop Bridge skeleton only. GUI automation is not implemented yet."
+    FakeDesktopClient,
 )
 
 
-def _capabilities() -> CapabilityListResult:
-    return CapabilityListResult(
-        capabilities=[
-            CapabilityDescriptor(
-                name="desktop.view.screenshot",
-                risk="medium",
-                requires_approval=True,
-                description="Capture a desktop screenshot from the host OS.",
-                implemented=False,
-            ),
-            CapabilityDescriptor(
-                name="desktop.view.windows",
-                risk="low",
-                requires_approval=True,
-                description="List visible windows on the host OS.",
-                implemented=False,
-            ),
-            CapabilityDescriptor(
-                name="desktop.view.frontmost_app",
-                risk="low",
-                requires_approval=True,
-                description="Inspect the frontmost app on the host OS.",
-                implemented=False,
-            ),
-            CapabilityDescriptor(
-                name="desktop.ax.snapshot",
-                risk="medium",
-                requires_approval=True,
-                description="Capture an accessibility tree snapshot from the host OS.",
-                implemented=False,
-            ),
-            CapabilityDescriptor(
-                name="desktop.control.click",
-                risk="high",
-                requires_approval=True,
-                description="Click on the host desktop.",
-                implemented=False,
-            ),
-            CapabilityDescriptor(
-                name="desktop.control.type",
-                risk="high",
-                requires_approval=True,
-                description="Type text into the host desktop.",
-                implemented=False,
-            ),
-            CapabilityDescriptor(
-                name="desktop.control.hotkey",
-                risk="high",
-                requires_approval=True,
-                description="Send a hotkey to the host desktop.",
-                implemented=False,
-            ),
-            CapabilityDescriptor(
-                name="desktop.control.drag",
-                risk="high",
-                requires_approval=True,
-                description="Drag the pointer on the host desktop.",
-                implemented=False,
-            ),
-        ]
-    )
-
-
-def _not_implemented_control() -> DesktopControlResult:
-    return DesktopControlResult(ok=False, error=_NOT_IMPLEMENTED)
-
-
-def create_server(host: str = "127.0.0.1", port: int = 8767):
+def create_server(
+    host: str = "127.0.0.1",
+    port: int = 8767,
+    *,
+    desktop_client: DesktopClient | None = None,
+):
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
 
@@ -116,24 +45,25 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
     )
 
     transport_hint = "sse" if host != "stdio" else "stdio"
+    client = desktop_client or FakeDesktopClient()
 
     @mcp.tool(name="ping", description="Desktop Bridge health probe.")
     def ping() -> dict:
         return BridgePingResult(
             service="desktop-bridge",
-            version="v1-skeleton",
+            version="v1-client-adapter",
             transport=transport_hint,
         ).model_dump()
 
     @mcp.tool(name="capabilities.list", description="List Desktop Bridge capabilities.")
-    def list_capabilities() -> dict:
-        return _capabilities().model_dump()
+    async def list_capabilities() -> dict:
+        return (await client.capabilities()).model_dump()
 
     @mcp.tool(
         name="desktop.view.screenshot",
         description="Capture a screenshot from the host desktop.",
     )
-    def desktop_view_screenshot(
+    async def desktop_view_screenshot(
         request_id: str,
         session_id: str,
         user_id: str,
@@ -141,7 +71,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
         path: Optional[str] = None,
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopScreenshotRequest(
+        request = DesktopScreenshotRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
@@ -149,10 +79,10 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
             approval_token=approval_token,
             path=path,
         )
-        return DesktopScreenshotResult(ok=False, path=path, error=_NOT_IMPLEMENTED).model_dump()
+        return (await client.screenshot(request)).model_dump()
 
     @mcp.tool(name="desktop.view.windows", description="List windows on the host desktop.")
-    def desktop_view_windows(
+    async def desktop_view_windows(
         request_id: str,
         session_id: str,
         user_id: str,
@@ -160,7 +90,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
         include_minimized: bool = False,
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopWindowsRequest(
+        request = DesktopWindowsRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
@@ -168,33 +98,33 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
             approval_token=approval_token,
             include_minimized=include_minimized,
         )
-        return DesktopWindowsResult(ok=False, error=_NOT_IMPLEMENTED).model_dump()
+        return (await client.windows(request)).model_dump()
 
     @mcp.tool(
         name="desktop.view.frontmost_app",
         description="Inspect the frontmost app on the host desktop.",
     )
-    def desktop_view_frontmost_app(
+    async def desktop_view_frontmost_app(
         request_id: str,
         session_id: str,
         user_id: str,
         agent_name: str,
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopFrontmostAppRequest(
+        request = DesktopFrontmostAppRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
             agent_name=agent_name,
             approval_token=approval_token,
         )
-        return DesktopFrontmostAppResult(ok=False, error=_NOT_IMPLEMENTED).model_dump()
+        return (await client.frontmost_app(request)).model_dump()
 
     @mcp.tool(
         name="desktop.ax.snapshot",
         description="Capture an accessibility tree from the host desktop.",
     )
-    def desktop_ax_snapshot(
+    async def desktop_ax_snapshot(
         request_id: str,
         session_id: str,
         user_id: str,
@@ -203,7 +133,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
         window_id: Optional[str] = None,
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopAxSnapshotRequest(
+        request = DesktopAxSnapshotRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
@@ -212,10 +142,10 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
             app_name=app_name,
             window_id=window_id,
         )
-        return DesktopAxSnapshotResult(ok=False, error=_NOT_IMPLEMENTED).model_dump()
+        return (await client.ax_snapshot(request)).model_dump()
 
     @mcp.tool(name="desktop.control.click", description="Click on the host desktop.")
-    def desktop_control_click(
+    async def desktop_control_click(
         request_id: str,
         session_id: str,
         user_id: str,
@@ -226,7 +156,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
         click_count: int = 1,
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopClickRequest(
+        request = DesktopClickRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
@@ -237,10 +167,10 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
             button=button,
             click_count=click_count,
         )
-        return _not_implemented_control().model_dump()
+        return (await client.click(request)).model_dump()
 
     @mcp.tool(name="desktop.control.type", description="Type text into the host desktop.")
-    def desktop_control_type(
+    async def desktop_control_type(
         request_id: str,
         session_id: str,
         user_id: str,
@@ -248,7 +178,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
         text: str,
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopTypeRequest(
+        request = DesktopTypeRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
@@ -256,10 +186,10 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
             approval_token=approval_token,
             text=text,
         )
-        return _not_implemented_control().model_dump()
+        return (await client.type_text(request)).model_dump()
 
     @mcp.tool(name="desktop.control.hotkey", description="Send a hotkey to the host desktop.")
-    def desktop_control_hotkey(
+    async def desktop_control_hotkey(
         request_id: str,
         session_id: str,
         user_id: str,
@@ -267,7 +197,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
         keys: list[str],
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopHotkeyRequest(
+        request = DesktopHotkeyRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
@@ -275,10 +205,10 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
             approval_token=approval_token,
             keys=keys,
         )
-        return _not_implemented_control().model_dump()
+        return (await client.hotkey(request)).model_dump()
 
     @mcp.tool(name="desktop.control.drag", description="Drag on the host desktop.")
-    def desktop_control_drag(
+    async def desktop_control_drag(
         request_id: str,
         session_id: str,
         user_id: str,
@@ -289,7 +219,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
         end_y: int,
         approval_token: Optional[str] = None,
     ) -> dict:
-        _ = DesktopDragRequest(
+        request = DesktopDragRequest(
             request_id=request_id,
             session_id=session_id,
             user_id=user_id,
@@ -300,7 +230,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8767):
             end_x=end_x,
             end_y=end_y,
         )
-        return _not_implemented_control().model_dump()
+        return (await client.drag(request)).model_dump()
 
     return mcp
 

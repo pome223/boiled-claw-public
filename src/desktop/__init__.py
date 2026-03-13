@@ -1,9 +1,7 @@
-"""Compatibility re-exports for desktop bridge schemas.
+"""Desktop runtime interfaces and fake implementations."""
 
-Desktop runtime models now live under ``src.desktop.models`` so the core
-runtime does not depend on bridge-specific modules.
-"""
-
+from src.desktop.client import DESKTOP_NOT_IMPLEMENTED, DesktopClient, desktop_capabilities
+from src.desktop.fake_client import FakeDesktopClient
 from src.desktop.models import (
     BridgePingResult,
     CapabilityDescriptor,
@@ -27,23 +25,27 @@ from src.desktop.models import (
 )
 
 __all__ = [
+    "DESKTOP_NOT_IMPLEMENTED",
+    "DesktopClient",
+    "FakeDesktopClient",
+    "desktop_capabilities",
     "BridgePingResult",
     "CapabilityDescriptor",
     "CapabilityListResult",
-    "DesktopRequestBase",
+    "DesktopAxSnapshotRequest",
+    "DesktopAxSnapshotResult",
+    "DesktopClickRequest",
     "DesktopControlResult",
+    "DesktopDragRequest",
+    "DesktopFrontmostAppRequest",
+    "DesktopFrontmostAppResult",
+    "DesktopHotkeyRequest",
+    "DesktopRequestBase",
     "DesktopScreenshotRequest",
     "DesktopScreenshotResult",
+    "DesktopTypeRequest",
     "DesktopWindowBounds",
     "DesktopWindowDescriptor",
     "DesktopWindowsRequest",
     "DesktopWindowsResult",
-    "DesktopFrontmostAppRequest",
-    "DesktopFrontmostAppResult",
-    "DesktopAxSnapshotRequest",
-    "DesktopAxSnapshotResult",
-    "DesktopClickRequest",
-    "DesktopTypeRequest",
-    "DesktopHotkeyRequest",
-    "DesktopDragRequest",
 ]
