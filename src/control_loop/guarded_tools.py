@@ -212,6 +212,32 @@ async def guarded_desktop_view_screenshot(
     return await desktop_view_screenshot(path=path)
 
 
+async def guarded_desktop_ax_find(
+    app_name: str | None = None,
+    window_id: str | None = None,
+    role: str | None = None,
+    title: str | None = None,
+    identifier: str | None = None,
+    value_contains: str | None = None,
+    index: int = 0,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "desktop.ax.find")
+        _check_capability_in_plan(tool_context, "desktop.ax.find")
+
+    from src.tools.desktop import desktop_ax_find
+    return await desktop_ax_find(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+    )
+
+
 async def guarded_desktop_ax_snapshot(
     app_name: str | None = None,
     window_id: str | None = None,

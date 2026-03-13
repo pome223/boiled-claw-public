@@ -6,6 +6,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Collection
 
 from src.desktop.models import (
+    DesktopAxFindRequest,
+    DesktopAxFindResult,
     CapabilityDescriptor,
     CapabilityListResult,
     DesktopAxSnapshotRequest,
@@ -54,6 +56,13 @@ def desktop_capabilities(
             requires_approval=True,
             description="Inspect the frontmost app on the host OS.",
             implemented="desktop.view.frontmost_app" in implemented_names,
+        ),
+        CapabilityDescriptor(
+            name="desktop.ax.find",
+            risk="low",
+            requires_approval=False,
+            description="Resolve a matching accessibility element on the host OS.",
+            implemented="desktop.ax.find" in implemented_names,
         ),
         CapabilityDescriptor(
             name="desktop.ax.snapshot",
@@ -135,6 +144,10 @@ class DesktopClient(ABC):
     async def ax_snapshot(
         self, request: DesktopAxSnapshotRequest
     ) -> DesktopAxSnapshotResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def ax_find(self, request: DesktopAxFindRequest) -> DesktopAxFindResult:
         raise NotImplementedError
 
     @abstractmethod

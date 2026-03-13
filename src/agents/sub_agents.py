@@ -9,6 +9,7 @@ from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
 from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
 from src.tools.desktop import (
+    desktop_ax_find,
     desktop_ax_snapshot,
     desktop_control_click,
     desktop_control_drag,
@@ -163,12 +164,14 @@ desktop_agent = Agent(
 - control 系 tool は最小限に使う
 - 高リスク操作は承認が必要な場合がある
 - できるだけ app / window / AX 情報に基づいて行動する
+- `desktop_ax_find` を使って、full snapshot の前に対象要素の存在確認を行う
 - 座標指定より、launch_app / focus_window / selector-aware click/type を優先する
 """,
     tools=[
         desktop_view_windows,
         desktop_view_frontmost_app,
         desktop_view_screenshot,
+        desktop_ax_find,
         desktop_ax_snapshot,
         desktop_control_click,
         desktop_control_type,

@@ -4,6 +4,8 @@ from src.desktop.client import DESKTOP_NOT_IMPLEMENTED, DesktopClient, desktop_c
 from src.desktop.factory import build_default_desktop_client
 from src.desktop.fake_client import FakeDesktopClient
 from src.desktop.models import (
+    DesktopAxFindRequest,
+    DesktopAxFindResult,
     BridgePingResult,
     CapabilityDescriptor,
     CapabilityListResult,
@@ -40,6 +42,8 @@ __all__ = [
     "BridgePingResult",
     "CapabilityDescriptor",
     "CapabilityListResult",
+    "DesktopAxFindRequest",
+    "DesktopAxFindResult",
     "DesktopAxSnapshotRequest",
     "DesktopAxSnapshotResult",
     "DesktopClickRequest",

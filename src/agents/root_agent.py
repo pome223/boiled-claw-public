@@ -10,6 +10,7 @@ from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
 from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
 from src.tools.desktop import (
+    desktop_ax_find,
     desktop_ax_snapshot,
     desktop_control_click,
     desktop_control_drag,
@@ -117,6 +118,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - desktop_view_windows で現在のウィンドウ一覧を取得
 - desktop_view_frontmost_app で前面アプリを確認
 - desktop_view_screenshot でデスクトップのスクリーンショットを取得
+- desktop_ax_find で selector に一致する UI 要素を確認
 - desktop_ax_snapshot で Accessibility tree を取得
 - desktop_control_launch_app / focus_window でアプリやウィンドウを前面化できる
 - desktop_control_click / type は座標だけでなく Accessibility selector でも指定できる
@@ -152,6 +154,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         desktop_view_windows,
         desktop_view_frontmost_app,
         desktop_view_screenshot,
+        desktop_ax_find,
         desktop_ax_snapshot,
         desktop_control_click,
         desktop_control_type,

@@ -193,6 +193,33 @@ async def test_guarded_desktop_view_windows_allows_policy_approved(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_guarded_desktop_ax_find_allows_policy_approved(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.ax.find"}]
+            },
+        }
+    )
+
+    async def _fake_find(**kwargs):
+        assert kwargs["identifier"] == "open-button"
+        return {"matched": True, "target": {"identifier": "open-button"}}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_ax_find", _fake_find)
+
+    result = await guarded_tools_module.guarded_desktop_ax_find(
+        app_name="Safari",
+        window_id="w1",
+        identifier="open-button",
+        tool_context=tool_context,
+    )
+
+    assert result["matched"] is True
+
+
+@pytest.mark.asyncio
 async def test_guarded_desktop_control_click_requires_human_approved():
     tool_context = SimpleNamespace(
         state={

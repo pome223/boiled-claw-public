@@ -10,6 +10,8 @@ from mcp.client.sse import sse_client
 
 from src.config.settings import get_settings
 from src.desktop import (
+    DesktopAxFindRequest,
+    DesktopAxFindResult,
     BridgePingResult,
     CapabilityListResult,
     DesktopAxSnapshotRequest,
@@ -118,6 +120,10 @@ class DesktopBridgeClient(DesktopClient):
     ) -> DesktopAxSnapshotResult:
         payload = await self._call_tool("desktop.ax.snapshot", request.model_dump())
         return DesktopAxSnapshotResult.model_validate(payload)
+
+    async def ax_find(self, request: DesktopAxFindRequest) -> DesktopAxFindResult:
+        payload = await self._call_tool("desktop.ax.find", request.model_dump())
+        return DesktopAxFindResult.model_validate(payload)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
         payload = await self._call_tool("desktop.control.click", request.model_dump())

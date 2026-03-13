@@ -11,6 +11,8 @@ from src.desktop.client import (
     desktop_capabilities,
 )
 from src.desktop.models import (
+    DesktopAxFindRequest,
+    DesktopAxFindResult,
     CapabilityListResult,
     DesktopAxSnapshotRequest,
     DesktopAxSnapshotResult,
@@ -104,6 +106,14 @@ class FakeDesktopClient(DesktopClient):
         if "desktop.ax.snapshot" not in self._implemented:
             return DesktopAxSnapshotResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
         return DesktopAxSnapshotResult(ok=True, tree=self._ax_tree)
+
+    async def ax_find(
+        self, request: DesktopAxFindRequest
+    ) -> DesktopAxFindResult:
+        if "desktop.ax.find" not in self._implemented:
+            return DesktopAxFindResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        target = self._resolve_target_from_request(request.target)
+        return DesktopAxFindResult(ok=True, matched=target is not None, target=target)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
         self.last_click_request = request

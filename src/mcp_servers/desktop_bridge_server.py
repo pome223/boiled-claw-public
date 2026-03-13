@@ -15,6 +15,7 @@ import argparse
 from typing import Optional
 
 from src.desktop import (
+    DesktopAxFindRequest,
     BridgePingResult,
     DesktopAxSnapshotRequest,
     build_default_desktop_client,
@@ -123,6 +124,42 @@ def create_server(
             approval_token=approval_token,
         )
         return (await client.frontmost_app(request)).model_dump()
+
+    @mcp.tool(
+        name="desktop.ax.find",
+        description="Find a single accessibility element from the host desktop.",
+    )
+    async def desktop_ax_find(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        app_name: Optional[str] = None,
+        window_id: Optional[str] = None,
+        role: Optional[str] = None,
+        title: Optional[str] = None,
+        identifier: Optional[str] = None,
+        value_contains: Optional[str] = None,
+        index: int = 0,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopAxFindRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            target=_selector(
+                app_name=app_name,
+                window_id=window_id,
+                role=role,
+                title=title,
+                identifier=identifier,
+                value_contains=value_contains,
+                index=index,
+            ),
+        )
+        return (await client.ax_find(request)).model_dump()
 
     @mcp.tool(
         name="desktop.ax.snapshot",

@@ -43,6 +43,7 @@ click / type / drag のような操作は別 capability として扱う。
 - `desktop.view.screenshot`
 - `desktop.view.windows`
 - `desktop.view.frontmost_app`
+- `desktop.ax.find`
 - `desktop.ax.snapshot`
 
 ### Desktop control
@@ -101,6 +102,7 @@ selector は次の scoping / matching field を持てる。
 
 - `desktop.view.windows`: low
 - `desktop.view.frontmost_app`: low
+- `desktop.ax.find`: low
 - `desktop.view.screenshot`: medium
 - `desktop.ax.snapshot`: medium
 - `desktop.control.launch_app`: high

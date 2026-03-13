@@ -9,6 +9,7 @@ import sys
 import pytest
 
 from src.desktop import (
+    DesktopAxFindRequest,
     DesktopAxSnapshotRequest,
     DesktopClickRequest,
     DesktopDragRequest,
@@ -298,6 +299,34 @@ async def test_pyobjc_client_ax_snapshot_uses_ax_tree():
     assert result.tree["app_name"] == "Safari"
     assert result.tree["root"]["role"] == "AXWindow"
     assert result.tree["root"]["children"][0]["role"] == "AXButton"
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_ax_find_returns_target_descriptor():
+    client = PyObjCDesktopClient(
+        appkit_module=_FakeAppKit(),
+        quartz_module=_FakeQuartz(),
+    )
+
+    result = await client.ax_find(
+        DesktopAxFindRequest(
+            request_id="req-find",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="7",
+                role="AXButton",
+                identifier="open-button",
+            ),
+        )
+    )
+
+    assert result.ok is True
+    assert result.matched is True
+    assert result.target is not None
+    assert result.target.identifier == "open-button"
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ Desktop client contract tests.
 import pytest
 
 from src.desktop import (
+    DesktopAxFindRequest,
     FakeDesktopClient,
     DesktopClickRequest,
     DesktopElementSelector,
@@ -94,6 +95,7 @@ async def test_fake_desktop_client_returns_not_implemented_for_missing_control()
 async def test_fake_desktop_client_tracks_selector_click_and_launch_focus():
     client = FakeDesktopClient(
         implemented={
+            "desktop.ax.find",
             "desktop.control.click",
             "desktop.control.launch_app",
             "desktop.control.focus_window",
@@ -111,6 +113,19 @@ async def test_fake_desktop_client_tracks_selector_click_and_launch_focus():
     click = await client.click(
         DesktopClickRequest(
             request_id="req-click",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="w1",
+                title="Open",
+            ),
+        )
+    )
+    found = await client.ax_find(
+        DesktopAxFindRequest(
+            request_id="req-find",
             session_id="sess",
             user_id="user",
             agent_name="pytest",
@@ -143,6 +158,8 @@ async def test_fake_desktop_client_tracks_selector_click_and_launch_focus():
     assert click.ok is True
     assert click.target is not None
     assert click.target.window_id == "w1"
+    assert found.ok is True
+    assert found.matched is True
     assert launch.ok is True
     assert launch.target is not None
     assert launch.target.app_name == "Safari"

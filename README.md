@@ -169,7 +169,7 @@ playwright install
 
 Desktop Bridge は `DesktopClient` を呼ぶ thin adapter です。
 現時点では macOS 向けの `pyobjc` 実装が入り、
-`frontmost_app` / `windows` / `screenshot` / `ax_snapshot` に加えて、
+`frontmost_app` / `windows` / `screenshot` / `ax_find` / `ax_snapshot` に加えて、
 `launch_app` / `focus_window` / `click` / `type` / `hotkey` / `drag` まで扱えます。
 `click` と `type` は座標指定だけでなく、Accessibility selector を使った targeting にも対応します。
 こちらも standalone bridge として起動でき、`GOOGLE_API_KEY` は不要です。

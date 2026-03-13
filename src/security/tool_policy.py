@@ -67,6 +67,7 @@ _DEFAULT_RULES: List[ToolRule] = [
     ToolRule("browser_*", "approve", "browser automation needs approval"),
     ToolRule("desktop_view_windows", "allow", "desktop window listing is low risk"),
     ToolRule("desktop_view_frontmost_app", "allow", "frontmost app query is low risk"),
+    ToolRule("desktop_ax_find", "allow", "selector-based accessibility lookup is low risk"),
     ToolRule("desktop_view_screenshot", "approve", "desktop screenshots need approval"),
     ToolRule("desktop_ax_snapshot", "approve", "accessibility snapshots need approval"),
     ToolRule("desktop_control_*", "approve", "desktop control needs approval"),

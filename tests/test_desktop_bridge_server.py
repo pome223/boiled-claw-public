@@ -35,6 +35,7 @@ class TestDesktopBridgeTools:
             "desktop.view.screenshot",
             "desktop.view.windows",
             "desktop.view.frontmost_app",
+            "desktop.ax.find",
             "desktop.ax.snapshot",
             "desktop.control.click",
             "desktop.control.type",
@@ -48,6 +49,7 @@ class TestDesktopBridgeTools:
     async def test_capabilities_list(self, mcp):
         result = await mcp.call_tool("capabilities.list", {})
         text = self._text(result)
+        assert "desktop.ax.find" in text
         assert "desktop.view.screenshot" in text
         assert "desktop.control.click" in text
         assert '"implemented": false' in text.lower()
@@ -91,6 +93,7 @@ class TestDesktopBridgeTools:
         mcp = create_server(
             desktop_client=FakeDesktopClient(
                 implemented={
+                    "desktop.ax.find",
                     "desktop.view.windows",
                     "desktop.view.frontmost_app",
                     "desktop.control.launch_app",
@@ -126,6 +129,17 @@ class TestDesktopBridgeTools:
                 "agent_name": "pytest",
             },
         )
+        found = await mcp.call_tool(
+            "desktop.ax.find",
+            {
+                "request_id": "req-injected-find",
+                "session_id": "sess-injected-find",
+                "user_id": "user-injected-find",
+                "agent_name": "pytest",
+                "window_id": "w1",
+                "title": "Injected",
+            },
+        )
         launch = await mcp.call_tool(
             "desktop.control.launch_app",
             {
@@ -149,12 +163,14 @@ class TestDesktopBridgeTools:
 
         windows_text = self._text(windows)
         frontmost_text = self._text(frontmost)
+        found_text = self._text(found)
         launch_text = self._text(launch)
         focus_text = self._text(focus)
         assert '"ok": true' in windows_text.lower()
         assert "Safari" in windows_text
         assert '"ok": true' in frontmost_text.lower()
         assert '"pid": 42' in frontmost_text
+        assert '"matched": true' in found_text.lower()
         assert '"ok": true' in launch_text.lower()
         assert "Safari" in launch_text
         assert '"ok": true' in focus_text.lower()

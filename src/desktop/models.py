@@ -117,6 +117,17 @@ class DesktopAxSnapshotResult(BaseModel):
     error: Optional[str] = None
 
 
+class DesktopAxFindRequest(DesktopRequestBase):
+    target: DesktopElementSelector
+
+
+class DesktopAxFindResult(BaseModel):
+    ok: bool
+    matched: bool = False
+    target: Optional[DesktopTargetDescriptor] = None
+    error: Optional[str] = None
+
+
 class DesktopLaunchAppRequest(DesktopRequestBase):
     app_name: Optional[str] = None
     bundle_id: Optional[str] = None
@@ -191,6 +202,8 @@ __all__ = [
     "DesktopFrontmostAppResult",
     "DesktopAxSnapshotRequest",
     "DesktopAxSnapshotResult",
+    "DesktopAxFindRequest",
+    "DesktopAxFindResult",
     "DesktopLaunchAppRequest",
     "DesktopFocusWindowRequest",
     "DesktopClickRequest",

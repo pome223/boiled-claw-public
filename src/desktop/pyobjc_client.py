@@ -19,6 +19,8 @@ from src.desktop.client import (
     desktop_capabilities,
 )
 from src.desktop.models import (
+    DesktopAxFindRequest,
+    DesktopAxFindResult,
     CapabilityListResult,
     DesktopAxSnapshotRequest,
     DesktopAxSnapshotResult,
@@ -63,6 +65,7 @@ class PyObjCDesktopClient(DesktopClient):
         if self._quartz is not None:
             implemented.add("desktop.view.windows")
         if _supports_ax_snapshot(self._quartz, self._appkit):
+            implemented.add("desktop.ax.find")
             implemented.add("desktop.ax.snapshot")
         if _supports_mouse_click(self._quartz):
             implemented.add("desktop.control.click")
@@ -202,6 +205,22 @@ class PyObjCDesktopClient(DesktopClient):
             "root": self._serialize_ax_element(ax_root, depth=0, max_depth=3),
         }
         return DesktopAxSnapshotResult(ok=True, tree=tree)
+
+    async def ax_find(self, request: DesktopAxFindRequest) -> DesktopAxFindResult:
+        if not _supports_ax_snapshot(self._quartz, self._appkit):
+            return DesktopAxFindResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        resolved = self._resolve_element_target(request.target)
+        if resolved is None:
+            return DesktopAxFindResult(ok=True, matched=False)
+        return DesktopAxFindResult(
+            ok=True,
+            matched=True,
+            target=self._descriptor_for_element(
+                resolved["app_name"],
+                resolved["window_id"],
+                resolved["element"],
+            ),
+        )
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
         if request.target is not None:

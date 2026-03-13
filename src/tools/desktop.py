@@ -11,6 +11,7 @@ from src.bridges.desktop_bridge_client import get_desktop_client
 from src.bridges.desktop_exec import execute_desktop_call
 from src.config.settings import get_settings
 from src.desktop import (
+    DesktopAxFindRequest,
     DesktopAxSnapshotRequest,
     DesktopClickRequest,
     DesktopElementSelector,
@@ -339,6 +340,76 @@ async def desktop_ax_snapshot(
     return {"tree": result.tree}
 
 
+async def desktop_ax_find(
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+    index: int = 0,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    selector = _selector_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+    )
+    if selector is None:
+        return {"error": "desktop ax find requires a selector target"}
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopAxFindRequest(
+        request_id=f"desktop-find-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=None,
+        target=selector,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.ax.find",
+        args={"selector": selector.model_dump(exclude_none=True) if selector else None},
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.ax_find(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop ax find failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_VIEW,
+            action="ax_find",
+            resource=app_name or window_id or identifier or title or "desktop",
+            result=error,
+            metadata={**_executor_metadata(), "request_id": request.request_id},
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_VIEW,
+        action="ax_find",
+        resource=app_name or window_id or identifier or title or "desktop",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "matched": result.matched,
+        },
+        tool_context=tool_context,
+    )
+    return {
+        "matched": result.matched,
+        "target": result.target.model_dump() if result.target else None,
+    }
+
+
 async def desktop_control_click(
     x: Optional[int] = None,
     y: Optional[int] = None,
@@ -362,6 +433,8 @@ async def desktop_control_click(
         value_contains=value_contains,
         index=index,
     )
+    if selector is None and (x is None or y is None):
+        return {"error": "desktop click requires coordinates or a selector target"}
     approval_error, approval_token = await _check_desktop_policy(
         "desktop_control_click",
         {

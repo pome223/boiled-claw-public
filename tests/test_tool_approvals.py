@@ -4,7 +4,12 @@ import pytest
 
 import src.bridges.host_bridge_exec as bridge_exec_module
 import src.bridges.desktop_exec as desktop_exec_module
-from src.desktop import DesktopControlResult, DesktopWindowDescriptor, DesktopWindowsResult
+from src.desktop import (
+    DesktopAxFindResult,
+    DesktopControlResult,
+    DesktopWindowDescriptor,
+    DesktopWindowsResult,
+)
 from src.security.policy import SecurityPolicy
 from src.security.tool_policy import ToolPolicyEngine
 from src.tools import browser as browser_module
@@ -450,6 +455,44 @@ async def test_desktop_view_windows_uses_desktop_client(monkeypatch):
     assert result["windows"][0]["app_name"] == "Safari"
     assert emitted[0][1]["tool_name"] == "desktop.view.windows"
     assert emitted[0][1]["metadata"]["executor"] == "local_desktop"
+
+
+@pytest.mark.asyncio
+async def test_desktop_ax_find_is_allowed_without_approval(monkeypatch):
+    emitted = []
+
+    class FakeDesktopClient:
+        async def ax_find(self, request):
+            return DesktopAxFindResult(
+                ok=True,
+                matched=True,
+                target={"identifier": request.target.identifier},
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=False),
+    )
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_result", _emit_result)
+
+    result = await desktop_module.desktop_ax_find(
+        app_name="Safari",
+        window_id="w1",
+        identifier="open-button",
+    )
+
+    assert result["matched"] is True
+    assert result["target"]["identifier"] == "open-button"
+    assert emitted[0][1]["tool_name"] == "desktop.ax.find"
 
 
 @pytest.mark.asyncio
