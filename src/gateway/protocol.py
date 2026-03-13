@@ -24,8 +24,8 @@ Server -> Client:
   chat.done           text, request_id?, aborted
   chat.token          text, request_id?
   chat.history        entries[], session_id
-  tool.start          tool_name, agent_name, args
-  tool.result         tool_name, agent_name, ok, result
+  tool.start          tool_name, agent_name, args, metadata?
+  tool.result         tool_name, agent_name, ok, result, metadata?
   system.event        source, status, message, run_id?, agent_name?
   health.tick         active_sessions, ts
   cron.update         job_id, status, message
@@ -165,6 +165,7 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "tool_name": {"type": "string"},
             "agent_name": {"type": "string"},
             "args": {"type": "object"},
+            "metadata": {"type": "object"},
             "ts": {"type": "number"},
         },
     },
@@ -179,6 +180,7 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "agent_name": {"type": "string"},
             "ok": {"type": "boolean"},
             "result": {"type": "object"},
+            "metadata": {"type": "object"},
             "ts": {"type": "number"},
         },
     },
@@ -375,11 +377,14 @@ def ev_tool_start(
     agent_name: str,
     args: Optional[dict[str, Any]] = None,
     request_id: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     d = _base("tool.start", request_id)
     d["tool_name"] = tool_name
     d["agent_name"] = agent_name
     d["args"] = args or {}
+    if metadata:
+        d["metadata"] = metadata
     return d
 
 
@@ -389,12 +394,15 @@ def ev_tool_result(
     ok: bool,
     result: Optional[dict[str, Any]] = None,
     request_id: Optional[str] = None,
+    metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     d = _base("tool.result", request_id)
     d["tool_name"] = tool_name
     d["agent_name"] = agent_name
     d["ok"] = ok
     d["result"] = result or {}
+    if metadata:
+        d["metadata"] = metadata
     return d
 
 

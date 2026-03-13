@@ -51,6 +51,7 @@ from src.gateway.protocol import (
     normalize_client_event, validate_client_event,
 )
 from src.gateway.routing import RoutingDecision, decision_from_payload, heuristic_decision
+from src.runtime.tool_events import set_tool_event_notifier
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 
@@ -284,6 +285,7 @@ class GatewayServer:
     async def _startup_gateway(self) -> None:
         await ensure_skills_loaded()
         set_subagent_notifier(self._subagent_notifier_fn)
+        set_tool_event_notifier(self._send_tool_event)
         self.tool_policy.set_notifier(self._approval_notifier_fn)
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(
@@ -297,6 +299,7 @@ class GatewayServer:
 
     async def _shutdown_gateway(self) -> None:
         set_subagent_notifier(None)
+        set_tool_event_notifier(None)
         self.tool_policy.set_notifier(None)
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()

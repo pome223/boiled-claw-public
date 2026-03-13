@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     )
 
     # Google AI / ADK
-    google_api_key: str = Field(..., description="Google AI API Key")
+    google_api_key: Optional[str] = Field(default="", description="Google AI API Key")
     google_genai_use_vertexai: bool = Field(default=False, description="Use Vertex AI")
 
     # Agent settings
@@ -75,6 +75,21 @@ class Settings(BaseSettings):
     browser_headless: bool = Field(default=True, description="Headless browser mode")
     browser_timeout: int = Field(default=30000, description="Browser timeout (ms)")
 
+    # Host Bridge settings
+    host_bridge_enabled: bool = Field(default=False, description="Enable Host Bridge execution")
+    host_bridge_url: Optional[str] = Field(
+        default=None,
+        description="Host Bridge MCP SSE endpoint URL",
+    )
+    host_bridge_timeout_seconds: int = Field(
+        default=5,
+        description="HTTP timeout for Host Bridge MCP connection",
+    )
+    host_bridge_sse_read_timeout_seconds: int = Field(
+        default=300,
+        description="SSE read timeout for Host Bridge MCP connection",
+    )
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # ディレクトリ作成
@@ -92,3 +107,9 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def reset_settings() -> None:
+    """Clear the cached settings instance."""
+    global _settings
+    _settings = None

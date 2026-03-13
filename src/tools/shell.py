@@ -4,10 +4,15 @@
 
 import asyncio
 import shlex
+import uuid
 from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.bridges.host_bridge_client import get_host_bridge_client
+from src.bridges.host_bridge_exec import execute_host_bridge_call
+from src.bridges.host_bridge_schema import HostShellRunRequest, HostShellRunResult
+from src.config.settings import get_settings
 from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
@@ -18,19 +23,19 @@ async def _check_tool_policy(
     tool_name: str,
     args: dict[str, Any],
     tool_context: Optional[ToolContext],
-) -> Optional[str]:
+) -> tuple[Optional[str], Optional[str]]:
     if tool_context is None:
-        return None
+        return None, None
 
     ctx = resolve_tool_context(tool_context)
     engine = get_tool_policy_engine()
     action, reason = engine.evaluate(ctx["agent_name"], tool_name)
     if action == "allow":
-        return None
+        return None, None
     if action == "deny":
-        return f"Tool blocked by policy: {reason}"
+        return f"Tool blocked by policy: {reason}", None
 
-    approved, response_reason = await engine.request_approval(
+    approved, response_reason, approval_token = await engine.request_approval_with_id(
         tool_name=tool_name,
         agent_name=ctx["agent_name"],
         args=args,
@@ -38,9 +43,9 @@ async def _check_tool_policy(
         reason=reason,
     )
     if approved:
-        return None
+        return None, approval_token
     detail = response_reason or reason or "user rejected"
-    return f"Tool approval denied: {detail}"
+    return f"Tool approval denied: {detail}", approval_token
 
 
 async def run_shell(
@@ -63,6 +68,7 @@ async def run_shell(
     normalized = " ".join(command.split())
     audit_logger = get_audit_logger()
     ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_metadata: dict[str, Any] = {}
 
     def _audit(result: str, return_code: int | None = None) -> None:
         audit_logger.log_shell_command(
@@ -71,6 +77,7 @@ async def run_shell(
             session_id=ctx.get("session_id") or None,
             result=result,
             return_code=return_code,
+            metadata=audit_metadata,
         )
 
     policy = get_security_policy()
@@ -84,7 +91,7 @@ async def run_shell(
             "return_code": -1,
         }
 
-    approval_error = await _check_tool_policy(
+    approval_error, approval_token = await _check_tool_policy(
         "run_shell",
         {"command": normalized, "timeout": timeout},
         tool_context,
@@ -97,6 +104,56 @@ async def run_shell(
             "stderr": "",
             "return_code": -1,
         }
+
+    settings = get_settings()
+    if settings.host_bridge_enabled:
+        request = HostShellRunRequest(
+            request_id=f"host-shell-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=approval_token,
+            command=normalized,
+            timeout_seconds=timeout,
+            cwd=None,
+        )
+        audit_metadata = {
+            "executor": "host_bridge",
+            "request_id": request.request_id,
+            "approval_token": approval_token,
+        }
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.shell.run",
+            args={
+                "command": request.command,
+                "timeout_seconds": request.timeout_seconds,
+            },
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.run_shell(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: {
+                "error": error,
+                "stdout": "",
+                "stderr": "",
+                "return_code": -1,
+            },
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
+            _audit(
+                "bridge_success" if result.return_code == 0 else "bridge_failed",
+                result.return_code,
+            )
+            return {
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "return_code": result.return_code,
+                **({"error": result.error} if result.error else {}),
+                **({"timed_out": result.timed_out} if result.timed_out else {}),
+            }
+        _audit(f"bridge_error:{payload['error']}", -1)
+        return payload
 
     # コマンドをトークンに分解
     try:
@@ -116,6 +173,8 @@ async def run_shell(
 
     # 先頭トークン（実行ファイル名）による追加チェック
     executable = tokens[0].lstrip("./").split("/")[-1]
+    # Best-effort guard only. The actual security boundary is policy.is_command_allowed()
+    # above; wrappers like `bash -c ...` can bypass executable-name checks.
     BLOCKED_EXECUTABLES = {
         "rm", "shred", "mkfs", "fdisk", "dd", "wipefs",
         "truncate", "srm", "secure-delete",

@@ -2,8 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.bridges.host_bridge_exec as bridge_exec_module
 from src.security.policy import SecurityPolicy
 from src.security.tool_policy import ToolPolicyEngine
+from src.tools import browser as browser_module
 from src.tools import file_manager as file_module
 from src.tools import shell as shell_module
 
@@ -55,6 +57,60 @@ async def test_run_shell_waits_for_approval(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_run_shell_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def run_shell(self, request):
+            seen["shell_approval_token"] = request.approval_token
+            return shell_module.HostShellRunResult(
+                ok=True,
+                stdout=f"bridge:{request.command}",
+                stderr="",
+                return_code=0,
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(shell_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        shell_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(shell_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await shell_module.run_shell("echo bridge", tool_context=tool_context)
+
+    assert result["return_code"] == 0
+    assert result["stdout"] == "bridge:echo bridge"
+    assert seen["shell_approval_token"]
+    assert emitted[0][0] == "start"
+    assert emitted[0][1]["tool_name"] == "host.shell.run"
+    assert emitted[0][1]["metadata"]["executor"] == "host_bridge"
+    assert emitted[1][0] == "result"
+    assert emitted[1][1]["tool_name"] == "host.shell.run"
+    assert emitted[1][1]["metadata"]["executor"] == "host_bridge"
+
+
+@pytest.mark.asyncio
 async def test_write_file_rejected_when_approval_denied(monkeypatch, tmp_path):
     engine = ToolPolicyEngine()
 
@@ -80,3 +136,270 @@ async def test_write_file_rejected_when_approval_denied(monkeypatch, tmp_path):
     assert "error" in result
     assert "denied" in result["error"]
     assert not target.exists()
+
+
+@pytest.mark.asyncio
+async def test_read_file_uses_host_bridge_when_enabled(monkeypatch):
+    emitted = []
+
+    class FakeClient:
+        async def read_file(self, request):
+            from src.bridges.host_bridge_schema import HostFileReadResult
+
+            return HostFileReadResult(
+                ok=True,
+                path=request.path,
+                content=f"bridge:{request.path}",
+                size=len(f"bridge:{request.path}"),
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    monkeypatch.setattr(
+        file_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(file_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(file_module, "get_security_policy", lambda: SecurityPolicy())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await file_module.read_file("/tmp/demo.txt", tool_context=tool_context)
+
+    assert result["content"] == "bridge:/tmp/demo.txt"
+    assert emitted[0][1]["tool_name"] == "host.file.read"
+    assert emitted[1][1]["tool_name"] == "host.file.read"
+
+
+@pytest.mark.asyncio
+async def test_write_file_uses_host_bridge_when_enabled(monkeypatch, tmp_path):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def write_file(self, request):
+            seen["file_approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostFileWriteResult
+
+            return HostFileWriteResult(
+                ok=True,
+                path=request.path,
+                size=len(request.content),
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(file_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        file_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(file_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(file_module, "get_security_policy", lambda: SecurityPolicy())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+    target = tmp_path / "bridge.txt"
+
+    result = await file_module.write_file(
+        str(target),
+        "bridge content",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["size"] == len("bridge content")
+    assert seen["file_approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.file.write"
+    assert emitted[0][1]["metadata"]["executor"] == "host_bridge"
+    assert emitted[1][1]["tool_name"] == "host.file.write"
+
+
+@pytest.mark.asyncio
+async def test_browser_navigate_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def navigate_browser(self, request):
+            seen["navigate_approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostBrowserNavigateResult
+
+            return HostBrowserNavigateResult(
+                ok=True,
+                url=request.url,
+                title="bridge title",
+                status=200,
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(browser_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await browser_module.browser_navigate(
+        "https://example.com",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["title"] == "bridge title"
+    assert seen["navigate_approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.browser.navigate"
+    assert emitted[0][1]["metadata"]["executor"] == "host_bridge"
+    assert emitted[1][1]["tool_name"] == "host.browser.navigate"
+
+
+@pytest.mark.asyncio
+async def test_browser_extract_text_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def extract_browser_text(self, request):
+            seen["extract_approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostBrowserExtractTextResult
+
+            return HostBrowserExtractTextResult(
+                ok=True,
+                text="bridge text",
+                selector=request.selector or "body",
+                length=11,
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(browser_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await browser_module.browser_extract_text(
+        "main",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["text"] == "bridge text"
+    assert seen["extract_approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.browser.extract_text"
+    assert emitted[1][1]["tool_name"] == "host.browser.extract_text"
+
+
+@pytest.mark.asyncio
+async def test_browser_screenshot_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def screenshot_browser(self, request):
+            seen["screenshot_approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostBrowserScreenshotResult
+
+            return HostBrowserScreenshotResult(
+                ok=True,
+                path=request.path or "/tmp/capture.png",
+                full_page=request.full_page,
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(browser_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await browser_module.browser_screenshot(
+        "/tmp/bridge.png",
+        full_page=True,
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["path"] == "/tmp/bridge.png"
+    assert seen["screenshot_approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.browser.screenshot"
+    assert emitted[1][1]["tool_name"] == "host.browser.screenshot"

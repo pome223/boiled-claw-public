@@ -69,6 +69,7 @@ class AuditLogger:
         session_id: Optional[str] = None,
         result: Optional[str] = None,
         return_code: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         """シェルコマンド実行ログ"""
         self.log(
@@ -78,7 +79,7 @@ class AuditLogger:
             action="execute",
             resource=command,
             result=result or "success" if return_code == 0 else "failed",
-            metadata={"command": command, "return_code": return_code},
+            metadata={"command": command, "return_code": return_code, **(metadata or {})},
         )
 
     def log_file_operation(
@@ -88,6 +89,7 @@ class AuditLogger:
         user_id: Optional[str] = None,
         session_id: Optional[str] = None,
         result: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
     ):
         """ファイル操作ログ"""
         event_type = (
@@ -100,7 +102,7 @@ class AuditLogger:
             action=operation,
             resource=file_path,
             result=result or "success",
-            metadata={"file_path": file_path, "operation": operation},
+            metadata={"file_path": file_path, "operation": operation, **(metadata or {})},
         )
 
     def log_agent_message(

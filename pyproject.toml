@@ -42,6 +42,8 @@ dev = [
 
 [project.scripts]
 boiled-claw = "src.main:main"
+boiled-claw-host-bridge = "src.mcp_servers.host_bridge_server:main"
+boiled-claw-desktop-bridge = "src.mcp_servers.desktop_bridge_server:main"
 
 [build-system]
 requires = ["hatchling"]
