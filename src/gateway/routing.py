@@ -85,6 +85,8 @@ _DESKTOP_VIEW_KEYWORDS = {
 _DESKTOP_CONTROL_KEYWORDS = {
     "クリック",
     "click",
+    "drag",
+    "ドラッグ",
     "type",
     "入力",
     "打って",

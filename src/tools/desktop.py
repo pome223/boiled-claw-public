@@ -17,6 +17,7 @@ from src.desktop import (
     DesktopHotkeyRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
+    DesktopDragRequest,
     DesktopWindowsRequest,
 )
 from src.security.audit import AuditEventType, get_audit_logger
@@ -481,4 +482,82 @@ async def desktop_control_hotkey(
     )
     if result is None or not result.ok:
         return {"error": (result.error if result else payload["error"]) or "desktop hotkey failed"}
+    return {"success": True}
+
+
+async def desktop_control_drag(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    approval_error, approval_token = await _check_desktop_policy(
+        "desktop_control_drag",
+        {
+            "start_x": start_x,
+            "start_y": start_y,
+            "end_x": end_x,
+            "end_y": end_y,
+        },
+        tool_context,
+    )
+    if approval_error:
+        return {"error": approval_error}
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopDragRequest(
+        request_id=f"desktop-drag-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+        start_x=start_x,
+        start_y=start_y,
+        end_x=end_x,
+        end_y=end_y,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.control.drag",
+        args={
+            "start_x": start_x,
+            "start_y": start_y,
+            "end_x": end_x,
+            "end_y": end_y,
+        },
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.drag(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop drag failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_CONTROL,
+            action="drag",
+            resource=f"{start_x},{start_y}->{end_x},{end_y}",
+            result=error,
+            metadata={
+                **_executor_metadata(),
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+            },
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_CONTROL,
+        action="drag",
+        resource=f"{start_x},{start_y}->{end_x},{end_y}",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "approval_token": approval_token,
+        },
+        tool_context=tool_context,
+    )
     return {"success": True}

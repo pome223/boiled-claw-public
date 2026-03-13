@@ -60,8 +60,11 @@ class PyObjCDesktopClient(DesktopClient):
             implemented.add("desktop.ax.snapshot")
         if _supports_mouse_click(self._quartz):
             implemented.add("desktop.control.click")
+            implemented.add("desktop.control.drag")
         if _supports_text_input(self._quartz):
             implemented.add("desktop.control.type")
+        if _supports_hotkey(self._quartz):
+            implemented.add("desktop.control.hotkey")
         if self._appkit is not None:
             implemented.add("desktop.view.frontmost_app")
         if shutil.which("screencapture"):
@@ -230,12 +233,49 @@ class PyObjCDesktopClient(DesktopClient):
         return DesktopControlResult(ok=True)
 
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
-        del request
-        return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        if not _supports_hotkey(self._quartz):
+            return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+
+        keycode, flags = _hotkey_spec(self._quartz, request.keys)
+        if keycode is None:
+            return DesktopControlResult(ok=False, error="unsupported hotkey")
+
+        down = self._quartz.CGEventCreateKeyboardEvent(None, keycode, True)
+        up = self._quartz.CGEventCreateKeyboardEvent(None, keycode, False)
+        _set_event_flags(self._quartz, down, flags)
+        _set_event_flags(self._quartz, up, flags)
+        self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
+        self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
+        return DesktopControlResult(ok=True)
 
     async def drag(self, request: DesktopDragRequest) -> DesktopControlResult:
-        del request
-        return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        if not _supports_mouse_click(self._quartz):
+            return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+
+        start = (request.start_x, request.start_y)
+        end = (request.end_x, request.end_y)
+        down = self._quartz.CGEventCreateMouseEvent(
+            None,
+            self._quartz.kCGEventLeftMouseDown,
+            start,
+            self._quartz.kCGMouseButtonLeft,
+        )
+        dragged = self._quartz.CGEventCreateMouseEvent(
+            None,
+            getattr(self._quartz, "kCGEventLeftMouseDragged", self._quartz.kCGEventLeftMouseDown),
+            end,
+            self._quartz.kCGMouseButtonLeft,
+        )
+        up = self._quartz.CGEventCreateMouseEvent(
+            None,
+            self._quartz.kCGEventLeftMouseUp,
+            end,
+            self._quartz.kCGMouseButtonLeft,
+        )
+        self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
+        self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, dragged)
+        self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
+        return DesktopControlResult(ok=True)
 
     def _resolve_target_application(
         self,
@@ -383,6 +423,10 @@ def _supports_text_input(quartz_module: Any | None) -> bool:
     )
 
 
+def _supports_hotkey(quartz_module: Any | None) -> bool:
+    return _supports_text_input(quartz_module) and hasattr(quartz_module, "CGEventSetFlags")
+
+
 def _mouse_event_spec(quartz_module: Any, button: str) -> tuple[int, int, int]:
     button_name = button.lower()
     if button_name == "right":
@@ -430,6 +474,87 @@ def _stringify_ax_value(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(key): _stringify_ax_value(val) for key, val in value.items()}
     return str(value)
+
+
+def _set_event_flags(quartz_module: Any, event: Any, flags: int) -> None:
+    setter = getattr(quartz_module, "CGEventSetFlags", None)
+    if callable(setter):
+        setter(event, flags)
+    elif isinstance(event, dict):
+        event["flags"] = flags
+
+
+def _hotkey_spec(quartz_module: Any, keys: list[str]) -> tuple[int | None, int]:
+    modifiers = {
+        "command": getattr(quartz_module, "kCGEventFlagMaskCommand", 0),
+        "cmd": getattr(quartz_module, "kCGEventFlagMaskCommand", 0),
+        "shift": getattr(quartz_module, "kCGEventFlagMaskShift", 0),
+        "option": getattr(quartz_module, "kCGEventFlagMaskAlternate", 0),
+        "alt": getattr(quartz_module, "kCGEventFlagMaskAlternate", 0),
+        "control": getattr(quartz_module, "kCGEventFlagMaskControl", 0),
+        "ctrl": getattr(quartz_module, "kCGEventFlagMaskControl", 0),
+        "fn": getattr(quartz_module, "kCGEventFlagMaskSecondaryFn", 0),
+    }
+    keycodes = {
+        "a": 0,
+        "b": 11,
+        "c": 8,
+        "d": 2,
+        "e": 14,
+        "f": 3,
+        "g": 5,
+        "h": 4,
+        "i": 34,
+        "j": 38,
+        "k": 40,
+        "l": 37,
+        "m": 46,
+        "n": 45,
+        "o": 31,
+        "p": 35,
+        "q": 12,
+        "r": 15,
+        "s": 1,
+        "t": 17,
+        "u": 32,
+        "v": 9,
+        "w": 13,
+        "x": 7,
+        "y": 16,
+        "z": 6,
+        "0": 29,
+        "1": 18,
+        "2": 19,
+        "3": 20,
+        "4": 21,
+        "5": 23,
+        "6": 22,
+        "7": 26,
+        "8": 28,
+        "9": 25,
+        "space": 49,
+        "return": 36,
+        "enter": 36,
+        "tab": 48,
+        "escape": 53,
+        "esc": 53,
+        "left": 123,
+        "right": 124,
+        "down": 125,
+        "up": 126,
+    }
+
+    flags = 0
+    primary_key: str | None = None
+    for key in keys:
+        normalized = str(key).strip().lower()
+        if normalized in modifiers:
+            flags |= modifiers[normalized]
+        else:
+            primary_key = normalized
+    if primary_key is None:
+        return None, flags
+    return keycodes.get(primary_key), flags
 
 
 __all__ = ["PyObjCDesktopClient"]

@@ -73,8 +73,8 @@ Output ONLY a single JSON object with this exact structure:
 
 Risk level guide:
 - low: read-only (memory.read, web.search)
-- medium: limited write (file.read, browser.navigate)
-- high: write/delete (file.write, memory.delete)
+- medium: limited read or capture (file.read, browser.navigate, desktop.view.windows)
+- high: write/delete or sensitive desktop capture (file.write, memory.delete, desktop.view.screenshot, desktop.ax.snapshot)
 - critical: shell execution or agent spawn
 
 Do NOT include anything outside the JSON object.

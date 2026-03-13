@@ -170,3 +170,145 @@ async def guarded_browser_extract_text(
 
     from src.tools.browser import browser_extract_text
     return await browser_extract_text(selector)
+
+
+async def guarded_desktop_view_windows(
+    include_minimized: bool = False,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "desktop.view.windows")
+        _check_capability_in_plan(tool_context, "desktop.view.windows")
+
+    from src.tools.desktop import desktop_view_windows
+    return await desktop_view_windows(include_minimized=include_minimized)
+
+
+async def guarded_desktop_view_frontmost_app(
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "desktop.view.frontmost_app")
+        _check_capability_in_plan(tool_context, "desktop.view.frontmost_app")
+
+    from src.tools.desktop import desktop_view_frontmost_app
+    return await desktop_view_frontmost_app()
+
+
+async def guarded_desktop_view_screenshot(
+    path: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.view.screenshot requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.view.screenshot")
+
+    from src.tools.desktop import desktop_view_screenshot
+    return await desktop_view_screenshot(path=path)
+
+
+async def guarded_desktop_ax_snapshot(
+    app_name: str | None = None,
+    window_id: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.ax.snapshot requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.ax.snapshot")
+
+    from src.tools.desktop import desktop_ax_snapshot
+    return await desktop_ax_snapshot(app_name=app_name, window_id=window_id)
+
+
+async def guarded_desktop_control_click(
+    x: int,
+    y: int,
+    button: str = "left",
+    click_count: int = 1,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.control.click requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.control.click")
+
+    from src.tools.desktop import desktop_control_click
+    return await desktop_control_click(
+        x=x,
+        y=y,
+        button=button,
+        click_count=click_count,
+    )
+
+
+async def guarded_desktop_control_type(
+    text: str,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.control.type requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.control.type")
+
+    from src.tools.desktop import desktop_control_type
+    return await desktop_control_type(text=text)
+
+
+async def guarded_desktop_control_hotkey(
+    keys: list[str],
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.control.hotkey requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.control.hotkey")
+
+    from src.tools.desktop import desktop_control_hotkey
+    return await desktop_control_hotkey(keys=keys)
+
+
+async def guarded_desktop_control_drag(
+    start_x: int,
+    start_y: int,
+    end_x: int,
+    end_y: int,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.control.drag requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.control.drag")
+
+    from src.tools.desktop import desktop_control_drag
+    return await desktop_control_drag(
+        start_x=start_x,
+        start_y=start_y,
+        end_x=end_x,
+        end_y=end_y,
+    )

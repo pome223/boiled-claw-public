@@ -35,6 +35,12 @@ _HUMAN_REQUIRED_CAPS: set[str] = {
     "shell.exec",
     "spawn.agent",
     "memory.delete",
+    "desktop.view.screenshot",
+    "desktop.ax.snapshot",
+    "desktop.control.click",
+    "desktop.control.type",
+    "desktop.control.hotkey",
+    "desktop.control.drag",
 }
 
 # 常に拒否する capability

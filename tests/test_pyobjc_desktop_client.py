@@ -11,10 +11,12 @@ import pytest
 from src.desktop import (
     DesktopAxSnapshotRequest,
     DesktopClickRequest,
+    DesktopDragRequest,
     FakeDesktopClient,
     PyObjCDesktopClient,
     build_default_desktop_client,
     DesktopFrontmostAppRequest,
+    DesktopHotkeyRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
     DesktopWindowsRequest,
@@ -57,10 +59,16 @@ class _FakeQuartz:
     kCGEventRightMouseUp = 13
     kCGEventOtherMouseDown = 14
     kCGEventOtherMouseUp = 15
+    kCGEventLeftMouseDragged = 16
     kCGMouseButtonLeft = 100
     kCGMouseButtonRight = 101
     kCGMouseButtonCenter = 102
     kCGHIDEventTap = 999
+    kCGEventFlagMaskCommand = 1 << 0
+    kCGEventFlagMaskShift = 1 << 1
+    kCGEventFlagMaskAlternate = 1 << 2
+    kCGEventFlagMaskControl = 1 << 3
+    kCGEventFlagMaskSecondaryFn = 1 << 4
     kAXWindowsAttribute = "AXWindows"
     kAXChildrenAttribute = "AXChildren"
     kAXRoleAttribute = "AXRole"
@@ -149,6 +157,10 @@ class _FakeQuartz:
     def CGEventKeyboardSetUnicodeString(cls, event, length, text):
         event["length"] = length
         event["text"] = text
+
+    @classmethod
+    def CGEventSetFlags(cls, event, flags):
+        event["flags"] = flags
 
     @classmethod
     def CGEventPost(cls, tap, event):
@@ -283,6 +295,51 @@ async def test_pyobjc_client_type_posts_keyboard_events():
     assert len(_FakeQuartz.posted) == 4
     assert _FakeQuartz.posted[0][1]["text"] == "a"
     assert _FakeQuartz.posted[2][1]["text"] == "b"
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_hotkey_posts_keyboard_events_with_flags():
+    _FakeQuartz.posted = []
+    client = PyObjCDesktopClient(quartz_module=_FakeQuartz())
+
+    result = await client.hotkey(
+        DesktopHotkeyRequest(
+            request_id="req-hotkey",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            keys=["command", "shift", "p"],
+        )
+    )
+
+    assert result.ok is True
+    assert len(_FakeQuartz.posted) == 2
+    assert _FakeQuartz.posted[0][1]["flags"] == (
+        _FakeQuartz.kCGEventFlagMaskCommand | _FakeQuartz.kCGEventFlagMaskShift
+    )
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_drag_posts_mouse_sequence():
+    _FakeQuartz.posted = []
+    client = PyObjCDesktopClient(quartz_module=_FakeQuartz())
+
+    result = await client.drag(
+        DesktopDragRequest(
+            request_id="req-drag",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            start_x=10,
+            start_y=20,
+            end_x=30,
+            end_y=40,
+        )
+    )
+
+    assert result.ok is True
+    assert len(_FakeQuartz.posted) == 3
+    assert _FakeQuartz.posted[1][1]["event_type"] == _FakeQuartz.kCGEventLeftMouseDragged
 
 
 def test_build_default_desktop_client_returns_fake_off_macos(monkeypatch):

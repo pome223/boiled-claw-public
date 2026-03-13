@@ -527,3 +527,36 @@ async def test_desktop_type_waits_for_approval(monkeypatch):
 
     assert result["success"] is True
     assert seen["approval_token"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_drag_waits_for_approval(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeDesktopClient:
+        async def drag(self, request):
+            seen["approval_token"] = request.approval_token
+            return DesktopControlResult(ok=True)
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(desktop_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=True),
+    )
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_control_drag(10, 20, 30, 40, tool_context=tool_context)
+
+    assert result["success"] is True
+    assert seen["approval_token"]

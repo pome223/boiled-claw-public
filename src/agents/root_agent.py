@@ -12,6 +12,7 @@ from src.tools.browser import browser_navigate, browser_screenshot, browser_extr
 from src.tools.desktop import (
     desktop_ax_snapshot,
     desktop_control_click,
+    desktop_control_drag,
     desktop_control_hotkey,
     desktop_control_type,
     desktop_view_frontmost_app,
@@ -115,7 +116,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - desktop_view_frontmost_app で前面アプリを確認
 - desktop_view_screenshot でデスクトップのスクリーンショットを取得
 - desktop_ax_snapshot で Accessibility tree を取得
-- desktop_control_click / desktop_control_type は高リスク操作なので、承認が必要な場合がある
+- desktop_control_click / type / hotkey / drag は高リスク操作なので、承認が必要な場合がある
 
 ## マルチエージェント委譲（Google ADK準拠）
 - 単純な検索・ファイル操作・シェル実行は直接ツールを使う（委譲しない）
@@ -151,6 +152,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         desktop_control_click,
         desktop_control_type,
         desktop_control_hotkey,
+        desktop_control_drag,
         run_shell,
         read_file,
         write_file,

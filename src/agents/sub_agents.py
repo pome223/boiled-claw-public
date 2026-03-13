@@ -11,6 +11,7 @@ from src.tools.browser import browser_navigate, browser_screenshot, browser_extr
 from src.tools.desktop import (
     desktop_ax_snapshot,
     desktop_control_click,
+    desktop_control_drag,
     desktop_control_hotkey,
     desktop_control_type,
     desktop_view_frontmost_app,
@@ -169,6 +170,7 @@ desktop_agent = Agent(
         desktop_control_click,
         desktop_control_type,
         desktop_control_hotkey,
+        desktop_control_drag,
     ],
 )
 

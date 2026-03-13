@@ -11,6 +11,7 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from src.control_loop import guarded_tools as guarded_tools_module
+from src.control_loop.callbacks import policy_judge_callback
 from src.control_loop.instructions import (
     build_executor_instruction,
     build_planner_instruction,
@@ -162,6 +163,72 @@ async def test_guarded_memory_read_prefers_adk_memory():
     assert result["source"] == "adk_memory"
     assert result["count"] == 1
     assert result["results"][0]["content"] == "remembered fact"
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_view_windows_allows_policy_approved(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.view.windows"}]
+            },
+        }
+    )
+
+    async def _fake_windows(*, include_minimized=False):
+        assert include_minimized is False
+        return {"windows": [{"window_id": "w1", "app_name": "Safari"}]}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_view_windows",
+        _fake_windows,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_view_windows(
+        tool_context=tool_context,
+    )
+
+    assert result["windows"][0]["app_name"] == "Safari"
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_click_requires_human_approved():
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.click"}]
+            },
+        }
+    )
+
+    with pytest.raises(PermissionError, match="human_approved"):
+        await guarded_tools_module.guarded_desktop_control_click(
+            10,
+            20,
+            tool_context=tool_context,
+        )
+
+
+def test_policy_judge_requires_human_for_desktop_control():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "plan-desktop-1",
+                "goal": "click through the desktop flow",
+                "risk_level": "high",
+                "required_capabilities": [
+                    {"name": "desktop.control.click"},
+                ],
+            }
+        }
+    )
+
+    policy_judge_callback(callback_context, types.Content(role="model", parts=[]))
+
+    assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
+    assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-desktop-1"
 
 
 @pytest.mark.asyncio
