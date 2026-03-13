@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import src.bridges.host_bridge_exec as bridge_exec_module
 from src.security.policy import SecurityPolicy
 from src.security.tool_policy import ToolPolicyEngine
 from src.tools import browser as browser_module
@@ -88,8 +89,8 @@ async def test_run_shell_uses_host_bridge_when_enabled(monkeypatch):
         lambda: SimpleNamespace(host_bridge_enabled=True),
     )
     monkeypatch.setattr(shell_module, "get_host_bridge_client", lambda: FakeClient())
-    monkeypatch.setattr(shell_module, "emit_tool_start", _emit_start)
-    monkeypatch.setattr(shell_module, "emit_tool_result", _emit_result)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
 
     tool_context = SimpleNamespace(
         agent_name="boiled_claw",
@@ -165,8 +166,8 @@ async def test_read_file_uses_host_bridge_when_enabled(monkeypatch):
     )
     monkeypatch.setattr(file_module, "get_host_bridge_client", lambda: FakeClient())
     monkeypatch.setattr(file_module, "get_security_policy", lambda: SecurityPolicy())
-    monkeypatch.setattr(file_module, "emit_tool_start", _emit_start)
-    monkeypatch.setattr(file_module, "emit_tool_result", _emit_result)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
 
     tool_context = SimpleNamespace(
         agent_name="boiled_claw",
@@ -198,7 +199,6 @@ async def test_write_file_uses_host_bridge_when_enabled(monkeypatch, tmp_path):
                 ok=True,
                 path=request.path,
                 size=len(request.content),
-                success=True,
             )
 
     async def _emit_start(**payload):
@@ -216,8 +216,8 @@ async def test_write_file_uses_host_bridge_when_enabled(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(file_module, "get_host_bridge_client", lambda: FakeClient())
     monkeypatch.setattr(file_module, "get_security_policy", lambda: SecurityPolicy())
-    monkeypatch.setattr(file_module, "emit_tool_start", _emit_start)
-    monkeypatch.setattr(file_module, "emit_tool_result", _emit_result)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
 
     tool_context = SimpleNamespace(
         agent_name="boiled_claw",
@@ -254,7 +254,7 @@ async def test_browser_navigate_uses_host_bridge_when_enabled(monkeypatch):
             from src.bridges.host_bridge_schema import HostBrowserNavigateResult
 
             return HostBrowserNavigateResult(
-                success=True,
+                ok=True,
                 url=request.url,
                 title="bridge title",
                 status=200,
@@ -274,8 +274,8 @@ async def test_browser_navigate_uses_host_bridge_when_enabled(monkeypatch):
         lambda: SimpleNamespace(host_bridge_enabled=True),
     )
     monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
-    monkeypatch.setattr(browser_module, "emit_tool_start", _emit_start)
-    monkeypatch.setattr(browser_module, "emit_tool_result", _emit_result)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
 
     tool_context = SimpleNamespace(
         agent_name="boiled_claw",
@@ -310,7 +310,7 @@ async def test_browser_extract_text_uses_host_bridge_when_enabled(monkeypatch):
             from src.bridges.host_bridge_schema import HostBrowserExtractTextResult
 
             return HostBrowserExtractTextResult(
-                success=True,
+                ok=True,
                 text="bridge text",
                 selector=request.selector or "body",
                 length=11,
@@ -330,8 +330,8 @@ async def test_browser_extract_text_uses_host_bridge_when_enabled(monkeypatch):
         lambda: SimpleNamespace(host_bridge_enabled=True),
     )
     monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
-    monkeypatch.setattr(browser_module, "emit_tool_start", _emit_start)
-    monkeypatch.setattr(browser_module, "emit_tool_result", _emit_result)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
 
     tool_context = SimpleNamespace(
         agent_name="boiled_claw",
@@ -365,7 +365,7 @@ async def test_browser_screenshot_uses_host_bridge_when_enabled(monkeypatch):
             from src.bridges.host_bridge_schema import HostBrowserScreenshotResult
 
             return HostBrowserScreenshotResult(
-                success=True,
+                ok=True,
                 path=request.path or "/tmp/capture.png",
                 full_page=request.full_page,
             )
@@ -384,8 +384,8 @@ async def test_browser_screenshot_uses_host_bridge_when_enabled(monkeypatch):
         lambda: SimpleNamespace(host_bridge_enabled=True),
     )
     monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
-    monkeypatch.setattr(browser_module, "emit_tool_start", _emit_start)
-    monkeypatch.setattr(browser_module, "emit_tool_result", _emit_result)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
 
     tool_context = SimpleNamespace(
         agent_name="boiled_claw",

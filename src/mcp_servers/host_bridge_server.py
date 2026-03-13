@@ -42,10 +42,21 @@ from src.security.policy import get_security_policy
 from src.tools import browser as browser_tools
 
 
+# Best-effort guard only. The actual security boundary is policy.is_command_allowed()
+# above; wrappers like `bash -c ...` can bypass executable-name checks.
 _BLOCKED_EXECUTABLES = {
     "rm", "shred", "mkfs", "fdisk", "dd", "wipefs",
     "truncate", "srm", "secure-delete",
 }
+
+
+def _normalize_browser_payload(payload: dict, *, default_selector: str | None = None) -> dict:
+    normalized = dict(payload)
+    if "success" in normalized and "ok" not in normalized:
+        normalized["ok"] = normalized.pop("success")
+    if default_selector is not None and "selector" not in normalized:
+        normalized["selector"] = default_selector
+    return normalized
 
 
 def _run_host_shell(request: HostShellRunRequest) -> HostShellRunResult:
@@ -216,7 +227,6 @@ def _write_host_file(request: HostFileWriteRequest) -> HostFileWriteResult:
             ok=True,
             path=str(file_path),
             size=len(request.content),
-            success=True,
         )
     except PermissionError:
         return HostFileWriteResult(ok=False, error=f"Permission denied: {request.path}")
@@ -387,7 +397,9 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             timeout=request.timeout,
             tool_context=None,
         )
-        return HostBrowserNavigateResult.model_validate(payload).model_dump()
+        return HostBrowserNavigateResult.model_validate(
+            _normalize_browser_payload(payload)
+        ).model_dump()
 
     @mcp.tool(
         name="host.browser.extract_text",
@@ -413,7 +425,9 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             request.selector,
             tool_context=None,
         )
-        return HostBrowserExtractTextResult.model_validate(payload).model_dump()
+        return HostBrowserExtractTextResult.model_validate(
+            _normalize_browser_payload(payload, default_selector=request.selector or "body")
+        ).model_dump()
 
     @mcp.tool(
         name="host.browser.screenshot",
@@ -442,7 +456,9 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             full_page=request.full_page,
             tool_context=None,
         )
-        return HostBrowserScreenshotResult.model_validate(payload).model_dump()
+        return HostBrowserScreenshotResult.model_validate(
+            _normalize_browser_payload(payload)
+        ).model_dump()
 
     return mcp
 

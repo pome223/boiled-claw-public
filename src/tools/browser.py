@@ -12,14 +12,14 @@ from urllib.parse import urlparse
 
 from google.adk.agents.context import Context as ToolContext
 
-from src.bridges.host_bridge_client import HostBridgeError, get_host_bridge_client
+from src.bridges.host_bridge_client import get_host_bridge_client
+from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import (
     HostBrowserExtractTextRequest,
     HostBrowserNavigateRequest,
     HostBrowserScreenshotRequest,
 )
 from src.config.settings import get_settings
-from src.runtime.tool_events import emit_tool_result, emit_tool_start
 from src.security.audit import AuditEventType, get_audit_logger
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.context import resolve_tool_context
@@ -180,6 +180,20 @@ def _default_screenshot_path() -> str:
     import time
 
     return str(screenshots_dir / f"screenshot_{int(time.time())}.png")
+
+
+def _bridge_browser_error_payload(
+    error: str,
+    *,
+    selector: Optional[str] = None,
+    url: Optional[str] = None,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {"error": error, "success": False}
+    if selector is not None:
+        payload["selector"] = selector
+    if url is not None:
+        payload["url"] = url
+    return payload
 
 
 async def _browser_navigate_local(
@@ -393,32 +407,21 @@ async def browser_navigate(
             wait_for=wait_for,
             timeout=timeout,
         )
-        try:
-            client = get_host_bridge_client()
-            if client is None:
-                raise HostBridgeError("Host Bridge is not enabled")
-            await emit_tool_start(
-                session_id=request.session_id,
-                tool_name="host.browser.navigate",
-                agent_name=request.agent_name,
-                args={"url": request.url, "wait_for": request.wait_for, "timeout": request.timeout},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            result = await client.navigate_browser(request)
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.browser.navigate",
-                agent_name=request.agent_name,
-                ok=result.success,
-                result=result.model_dump(),
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.browser.navigate",
+            args={"url": request.url, "wait_for": request.wait_for, "timeout": request.timeout},
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.navigate_browser(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: _bridge_browser_error_payload(error, url=url),
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
             _audit_browser_event(
                 action="navigate",
                 resource=url,
-                result="bridge_success" if result.success else f"bridge_error:{result.error}",
+                result="bridge_success" if result.ok else f"bridge_error:{result.error}",
                 metadata={
                     "executor": "host_bridge",
                     "request_id": request.request_id,
@@ -426,29 +429,25 @@ async def browser_navigate(
                 },
                 tool_context=tool_context,
             )
-            return result.model_dump(exclude_none=True)
-        except HostBridgeError as e:
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.browser.navigate",
-                agent_name=request.agent_name,
-                ok=False,
-                result={"error": str(e), "success": False, "url": url},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            _audit_browser_event(
-                action="navigate",
-                resource=url,
-                result=f"bridge_error:{e}",
-                metadata={
-                    "executor": "host_bridge",
-                    "request_id": request.request_id,
-                    "approval_token": approval_token,
-                },
-                tool_context=tool_context,
-            )
-            return {"error": str(e), "success": False, "url": url}
+            return {
+                "url": result.url,
+                "title": result.title,
+                "status": result.status,
+                "success": result.ok,
+                **({"error": result.error} if result.error else {}),
+            }
+        _audit_browser_event(
+            action="navigate",
+            resource=url,
+            result=f"bridge_error:{payload['error']}",
+            metadata={
+                "executor": "host_bridge",
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+            },
+            tool_context=tool_context,
+        )
+        return payload
 
     return await _browser_navigate_local(url, wait_for, timeout, tool_context)
 
@@ -495,32 +494,21 @@ async def browser_screenshot(
             path=path,
             full_page=full_page,
         )
-        try:
-            client = get_host_bridge_client()
-            if client is None:
-                raise HostBridgeError("Host Bridge is not enabled")
-            await emit_tool_start(
-                session_id=request.session_id,
-                tool_name="host.browser.screenshot",
-                agent_name=request.agent_name,
-                args={"path": request.path, "full_page": request.full_page},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            result = await client.screenshot_browser(request)
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.browser.screenshot",
-                agent_name=request.agent_name,
-                ok=result.success,
-                result=result.model_dump(),
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.browser.screenshot",
+            args={"path": request.path, "full_page": request.full_page},
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.screenshot_browser(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: _bridge_browser_error_payload(error),
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
             _audit_browser_event(
                 action="screenshot",
                 resource=result.path or path or "",
-                result="bridge_success" if result.success else f"bridge_error:{result.error}",
+                result="bridge_success" if result.ok else f"bridge_error:{result.error}",
                 metadata={
                     "executor": "host_bridge",
                     "request_id": request.request_id,
@@ -529,30 +517,25 @@ async def browser_screenshot(
                 },
                 tool_context=tool_context,
             )
-            return result.model_dump(exclude_none=True)
-        except HostBridgeError as e:
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.browser.screenshot",
-                agent_name=request.agent_name,
-                ok=False,
-                result={"error": str(e), "success": False},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            _audit_browser_event(
-                action="screenshot",
-                resource=path or "",
-                result=f"bridge_error:{e}",
-                metadata={
-                    "executor": "host_bridge",
-                    "request_id": request.request_id,
-                    "approval_token": approval_token,
-                    "full_page": full_page,
-                },
-                tool_context=tool_context,
-            )
-            return {"error": str(e), "success": False}
+            return {
+                "path": result.path,
+                "full_page": result.full_page,
+                "success": result.ok,
+                **({"error": result.error} if result.error else {}),
+            }
+        _audit_browser_event(
+            action="screenshot",
+            resource=path or "",
+            result=f"bridge_error:{payload['error']}",
+            metadata={
+                "executor": "host_bridge",
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+                "full_page": full_page,
+            },
+            tool_context=tool_context,
+        )
+        return payload
 
     return await _browser_screenshot_local(path, full_page, tool_context)
 
@@ -596,32 +579,24 @@ async def browser_extract_text(
             approval_token=approval_token,
             selector=selector,
         )
-        try:
-            client = get_host_bridge_client()
-            if client is None:
-                raise HostBridgeError("Host Bridge is not enabled")
-            await emit_tool_start(
-                session_id=request.session_id,
-                tool_name="host.browser.extract_text",
-                agent_name=request.agent_name,
-                args={"selector": request.selector},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            result = await client.extract_browser_text(request)
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.browser.extract_text",
-                agent_name=request.agent_name,
-                ok=result.success,
-                result=result.model_dump(),
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.browser.extract_text",
+            args={"selector": request.selector},
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.extract_browser_text(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: _bridge_browser_error_payload(
+                error,
+                selector=selector or "body",
+            ),
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
             _audit_browser_event(
                 action="extract_text",
                 resource=result.selector,
-                result="bridge_success" if result.success else f"bridge_error:{result.error}",
+                result="bridge_success" if result.ok else f"bridge_error:{result.error}",
                 metadata={
                     "executor": "host_bridge",
                     "request_id": request.request_id,
@@ -630,29 +605,25 @@ async def browser_extract_text(
                 },
                 tool_context=tool_context,
             )
-            return result.model_dump(exclude_none=True)
-        except HostBridgeError as e:
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.browser.extract_text",
-                agent_name=request.agent_name,
-                ok=False,
-                result={"error": str(e), "success": False},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            _audit_browser_event(
-                action="extract_text",
-                resource=selector or "body",
-                result=f"bridge_error:{e}",
-                metadata={
-                    "executor": "host_bridge",
-                    "request_id": request.request_id,
-                    "approval_token": approval_token,
-                },
-                tool_context=tool_context,
-            )
-            return {"error": str(e), "success": False}
+            return {
+                "text": result.text,
+                "selector": result.selector,
+                "length": result.length,
+                "success": result.ok,
+                **({"error": result.error} if result.error else {}),
+            }
+        _audit_browser_event(
+            action="extract_text",
+            resource=selector or "body",
+            result=f"bridge_error:{payload['error']}",
+            metadata={
+                "executor": "host_bridge",
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+            },
+            tool_context=tool_context,
+        )
+        return payload
 
     return await _browser_extract_text_local(selector, tool_context)
 

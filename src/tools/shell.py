@@ -9,10 +9,10 @@ from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
-from src.bridges.host_bridge_client import HostBridgeError, get_host_bridge_client
+from src.bridges.host_bridge_client import get_host_bridge_client
+from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import HostShellRunRequest, HostShellRunResult
 from src.config.settings import get_settings
-from src.runtime.tool_events import emit_tool_result, emit_tool_start
 from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
@@ -122,53 +122,38 @@ async def run_shell(
             "request_id": request.request_id,
             "approval_token": approval_token,
         }
-        try:
-            client = get_host_bridge_client()
-            if client is None:
-                raise HostBridgeError("Host Bridge is not enabled")
-            await emit_tool_start(
-                session_id=request.session_id,
-                tool_name="host.shell.run",
-                agent_name=request.agent_name,
-                args={
-                    "command": request.command,
-                    "timeout_seconds": request.timeout_seconds,
-                },
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            result = await client.run_shell(request)
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.shell.run",
-                agent_name=request.agent_name,
-                ok=result.ok,
-                result=result.model_dump(),
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.shell.run",
+            args={
+                "command": request.command,
+                "timeout_seconds": request.timeout_seconds,
+            },
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.run_shell(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: {
+                "error": error,
+                "stdout": "",
+                "stderr": "",
+                "return_code": -1,
+            },
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
             _audit(
                 "bridge_success" if result.return_code == 0 else "bridge_failed",
                 result.return_code,
             )
-            return result.model_dump()
-        except HostBridgeError as e:
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.shell.run",
-                agent_name=request.agent_name,
-                ok=False,
-                result={"error": str(e), "return_code": -1},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            _audit(f"bridge_error:{e}", -1)
             return {
-                "error": str(e),
-                "stdout": "",
-                "stderr": "",
-                "return_code": -1,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+                "return_code": result.return_code,
+                **({"error": result.error} if result.error else {}),
+                **({"timed_out": result.timed_out} if result.timed_out else {}),
             }
+        _audit(f"bridge_error:{payload['error']}", -1)
+        return payload
 
     # コマンドをトークンに分解
     try:
@@ -188,6 +173,8 @@ async def run_shell(
 
     # 先頭トークン（実行ファイル名）による追加チェック
     executable = tokens[0].lstrip("./").split("/")[-1]
+    # Best-effort guard only. The actual security boundary is policy.is_command_allowed()
+    # above; wrappers like `bash -c ...` can bypass executable-name checks.
     BLOCKED_EXECUTABLES = {
         "rm", "shred", "mkfs", "fdisk", "dd", "wipefs",
         "truncate", "srm", "secure-delete",

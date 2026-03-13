@@ -77,7 +77,6 @@ class HostFileWriteResult(BaseModel):
     ok: bool
     path: Optional[str] = None
     size: int = 0
-    success: bool = False
     error: Optional[str] = None
 
 
@@ -116,7 +115,7 @@ class HostBrowserNavigateRequest(BaseModel):
 
 
 class HostBrowserNavigateResult(BaseModel):
-    success: bool
+    ok: bool
     url: Optional[str] = None
     title: str = ""
     status: Optional[int] = None
@@ -134,7 +133,7 @@ class HostBrowserScreenshotRequest(BaseModel):
 
 
 class HostBrowserScreenshotResult(BaseModel):
-    success: bool
+    ok: bool
     path: Optional[str] = None
     full_page: bool = False
     error: Optional[str] = None
@@ -150,7 +149,7 @@ class HostBrowserExtractTextRequest(BaseModel):
 
 
 class HostBrowserExtractTextResult(BaseModel):
-    success: bool
+    ok: bool
     text: str = ""
     selector: str = "body"
     length: int = 0

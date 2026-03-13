@@ -107,6 +107,13 @@ def test_http_run_persists_transcript_and_session_listing(monkeypatch, tmp_path)
         assert entries[1]["content"] == "echo:hello gateway"
 
 
+def test_gateway_package_exports_remain_available():
+    import src.gateway as gateway_pkg
+
+    assert gateway_pkg.GatewayServer is server_module.GatewayServer
+    assert callable(gateway_pkg.create_gateway)
+
+
 def test_gateway_lifespan_rebinds_runtime_hooks(monkeypatch, tmp_path):
     gateway, scheduler = _build_gateway(monkeypatch, tmp_path)
 

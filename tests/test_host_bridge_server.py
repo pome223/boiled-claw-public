@@ -166,7 +166,7 @@ class TestHostBridgeTools:
         )
         text = self._text(result)
         assert "Bridge Example" in text
-        assert '"success": true' in text.lower()
+        assert '"ok": true' in text.lower()
 
     @pytest.mark.asyncio
     async def test_host_browser_extract_text_success(self, mcp, monkeypatch):
@@ -216,7 +216,7 @@ class TestHostBridgeTools:
         )
         text = self._text(result)
         assert "capture.png" in text
-        assert '"success": true' in text.lower()
+        assert '"ok": true' in text.lower()
 
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:

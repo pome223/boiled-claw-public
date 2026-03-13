@@ -8,10 +8,10 @@ from typing import Optional
 
 from google.adk.agents.context import Context as ToolContext
 
-from src.bridges.host_bridge_client import HostBridgeError, get_host_bridge_client
+from src.bridges.host_bridge_client import get_host_bridge_client
+from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import HostFileReadRequest, HostFileWriteRequest
 from src.config.settings import get_settings
-from src.runtime.tool_events import emit_tool_result, emit_tool_start
 from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
 from src.security.tool_policy import get_tool_policy_engine
@@ -84,28 +84,17 @@ async def read_file(
             approval_token=None,
             path=path,
         )
-        try:
-            client = get_host_bridge_client()
-            if client is None:
-                raise HostBridgeError("Host Bridge is not enabled")
-            await emit_tool_start(
-                session_id=request.session_id,
-                tool_name="host.file.read",
-                agent_name=request.agent_name,
-                args={"path": request.path},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            result = await client.read_file(request)
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.file.read",
-                agent_name=request.agent_name,
-                ok=result.ok,
-                result=result.model_dump(),
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.file.read",
+            args={"path": request.path},
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.read_file(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: {"error": error},
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
             audit_logger.log_file_operation(
                 "read",
                 result.path or path,
@@ -114,26 +103,20 @@ async def read_file(
                 result="bridge_success" if result.ok else f"bridge_error:{result.error}",
                 metadata={"executor": "host_bridge", "request_id": request.request_id},
             )
-            return result.model_dump(exclude_none=True)
-        except HostBridgeError as e:
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.file.read",
-                agent_name=request.agent_name,
-                ok=False,
-                result={"error": str(e)},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            audit_logger.log_file_operation(
-                "read",
-                path,
-                user_id=ctx.get("user_id") or None,
-                session_id=ctx.get("session_id") or None,
-                result=f"bridge_error:{e}",
-                metadata={"executor": "host_bridge", "request_id": request.request_id},
-            )
-            return {"error": str(e)}
+            return {
+                "path": result.path,
+                "content": result.content,
+                "size": result.size,
+            }
+        audit_logger.log_file_operation(
+            "read",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=f"bridge_error:{payload['error']}",
+            metadata={"executor": "host_bridge", "request_id": request.request_id},
+        )
+        return payload
 
     try:
         file_path = Path(path).expanduser().resolve()
@@ -240,28 +223,17 @@ async def write_file(
             path=path,
             content=content,
         )
-        try:
-            client = get_host_bridge_client()
-            if client is None:
-                raise HostBridgeError("Host Bridge is not enabled")
-            await emit_tool_start(
-                session_id=request.session_id,
-                tool_name="host.file.write",
-                agent_name=request.agent_name,
-                args={"path": request.path, "size": len(request.content)},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            result = await client.write_file(request)
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.file.write",
-                agent_name=request.agent_name,
-                ok=result.ok,
-                result=result.model_dump(),
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.file.write",
+            args={"path": request.path, "size": len(request.content)},
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.write_file(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: {"error": error},
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
             audit_logger.log_file_operation(
                 "write",
                 result.path or path,
@@ -274,30 +246,24 @@ async def write_file(
                     "approval_token": approval_token,
                 },
             )
-            return result.model_dump(exclude_none=True)
-        except HostBridgeError as e:
-            await emit_tool_result(
-                session_id=request.session_id,
-                tool_name="host.file.write",
-                agent_name=request.agent_name,
-                ok=False,
-                result={"error": str(e)},
-                request_id=request.request_id,
-                metadata={"executor": "host_bridge"},
-            )
-            audit_logger.log_file_operation(
-                "write",
-                path,
-                user_id=ctx.get("user_id") or None,
-                session_id=ctx.get("session_id") or None,
-                result=f"bridge_error:{e}",
-                metadata={
-                    "executor": "host_bridge",
-                    "request_id": request.request_id,
-                    "approval_token": approval_token,
-                },
-            )
-            return {"error": str(e)}
+            return {
+                "path": result.path,
+                "size": result.size,
+                "success": result.ok,
+            }
+        audit_logger.log_file_operation(
+            "write",
+            path,
+            user_id=ctx.get("user_id") or None,
+            session_id=ctx.get("session_id") or None,
+            result=f"bridge_error:{payload['error']}",
+            metadata={
+                "executor": "host_bridge",
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+            },
+        )
+        return payload
 
     try:
         file_path = Path(path).expanduser().resolve()
