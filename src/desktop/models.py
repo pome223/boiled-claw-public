@@ -10,8 +10,7 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
-
-from src.bridges.host_bridge_schema import (
+from src.bridges.common_schema import (
     BridgePingResult,
     CapabilityDescriptor,
     CapabilityListResult,

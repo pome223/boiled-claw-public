@@ -104,6 +104,9 @@ class PyObjCDesktopClient(DesktopClient):
             implemented.add("desktop.control.hotkey")
         if self._appkit is not None:
             implemented.add("desktop.view.frontmost_app")
+        # Phase 1 uses the built-in screencapture CLI for portability.
+        # A future native companion can replace this with ScreenCaptureKit
+        # without changing the DesktopClient surface.
         if shutil.which("screencapture"):
             implemented.add("desktop.view.screenshot")
         return desktop_capabilities(implemented)

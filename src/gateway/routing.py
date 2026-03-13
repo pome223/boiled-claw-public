@@ -118,10 +118,15 @@ _DESKTOP_CONTROL_KEYWORDS = {
     "切り替えて",
     "focus",
     "フォーカス",
+}
+
+_DESKTOP_RUNTIME_KEYWORDS = {
     "停止",
     "止めて",
     "emergency stop",
     "panic",
+    "abort desktop",
+    "abort gui",
 }
 
 _FILE_KEYWORDS = {
@@ -270,6 +275,7 @@ def heuristic_decision(message: str) -> RoutingDecision:
     has_browser = _contains_any(normalized, _BROWSER_KEYWORDS)
     has_desktop_view = _contains_any(normalized, _DESKTOP_VIEW_KEYWORDS)
     has_desktop_control = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS)
+    has_desktop_runtime = _contains_any(normalized, _DESKTOP_RUNTIME_KEYWORDS)
     has_file = _contains_any(normalized, _FILE_KEYWORDS)
     has_system = _contains_any(normalized, _SYSTEM_KEYWORDS)
     has_memory = _contains_any(normalized, _MEMORY_KEYWORDS)
@@ -288,6 +294,15 @@ def heuristic_decision(message: str) -> RoutingDecision:
             target="control_loop",
             reason="latest or research-heavy request with long-form output",
             confidence=0.82,
+        )
+
+    if has_desktop_runtime:
+        return RoutingDecision(
+            target="specialist",
+            specialist="desktop_operator",
+            handoff_mode="direct",
+            reason="desktop runtime safety request",
+            confidence=0.84,
         )
 
     if has_desktop_control and (has_sequence or has_longform):

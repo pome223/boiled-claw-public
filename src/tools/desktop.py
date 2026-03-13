@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import uuid
-from typing import Any, Optional
+from typing import Any, Optional, TypeVar
 
 from google.adk.agents.context import Context as ToolContext
 
@@ -33,6 +34,8 @@ from src.desktop import (
 from src.security.audit import AuditEventType, get_audit_logger
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.context import resolve_tool_context
+
+ResultT = TypeVar("ResultT")
 
 
 async def _check_desktop_policy(
@@ -115,156 +118,181 @@ def _selector_from_fields(
     )
 
 
+def _tool_context_values(tool_context: Optional[ToolContext]) -> dict[str, str]:
+    return resolve_tool_context(tool_context) if tool_context is not None else {}
+
+
+def _build_request(
+    request_cls: Callable[..., Any],
+    prefix: str,
+    tool_context: Optional[ToolContext],
+    *,
+    approval_token: Optional[str] = None,
+    **kwargs: Any,
+) -> Any:
+    ctx = _tool_context_values(tool_context)
+    return request_cls(
+        request_id=f"{prefix}-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+        **kwargs,
+    )
+
+
+def _resolve_dynamic(
+    value: str | dict[str, Any] | Callable[[Any], str | dict[str, Any]] | None,
+    result: Any,
+) -> str | dict[str, Any] | None:
+    if callable(value):
+        return value(result)
+    return value
+
+
+async def _run_desktop_tool(
+    *,
+    request: Any,
+    tool_name: str,
+    args: dict[str, Any],
+    invoke: Callable[[Any, Any], Any],
+    event_type: AuditEventType,
+    action: str,
+    success_resource: str | Callable[[Any], str],
+    tool_context: Optional[ToolContext],
+    success_response: Callable[[ResultT], dict[str, Any]],
+    default_error: str,
+    extra_metadata: dict[str, Any] | Callable[[Any], dict[str, Any]] | None = None,
+    error_resource: str | Callable[[Any], str] | None = None,
+    error_response: dict[str, Any] | Callable[[Any], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    execution_metadata = _executor_metadata()
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name=tool_name,
+        args=args,
+        get_client=get_desktop_client,
+        invoke=invoke,
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=execution_metadata,
+    )
+
+    audit_metadata = {**execution_metadata, "request_id": request.request_id}
+    resolved_metadata = _resolve_dynamic(extra_metadata, result)
+    if isinstance(resolved_metadata, dict):
+        audit_metadata.update(resolved_metadata)
+
+    if result is None or not result.ok:
+        error = (getattr(result, "error", None) if result else payload.get("error")) or default_error
+        resource = _resolve_dynamic(error_resource or success_resource, result) or "desktop"
+        _audit_desktop_event(
+            event_type=event_type,
+            action=action,
+            resource=str(resource),
+            result=error,
+            metadata=audit_metadata,
+            tool_context=tool_context,
+        )
+        response = {"error": error}
+        resolved_error_response = _resolve_dynamic(error_response, result)
+        if isinstance(resolved_error_response, dict):
+            response.update(resolved_error_response)
+        return response
+
+    resource = _resolve_dynamic(success_resource, result) or "desktop"
+    _audit_desktop_event(
+        event_type=event_type,
+        action=action,
+        resource=str(resource),
+        result="success",
+        metadata=audit_metadata,
+        tool_context=tool_context,
+    )
+    return success_response(result)
+
+
 async def desktop_view_windows(
     include_minimized: bool = False,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopWindowsRequest(
-        request_id=f"desktop-windows-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
-        approval_token=None,
+    request = _build_request(
+        DesktopWindowsRequest,
+        "desktop-windows",
+        tool_context,
         include_minimized=include_minimized,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.view.windows",
         args={"include_minimized": include_minimized},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.windows(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="windows",
-            resource="desktop",
-            result=(result.error if result else payload["error"]) or "error",
-            metadata={**_executor_metadata(), "request_id": request.request_id},
-            tool_context=tool_context,
-        )
-        return {"error": (result.error if result else payload["error"]) or "desktop query failed"}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="windows",
-        resource="desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "count": len(result.windows),
-        },
+        success_resource="desktop",
         tool_context=tool_context,
+        success_response=lambda result: {
+            "windows": [window.model_dump() for window in result.windows]
+        },
+        default_error="desktop query failed",
+        extra_metadata=lambda result: {"count": len(result.windows)} if result else {},
     )
-    return {"windows": [window.model_dump() for window in result.windows]}
 
 
 async def desktop_runtime_status(
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopRuntimeStatusRequest(
-        request_id=f"desktop-runtime-status-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
-        approval_token=None,
+    request = _build_request(
+        DesktopRuntimeStatusRequest,
+        "desktop-runtime-status",
+        tool_context,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.runtime.status",
         args={},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.runtime_status(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop runtime status failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="runtime_status",
-            resource="desktop_runtime",
-            result=error,
-            metadata={**_executor_metadata(), "request_id": request.request_id},
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="runtime_status",
-        resource="desktop_runtime",
-        result="success",
-        metadata={**_executor_metadata(), "request_id": request.request_id},
+        success_resource="desktop_runtime",
         tool_context=tool_context,
+        success_response=lambda result: {
+            "stopped": result.stopped,
+            "reason": result.reason,
+            "stopped_at": result.stopped_at,
+        },
+        default_error="desktop runtime status failed",
     )
-    return {
-        "stopped": result.stopped,
-        "reason": result.reason,
-        "stopped_at": result.stopped_at,
-    }
 
 
 async def desktop_runtime_stop(
     reason: Optional[str] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopEmergencyStopRequest(
-        request_id=f"desktop-runtime-stop-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
-        approval_token=None,
+    request = _build_request(
+        DesktopEmergencyStopRequest,
+        "desktop-runtime-stop",
+        tool_context,
         reason=reason,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.runtime.stop",
         args={"reason": reason},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.emergency_stop(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop emergency stop failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="runtime_stop",
-            resource="desktop_runtime",
-            result=error,
-            metadata={**_executor_metadata(), "request_id": request.request_id},
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="runtime_stop",
-        resource="desktop_runtime",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "reason": result.reason,
-        },
+        success_resource="desktop_runtime",
         tool_context=tool_context,
+        success_response=lambda result: {
+            "success": True,
+            "stopped": result.stopped,
+            "reason": result.reason,
+            "stopped_at": result.stopped_at,
+        },
+        default_error="desktop emergency stop failed",
+        extra_metadata=lambda result: {"reason": result.reason} if result else {},
     )
-    return {
-        "success": True,
-        "stopped": result.stopped,
-        "reason": result.reason,
-        "stopped_at": result.stopped_at,
-    }
 
 
 async def desktop_runtime_clear_stop(
@@ -278,58 +306,30 @@ async def desktop_runtime_clear_stop(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopClearStopRequest(
-        request_id=f"desktop-runtime-clear-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopClearStopRequest,
+        "desktop-runtime-clear",
+        tool_context,
         approval_token=approval_token,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.runtime.clear_stop",
         args={},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.clear_stop(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop clear stop failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="runtime_clear_stop",
-            resource="desktop_runtime",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="runtime_clear_stop",
-        resource="desktop_runtime",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "approval_token": approval_token,
-        },
+        success_resource="desktop_runtime",
         tool_context=tool_context,
+        success_response=lambda result: {
+            "success": True,
+            "stopped": result.stopped,
+            "reason": result.reason,
+            "stopped_at": result.stopped_at,
+        },
+        default_error="desktop clear stop failed",
+        extra_metadata={"approval_token": approval_token},
     )
-    return {
-        "success": True,
-        "stopped": result.stopped,
-        "reason": result.reason,
-        "stopped_at": result.stopped_at,
-    }
 
 
 async def desktop_wait_window(
@@ -340,20 +340,18 @@ async def desktop_wait_window(
     poll_interval_seconds: float = 0.2,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopWaitWindowRequest(
-        request_id=f"desktop-wait-window-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
-        approval_token=None,
+    request = _build_request(
+        DesktopWaitWindowRequest,
+        "desktop-wait-window",
+        tool_context,
         app_name=app_name,
         window_id=window_id,
         title=title,
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
-    result, payload = await execute_desktop_call(
+    resource = title or window_id or app_name or "desktop"
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.wait.window",
         args={
@@ -363,87 +361,41 @@ async def desktop_wait_window(
             "timeout_seconds": timeout_seconds,
             "poll_interval_seconds": poll_interval_seconds,
         },
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.wait_window(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop wait window failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="wait_window",
-            resource=title or window_id or app_name or "desktop",
-            result=error,
-            metadata={**_executor_metadata(), "request_id": request.request_id},
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="wait_window",
-        resource=title or window_id or app_name or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "matched": result.matched,
-        },
+        success_resource=resource,
         tool_context=tool_context,
+        success_response=lambda result: {
+            "matched": result.matched,
+            "window": result.window.model_dump() if result.window else None,
+        },
+        default_error="desktop wait window failed",
+        extra_metadata=lambda result: {"matched": result.matched} if result else {},
     )
-    return {
-        "matched": result.matched,
-        "window": result.window.model_dump() if result.window else None,
-    }
 
 
 async def desktop_view_frontmost_app(
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopFrontmostAppRequest(
-        request_id=f"desktop-frontmost-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
-        approval_token=None,
+    request = _build_request(
+        DesktopFrontmostAppRequest,
+        "desktop-frontmost",
+        tool_context,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.view.frontmost_app",
         args={},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.frontmost_app(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="frontmost_app",
-            resource="desktop",
-            result=(result.error if result else payload["error"]) or "error",
-            metadata={**_executor_metadata(), "request_id": request.request_id},
-            tool_context=tool_context,
-        )
-        return {"error": (result.error if result else payload["error"]) or "desktop query failed"}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="frontmost_app",
-        resource=result.app_name or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "pid": result.pid,
-        },
+        success_resource=lambda result: result.app_name or "desktop",
         tool_context=tool_context,
+        success_response=lambda result: {"app_name": result.app_name, "pid": result.pid},
+        default_error="desktop query failed",
+        extra_metadata=lambda result: {"pid": result.pid} if result else {},
     )
-    return {"app_name": result.app_name, "pid": result.pid}
 
 
 async def desktop_view_screenshot(
@@ -458,61 +410,39 @@ async def desktop_view_screenshot(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopScreenshotRequest(
-        request_id=f"desktop-shot-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopScreenshotRequest,
+        "desktop-shot",
+        tool_context,
         approval_token=approval_token,
         path=path,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.view.screenshot",
         args={"path": path},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.screenshot(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error, "path": path},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop screenshot failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="screenshot",
-            resource=path or "desktop",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error, "path": path}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="screenshot",
-        resource=result.path or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
+        success_resource=lambda result: result.path or "desktop",
+        tool_context=tool_context,
+        success_response=lambda result: {
+            "path": result.path,
+            "width": result.width,
+            "height": result.height,
+            "success": True,
+        },
+        default_error="desktop screenshot failed",
+        extra_metadata=lambda result: {
             "approval_token": approval_token,
             "width": result.width,
             "height": result.height,
-        },
-        tool_context=tool_context,
+        }
+        if result
+        else {"approval_token": approval_token},
+        error_resource=path or "desktop",
+        error_response={"path": path},
     )
-    return {
-        "path": result.path,
-        "width": result.width,
-        "height": result.height,
-        "success": True,
-    }
 
 
 async def desktop_ax_snapshot(
@@ -528,57 +458,27 @@ async def desktop_ax_snapshot(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopAxSnapshotRequest(
-        request_id=f"desktop-ax-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopAxSnapshotRequest,
+        "desktop-ax",
+        tool_context,
         approval_token=approval_token,
         app_name=app_name,
         window_id=window_id,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.ax.snapshot",
         args={"app_name": app_name, "window_id": window_id},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.ax_snapshot(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop ax snapshot failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="ax_snapshot",
-            resource=app_name or "desktop",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-                "window_id": window_id,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="ax_snapshot",
-        resource=app_name or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "approval_token": approval_token,
-            "window_id": window_id,
-        },
+        success_resource=app_name or "desktop",
         tool_context=tool_context,
+        success_response=lambda result: {"tree": result.tree},
+        default_error="desktop ax snapshot failed",
+        extra_metadata={"approval_token": approval_token, "window_id": window_id},
     )
-    return {"tree": result.tree}
 
 
 async def desktop_ax_find(
@@ -602,53 +502,29 @@ async def desktop_ax_find(
     )
     if selector is None:
         return {"error": "desktop ax find requires a selector target"}
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopAxFindRequest(
-        request_id=f"desktop-find-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
-        approval_token=None,
+    request = _build_request(
+        DesktopAxFindRequest,
+        "desktop-find",
+        tool_context,
         target=selector,
     )
-    result, payload = await execute_desktop_call(
+    resource = app_name or window_id or identifier or title or "desktop"
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.ax.find",
-        args={"selector": selector.model_dump(exclude_none=True) if selector else None},
-        get_client=get_desktop_client,
+        args={"selector": selector.model_dump(exclude_none=True)},
         invoke=lambda client, req: client.ax_find(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop ax find failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="ax_find",
-            resource=app_name or window_id or identifier or title or "desktop",
-            result=error,
-            metadata={**_executor_metadata(), "request_id": request.request_id},
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="ax_find",
-        resource=app_name or window_id or identifier or title or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "matched": result.matched,
-        },
+        success_resource=resource,
         tool_context=tool_context,
+        success_response=lambda result: {
+            "matched": result.matched,
+            "target": result.target.model_dump() if result.target else None,
+        },
+        default_error="desktop ax find failed",
+        extra_metadata=lambda result: {"matched": result.matched} if result else {},
     )
-    return {
-        "matched": result.matched,
-        "target": result.target.model_dump() if result.target else None,
-    }
 
 
 async def desktop_wait_element(
@@ -675,18 +551,16 @@ async def desktop_wait_element(
     if selector is None:
         return {"error": "desktop wait element requires a selector target"}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopWaitElementRequest(
-        request_id=f"desktop-wait-element-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
-        approval_token=None,
+    request = _build_request(
+        DesktopWaitElementRequest,
+        "desktop-wait-element",
+        tool_context,
         target=selector,
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
-    result, payload = await execute_desktop_call(
+    resource = app_name or window_id or identifier or title or "desktop"
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.wait.element",
         args={
@@ -694,40 +568,18 @@ async def desktop_wait_element(
             "timeout_seconds": timeout_seconds,
             "poll_interval_seconds": poll_interval_seconds,
         },
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.wait_element(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop wait element failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_VIEW,
-            action="wait_element",
-            resource=app_name or window_id or identifier or title or "desktop",
-            result=error,
-            metadata={**_executor_metadata(), "request_id": request.request_id},
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="wait_element",
-        resource=app_name or window_id or identifier or title or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "matched": result.matched,
-        },
+        success_resource=resource,
         tool_context=tool_context,
+        success_response=lambda result: {
+            "matched": result.matched,
+            "target": result.target.model_dump() if result.target else None,
+        },
+        default_error="desktop wait element failed",
+        extra_metadata=lambda result: {"matched": result.matched} if result else {},
     )
-    return {
-        "matched": result.matched,
-        "target": result.target.model_dump() if result.target else None,
-    }
 
 
 async def desktop_control_click(
@@ -755,6 +607,7 @@ async def desktop_control_click(
     )
     if selector is None and (x is None or y is None):
         return {"error": "desktop click requires coordinates or a selector target"}
+    selector_payload = selector.model_dump(exclude_none=True) if selector else None
     approval_error, approval_token = await _check_desktop_policy(
         "desktop_control_click",
         {
@@ -762,19 +615,17 @@ async def desktop_control_click(
             "y": y,
             "button": button,
             "click_count": click_count,
-            "selector": selector.model_dump(exclude_none=True) if selector else None,
+            "selector": selector_payload,
         },
         tool_context,
     )
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopClickRequest(
-        request_id=f"desktop-click-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopClickRequest,
+        "desktop-click",
+        tool_context,
         approval_token=approval_token,
         x=x,
         y=y,
@@ -782,7 +633,7 @@ async def desktop_control_click(
         click_count=click_count,
         target=selector,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.control.click",
         args={
@@ -790,52 +641,25 @@ async def desktop_control_click(
             "y": y,
             "button": button,
             "click_count": click_count,
-            "selector": selector.model_dump(exclude_none=True) if selector else None,
+            "selector": selector_payload,
         },
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.click(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop click failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="click",
-            resource=f"{x},{y}",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-                "button": button,
-                "click_count": click_count,
-                "selector": selector.model_dump(exclude_none=True) if selector else None,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="click",
-        resource=f"{x},{y}",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
+        success_resource=f"{x},{y}",
+        tool_context=tool_context,
+        success_response=lambda result: {
+            "success": True,
+            "target": result.target.model_dump() if result.target else None,
+        },
+        default_error="desktop click failed",
+        extra_metadata={
             "approval_token": approval_token,
             "button": button,
             "click_count": click_count,
-            "selector": selector.model_dump(exclude_none=True) if selector else None,
+            "selector": selector_payload,
         },
-        tool_context=tool_context,
     )
-    return {
-        "success": True,
-        "target": result.target.model_dump() if result.target else None,
-    }
 
 
 async def desktop_control_type(
@@ -858,76 +682,49 @@ async def desktop_control_type(
         value_contains=value_contains,
         index=index,
     )
+    selector_payload = selector.model_dump(exclude_none=True) if selector else None
     approval_error, approval_token = await _check_desktop_policy(
         "desktop_control_type",
         {
             "text": text,
-            "selector": selector.model_dump(exclude_none=True) if selector else None,
+            "selector": selector_payload,
         },
         tool_context,
     )
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopTypeRequest(
-        request_id=f"desktop-type-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopTypeRequest,
+        "desktop-type",
+        tool_context,
         approval_token=approval_token,
         text=text,
         target=selector,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.control.type",
         args={
             "text": text,
-            "selector": selector.model_dump(exclude_none=True) if selector else None,
+            "selector": selector_payload,
         },
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.type_text(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop type failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="type",
-            resource="desktop",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-                "length": len(text),
-                "selector": selector.model_dump(exclude_none=True) if selector else None,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="type",
-        resource="desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
+        success_resource="desktop",
+        tool_context=tool_context,
+        success_response=lambda result: {
+            "success": True,
+            "target": result.target.model_dump() if result.target else None,
+        },
+        default_error="desktop type failed",
+        extra_metadata={
             "approval_token": approval_token,
             "length": len(text),
-            "selector": selector.model_dump(exclude_none=True) if selector else None,
+            "selector": selector_payload,
         },
-        tool_context=tool_context,
     )
-    return {
-        "success": True,
-        "target": result.target.model_dump() if result.target else None,
-    }
 
 
 async def desktop_control_launch_app(
@@ -948,18 +745,17 @@ async def desktop_control_launch_app(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopLaunchAppRequest(
-        request_id=f"desktop-launch-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopLaunchAppRequest,
+        "desktop-launch",
+        tool_context,
         approval_token=approval_token,
         app_name=app_name,
         bundle_id=bundle_id,
         wait_for_focus=wait_for_focus,
     )
-    result, payload = await execute_desktop_call(
+    resource = app_name or bundle_id or "desktop"
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.control.launch_app",
         args={
@@ -967,46 +763,21 @@ async def desktop_control_launch_app(
             "bundle_id": bundle_id,
             "wait_for_focus": wait_for_focus,
         },
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.launch_app(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop launch failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="launch_app",
-            resource=app_name or bundle_id or "desktop",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-                "wait_for_focus": wait_for_focus,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="launch_app",
-        resource=app_name or bundle_id or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
+        success_resource=resource,
+        tool_context=tool_context,
+        success_response=lambda result: {
+            "success": True,
+            "target": result.target.model_dump() if result.target else None,
+        },
+        default_error="desktop launch failed",
+        extra_metadata={
             "approval_token": approval_token,
             "wait_for_focus": wait_for_focus,
         },
-        tool_context=tool_context,
     )
-    return {
-        "success": True,
-        "target": result.target.model_dump() if result.target else None,
-    }
 
 
 async def desktop_control_focus_window(
@@ -1023,59 +794,32 @@ async def desktop_control_focus_window(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopFocusWindowRequest(
-        request_id=f"desktop-focus-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopFocusWindowRequest,
+        "desktop-focus",
+        tool_context,
         approval_token=approval_token,
         app_name=app_name,
         window_id=window_id,
         title=title,
     )
-    result, payload = await execute_desktop_call(
+    resource = title or window_id or app_name or "desktop"
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.control.focus_window",
         args={"app_name": app_name, "window_id": window_id, "title": title},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.focus_window(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop focus failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="focus_window",
-            resource=title or window_id or app_name or "desktop",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="focus_window",
-        resource=title or window_id or app_name or "desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "approval_token": approval_token,
-        },
+        success_resource=resource,
         tool_context=tool_context,
+        success_response=lambda result: {
+            "success": True,
+            "target": result.target.model_dump() if result.target else None,
+        },
+        default_error="desktop focus failed",
+        extra_metadata={"approval_token": approval_token},
     )
-    return {
-        "success": True,
-        "target": result.target.model_dump() if result.target else None,
-    }
 
 
 async def desktop_control_hotkey(
@@ -1090,28 +834,26 @@ async def desktop_control_hotkey(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopHotkeyRequest(
-        request_id=f"desktop-hotkey-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopHotkeyRequest,
+        "desktop-hotkey",
+        tool_context,
         approval_token=approval_token,
         keys=keys,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.control.hotkey",
         args={"keys": keys},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.hotkey(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
+        event_type=AuditEventType.DESKTOP_CONTROL,
+        action="hotkey",
+        success_resource="desktop",
+        tool_context=tool_context,
+        success_response=lambda result: {"success": True},
+        default_error="desktop hotkey failed",
+        extra_metadata={"approval_token": approval_token},
     )
-    if result is None or not result.ok:
-        return {"error": (result.error if result else payload["error"]) or "desktop hotkey failed"}
-    return {"success": True}
 
 
 async def desktop_control_scroll(
@@ -1127,59 +869,31 @@ async def desktop_control_scroll(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopScrollRequest(
-        request_id=f"desktop-scroll-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopScrollRequest,
+        "desktop-scroll",
+        tool_context,
         approval_token=approval_token,
         delta_x=delta_x,
         delta_y=delta_y,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.control.scroll",
         args={"delta_x": delta_x, "delta_y": delta_y},
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.scroll(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop scroll failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="scroll",
-            resource="desktop",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-                "delta_x": delta_x,
-                "delta_y": delta_y,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="scroll",
-        resource="desktop",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
+        success_resource="desktop",
+        tool_context=tool_context,
+        success_response=lambda result: {"success": True},
+        default_error="desktop scroll failed",
+        extra_metadata={
             "approval_token": approval_token,
             "delta_x": delta_x,
             "delta_y": delta_y,
         },
-        tool_context=tool_context,
     )
-    return {"success": True}
 
 
 async def desktop_control_drag(
@@ -1202,19 +916,17 @@ async def desktop_control_drag(
     if approval_error:
         return {"error": approval_error}
 
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    request = DesktopDragRequest(
-        request_id=f"desktop-drag-{uuid.uuid4().hex[:12]}",
-        session_id=ctx.get("session_id") or "standalone-session",
-        user_id=ctx.get("user_id") or "standalone-user",
-        agent_name=ctx.get("agent_name") or "unknown_agent",
+    request = _build_request(
+        DesktopDragRequest,
+        "desktop-drag",
+        tool_context,
         approval_token=approval_token,
         start_x=start_x,
         start_y=start_y,
         end_x=end_x,
         end_y=end_y,
     )
-    result, payload = await execute_desktop_call(
+    return await _run_desktop_tool(
         request=request,
         tool_name="desktop.control.drag",
         args={
@@ -1223,38 +935,12 @@ async def desktop_control_drag(
             "end_x": end_x,
             "end_y": end_y,
         },
-        get_client=get_desktop_client,
         invoke=lambda client, req: client.drag(req),
-        ok_getter=lambda result: result.ok,
-        error_payload=lambda error: {"error": error},
-        metadata=_executor_metadata(),
-    )
-    if result is None or not result.ok:
-        error = (result.error if result else payload["error"]) or "desktop drag failed"
-        _audit_desktop_event(
-            event_type=AuditEventType.DESKTOP_CONTROL,
-            action="drag",
-            resource=f"{start_x},{start_y}->{end_x},{end_y}",
-            result=error,
-            metadata={
-                **_executor_metadata(),
-                "request_id": request.request_id,
-                "approval_token": approval_token,
-            },
-            tool_context=tool_context,
-        )
-        return {"error": error}
-
-    _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_CONTROL,
         action="drag",
-        resource=f"{start_x},{start_y}->{end_x},{end_y}",
-        result="success",
-        metadata={
-            **_executor_metadata(),
-            "request_id": request.request_id,
-            "approval_token": approval_token,
-        },
+        success_resource=f"{start_x},{start_y}->{end_x},{end_y}",
         tool_context=tool_context,
+        success_response=lambda result: {"success": True},
+        default_error="desktop drag failed",
+        extra_metadata={"approval_token": approval_token},
     )
-    return {"success": True}
