@@ -9,6 +9,15 @@ from src.tools.web_search import web_search
 from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
 from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
+from src.tools.desktop import (
+    desktop_ax_snapshot,
+    desktop_control_click,
+    desktop_control_hotkey,
+    desktop_control_type,
+    desktop_view_frontmost_app,
+    desktop_view_screenshot,
+    desktop_view_windows,
+)
 from src.tools.memory import memory_store, memory_search, memory_stats, memory_delete
 from src.tools.finance import stock_price
 from src.tools.skills import skill_list, skill_execute
@@ -37,6 +46,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - **Web検索** - DuckDuckGo APIを使った情報収集
 - **株価取得** - ティッカー/企業名から日次株価を取得
 - **ブラウザ自動化** - Playwrightによるスクレイピング、スクリーンショット
+- **デスクトップ操作** - 画面状態の取得、前面アプリ確認、クリックと入力
 - **シェル実行** - 安全なコマンド実行（セキュリティポリシー適用）
 - **ファイル操作** - 読み書き、検索
 - **メモリシステム** - 重要な情報の保存と検索（ベクトル検索対応）
@@ -100,6 +110,13 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - browser_screenshot でスクリーンショット取得
 - robots.txtとサイトポリシーを尊重する
 
+## デスクトップ操作
+- desktop_view_windows で現在のウィンドウ一覧を取得
+- desktop_view_frontmost_app で前面アプリを確認
+- desktop_view_screenshot でデスクトップのスクリーンショットを取得
+- desktop_ax_snapshot で Accessibility tree を取得
+- desktop_control_click / desktop_control_type は高リスク操作なので、承認が必要な場合がある
+
 ## マルチエージェント委譲（Google ADK準拠）
 - 単純な検索・ファイル操作・シェル実行は直接ツールを使う（委譲しない）
 - 複雑・長時間のタスクをバックグラウンドで行う場合のみ `sessions_spawn` を使う
@@ -127,6 +144,13 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         browser_navigate,
         browser_screenshot,
         browser_extract_text,
+        desktop_view_windows,
+        desktop_view_frontmost_app,
+        desktop_view_screenshot,
+        desktop_ax_snapshot,
+        desktop_control_click,
+        desktop_control_type,
+        desktop_control_hotkey,
         run_shell,
         read_file,
         write_file,

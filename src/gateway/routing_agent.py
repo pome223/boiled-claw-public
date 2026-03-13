@@ -20,6 +20,7 @@ Available specialists:
 - web_researcher
 - file_manager
 - browser_automator
+- desktop_operator
 - system_operator
 - memory_keeper
 
@@ -34,13 +35,15 @@ Special cases:
 - shell / terminal / docker / git tasks should prefer specialist=system_operator unless they clearly require control_loop.
 - web research / latest news / current events should prefer specialist=web_researcher with handoff_mode="preflight_then_root".
 - browser extraction / page navigation / scraping should prefer specialist=browser_automator with handoff_mode="preflight_then_root".
+- desktop state inspection should prefer specialist=desktop_operator with handoff_mode="preflight_then_root".
+- desktop control requests (click / type / frontmost app / windows / screenshot) should prefer specialist=desktop_operator.
 - skill requests should usually stay on root_agent unless the user explicitly wants a dedicated agent or MCP setup.
 - cron jobs with explicit targets should not be re-routed away from that explicit target.
 
 Return ONLY this JSON shape:
 {
   "target": "root_agent | control_loop | specialist | dynamic_agent",
-  "specialist": "web_researcher | file_manager | browser_automator | system_operator | memory_keeper | null",
+  "specialist": "web_researcher | file_manager | browser_automator | desktop_operator | system_operator | memory_keeper | null",
   "handoff_mode": "direct | preflight_then_root",
   "reason": "short explanation",
   "confidence": 0.0,

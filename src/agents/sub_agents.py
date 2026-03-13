@@ -8,6 +8,15 @@ from src.tools.web_search import web_search
 from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
 from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
+from src.tools.desktop import (
+    desktop_ax_snapshot,
+    desktop_control_click,
+    desktop_control_hotkey,
+    desktop_control_type,
+    desktop_view_frontmost_app,
+    desktop_view_screenshot,
+    desktop_view_windows,
+)
 from src.tools.memory import memory_store, memory_search
 
 
@@ -134,6 +143,36 @@ browser_agent = Agent(
 )
 
 
+desktop_agent = Agent(
+    name="desktop_operator",
+    model="gemini-3-flash-preview",
+    description="Desktop view/control を専門とするエージェント",
+    instruction="""
+あなたは desktop automation のスペシャリストです。
+
+## 役割
+- デスクトップの現在状態を観測する
+- 前面アプリやウィンドウ構成を把握する
+- 必要なときだけ GUI 入力を行う
+
+## 原則
+- まず view 系 tool で状況を確認する
+- control 系 tool は最小限に使う
+- 高リスク操作は承認が必要な場合がある
+- できるだけ app / window / AX 情報に基づいて行動する
+""",
+    tools=[
+        desktop_view_windows,
+        desktop_view_frontmost_app,
+        desktop_view_screenshot,
+        desktop_ax_snapshot,
+        desktop_control_click,
+        desktop_control_type,
+        desktop_control_hotkey,
+    ],
+)
+
+
 # 全サブエージェントのリスト
 SUB_AGENTS = [
     web_agent,
@@ -141,4 +180,5 @@ SUB_AGENTS = [
     system_agent,
     memory_agent,
     browser_agent,
+    desktop_agent,
 ]

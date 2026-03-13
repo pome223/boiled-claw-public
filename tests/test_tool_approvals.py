@@ -3,9 +3,12 @@ from types import SimpleNamespace
 import pytest
 
 import src.bridges.host_bridge_exec as bridge_exec_module
+import src.bridges.desktop_exec as desktop_exec_module
+from src.desktop import DesktopControlResult, DesktopWindowDescriptor, DesktopWindowsResult
 from src.security.policy import SecurityPolicy
 from src.security.tool_policy import ToolPolicyEngine
 from src.tools import browser as browser_module
+from src.tools import desktop as desktop_module
 from src.tools import file_manager as file_module
 from src.tools import shell as shell_module
 
@@ -403,3 +406,124 @@ async def test_browser_screenshot_uses_host_bridge_when_enabled(monkeypatch):
     assert seen["screenshot_approval_token"]
     assert emitted[0][1]["tool_name"] == "host.browser.screenshot"
     assert emitted[1][1]["tool_name"] == "host.browser.screenshot"
+
+
+@pytest.mark.asyncio
+async def test_desktop_view_windows_uses_desktop_client(monkeypatch):
+    emitted = []
+
+    class FakeDesktopClient:
+        async def windows(self, request):
+            return DesktopWindowsResult(
+                ok=True,
+                windows=[
+                    DesktopWindowDescriptor(
+                        window_id="w1",
+                        app_name="Safari",
+                        title="Example",
+                    )
+                ],
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=False),
+    )
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_view_windows(tool_context=tool_context)
+
+    assert result["windows"][0]["app_name"] == "Safari"
+    assert emitted[0][1]["tool_name"] == "desktop.view.windows"
+    assert emitted[0][1]["metadata"]["executor"] == "local_desktop"
+
+
+@pytest.mark.asyncio
+async def test_desktop_click_waits_for_approval(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeDesktopClient:
+        async def click(self, request):
+            seen["approval_token"] = request.approval_token
+            return DesktopControlResult(ok=True)
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(desktop_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=True),
+    )
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_control_click(10, 20, tool_context=tool_context)
+
+    assert result["success"] is True
+    assert seen["approval_token"]
+    assert emitted[0][1]["tool_name"] == "desktop.control.click"
+    assert emitted[0][1]["metadata"]["executor"] == "desktop_bridge"
+
+
+@pytest.mark.asyncio
+async def test_desktop_type_waits_for_approval(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeDesktopClient:
+        async def type_text(self, request):
+            seen["approval_token"] = request.approval_token
+            return DesktopControlResult(ok=True)
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(desktop_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=True),
+    )
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_control_type("hello", tool_context=tool_context)
+
+    assert result["success"] is True
+    assert seen["approval_token"]

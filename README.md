@@ -184,6 +184,13 @@ python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
 boiled-claw-desktop-bridge --sse --host 127.0.0.1 --port 8767
 ```
 
+Gateway から Desktop Bridge を使うときは `.env` に次を設定します。
+
+```bash
+DESKTOP_BRIDGE_ENABLED=true
+DESKTOP_BRIDGE_URL=http://127.0.0.1:8767/sse
+```
+
 ## プロジェクト構造
 
 ```
