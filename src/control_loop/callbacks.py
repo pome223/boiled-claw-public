@@ -42,6 +42,7 @@ _HUMAN_REQUIRED_CAPS: set[str] = {
     "desktop.control.launch_app",
     "desktop.control.focus_window",
     "desktop.control.hotkey",
+    "desktop.control.scroll",
     "desktop.control.drag",
 }
 

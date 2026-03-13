@@ -220,6 +220,33 @@ async def test_guarded_desktop_ax_find_allows_policy_approved(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_guarded_desktop_wait_element_allows_policy_approved(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.wait.element"}]
+            },
+        }
+    )
+
+    async def _fake_wait(**kwargs):
+        assert kwargs["identifier"] == "open-button"
+        return {"matched": True, "target": {"identifier": "open-button"}}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_wait_element", _fake_wait)
+
+    result = await guarded_tools_module.guarded_desktop_wait_element(
+        app_name="Safari",
+        window_id="w1",
+        identifier="open-button",
+        tool_context=tool_context,
+    )
+
+    assert result["matched"] is True
+
+
+@pytest.mark.asyncio
 async def test_guarded_desktop_control_click_requires_human_approved():
     tool_context = SimpleNamespace(
         state={
@@ -252,6 +279,24 @@ async def test_guarded_desktop_control_launch_app_requires_human_approved():
     with pytest.raises(PermissionError, match="human_approved"):
         await guarded_tools_module.guarded_desktop_control_launch_app(
             app_name="Safari",
+            tool_context=tool_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_scroll_requires_human_approved():
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.scroll"}]
+            },
+        }
+    )
+
+    with pytest.raises(PermissionError, match="human_approved"):
+        await guarded_tools_module.guarded_desktop_control_scroll(
+            delta_y=-4,
             tool_context=tool_context,
         )
 

@@ -20,9 +20,14 @@ from src.desktop.models import (
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
     DesktopTypeRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitElementResult,
+    DesktopWaitWindowRequest,
+    DesktopWaitWindowResult,
     DesktopWindowsRequest,
     DesktopWindowsResult,
 )
@@ -51,6 +56,13 @@ def desktop_capabilities(
             implemented="desktop.view.windows" in implemented_names,
         ),
         CapabilityDescriptor(
+            name="desktop.wait.window",
+            risk="low",
+            requires_approval=False,
+            description="Wait for a matching window to appear on the host OS.",
+            implemented="desktop.wait.window" in implemented_names,
+        ),
+        CapabilityDescriptor(
             name="desktop.view.frontmost_app",
             risk="low",
             requires_approval=True,
@@ -63,6 +75,13 @@ def desktop_capabilities(
             requires_approval=False,
             description="Resolve a matching accessibility element on the host OS.",
             implemented="desktop.ax.find" in implemented_names,
+        ),
+        CapabilityDescriptor(
+            name="desktop.wait.element",
+            risk="low",
+            requires_approval=False,
+            description="Wait for a matching accessibility element on the host OS.",
+            implemented="desktop.wait.element" in implemented_names,
         ),
         CapabilityDescriptor(
             name="desktop.ax.snapshot",
@@ -107,6 +126,13 @@ def desktop_capabilities(
             implemented="desktop.control.hotkey" in implemented_names,
         ),
         CapabilityDescriptor(
+            name="desktop.control.scroll",
+            risk="high",
+            requires_approval=True,
+            description="Scroll on the host desktop.",
+            implemented="desktop.control.scroll" in implemented_names,
+        ),
+        CapabilityDescriptor(
             name="desktop.control.drag",
             risk="high",
             requires_approval=True,
@@ -135,6 +161,12 @@ class DesktopClient(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def wait_window(
+        self, request: DesktopWaitWindowRequest
+    ) -> DesktopWaitWindowResult:
+        raise NotImplementedError
+
+    @abstractmethod
     async def frontmost_app(
         self, request: DesktopFrontmostAppRequest
     ) -> DesktopFrontmostAppResult:
@@ -148,6 +180,12 @@ class DesktopClient(ABC):
 
     @abstractmethod
     async def ax_find(self, request: DesktopAxFindRequest) -> DesktopAxFindResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def wait_element(
+        self, request: DesktopWaitElementRequest
+    ) -> DesktopWaitElementResult:
         raise NotImplementedError
 
     @abstractmethod
@@ -172,6 +210,10 @@ class DesktopClient(ABC):
 
     @abstractmethod
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
+        raise NotImplementedError
+
+    @abstractmethod
+    async def scroll(self, request: DesktopScrollRequest) -> DesktopControlResult:
         raise NotImplementedError
 
     @abstractmethod

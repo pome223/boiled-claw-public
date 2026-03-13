@@ -7,6 +7,7 @@ import src.bridges.desktop_exec as desktop_exec_module
 from src.desktop import (
     DesktopAxFindResult,
     DesktopControlResult,
+    DesktopWaitElementResult,
     DesktopWindowDescriptor,
     DesktopWindowsResult,
 )
@@ -496,6 +497,44 @@ async def test_desktop_ax_find_is_allowed_without_approval(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_desktop_wait_element_is_allowed_without_approval(monkeypatch):
+    emitted = []
+
+    class FakeDesktopClient:
+        async def wait_element(self, request):
+            return DesktopWaitElementResult(
+                ok=True,
+                matched=True,
+                target={"identifier": request.target.identifier},
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=False),
+    )
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(desktop_exec_module, "emit_tool_result", _emit_result)
+
+    result = await desktop_module.desktop_wait_element(
+        app_name="Safari",
+        window_id="w1",
+        identifier="open-button",
+    )
+
+    assert result["matched"] is True
+    assert result["target"]["identifier"] == "open-button"
+    assert emitted[0][1]["tool_name"] == "desktop.wait.element"
+
+
+@pytest.mark.asyncio
 async def test_desktop_click_waits_for_approval(monkeypatch):
     engine = ToolPolicyEngine()
     seen = {}
@@ -600,6 +639,39 @@ async def test_desktop_drag_waits_for_approval(monkeypatch):
     )
 
     result = await desktop_module.desktop_control_drag(10, 20, 30, 40, tool_context=tool_context)
+
+    assert result["success"] is True
+    assert seen["approval_token"]
+
+
+@pytest.mark.asyncio
+async def test_desktop_scroll_waits_for_approval(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeDesktopClient:
+        async def scroll(self, request):
+            seen["approval_token"] = request.approval_token
+            return DesktopControlResult(ok=True)
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(desktop_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(desktop_module, "get_desktop_client", lambda: FakeDesktopClient())
+    monkeypatch.setattr(
+        desktop_module,
+        "get_settings",
+        lambda: SimpleNamespace(desktop_bridge_enabled=True),
+    )
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_control_scroll(delta_y=-5, tool_context=tool_context)
 
     assert result["success"] is True
     assert seen["approval_token"]

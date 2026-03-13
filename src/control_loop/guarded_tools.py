@@ -184,6 +184,28 @@ async def guarded_desktop_view_windows(
     return await desktop_view_windows(include_minimized=include_minimized)
 
 
+async def guarded_desktop_wait_window(
+    app_name: str | None = None,
+    window_id: str | None = None,
+    title: str | None = None,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.2,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "desktop.wait.window")
+        _check_capability_in_plan(tool_context, "desktop.wait.window")
+
+    from src.tools.desktop import desktop_wait_window
+    return await desktop_wait_window(
+        app_name=app_name,
+        window_id=window_id,
+        title=title,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+
+
 async def guarded_desktop_view_frontmost_app(
     tool_context: ToolContext | None = None,
 ) -> dict:
@@ -235,6 +257,36 @@ async def guarded_desktop_ax_find(
         identifier=identifier,
         value_contains=value_contains,
         index=index,
+    )
+
+
+async def guarded_desktop_wait_element(
+    app_name: str | None = None,
+    window_id: str | None = None,
+    role: str | None = None,
+    title: str | None = None,
+    identifier: str | None = None,
+    value_contains: str | None = None,
+    index: int = 0,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.2,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "desktop.wait.element")
+        _check_capability_in_plan(tool_context, "desktop.wait.element")
+
+    from src.tools.desktop import desktop_wait_element
+    return await desktop_wait_element(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
     )
 
 
@@ -389,6 +441,24 @@ async def guarded_desktop_control_hotkey(
 
     from src.tools.desktop import desktop_control_hotkey
     return await desktop_control_hotkey(keys=keys)
+
+
+async def guarded_desktop_control_scroll(
+    delta_x: int = 0,
+    delta_y: int = 0,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "desktop.control.scroll requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "desktop.control.scroll")
+
+    from src.tools.desktop import desktop_control_scroll
+    return await desktop_control_scroll(delta_x=delta_x, delta_y=delta_y)
 
 
 async def guarded_desktop_control_drag(

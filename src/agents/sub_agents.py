@@ -16,7 +16,10 @@ from src.tools.desktop import (
     desktop_control_focus_window,
     desktop_control_hotkey,
     desktop_control_launch_app,
+    desktop_control_scroll,
     desktop_control_type,
+    desktop_wait_element,
+    desktop_wait_window,
     desktop_view_frontmost_app,
     desktop_view_screenshot,
     desktop_view_windows,
@@ -161,6 +164,7 @@ desktop_agent = Agent(
 
 ## 原則
 - まず view 系 tool で状況を確認する
+- `desktop_wait_window` / `desktop_wait_element` を使って出現待ちをできる
 - control 系 tool は最小限に使う
 - 高リスク操作は承認が必要な場合がある
 - できるだけ app / window / AX 情報に基づいて行動する
@@ -169,15 +173,18 @@ desktop_agent = Agent(
 """,
     tools=[
         desktop_view_windows,
+        desktop_wait_window,
         desktop_view_frontmost_app,
         desktop_view_screenshot,
         desktop_ax_find,
+        desktop_wait_element,
         desktop_ax_snapshot,
         desktop_control_click,
         desktop_control_type,
         desktop_control_launch_app,
         desktop_control_focus_window,
         desktop_control_hotkey,
+        desktop_control_scroll,
         desktop_control_drag,
     ],
 )

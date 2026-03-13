@@ -34,14 +34,17 @@ class TestDesktopBridgeTools:
             "capabilities.list",
             "desktop.view.screenshot",
             "desktop.view.windows",
+            "desktop.wait.window",
             "desktop.view.frontmost_app",
             "desktop.ax.find",
+            "desktop.wait.element",
             "desktop.ax.snapshot",
             "desktop.control.click",
             "desktop.control.type",
             "desktop.control.launch_app",
             "desktop.control.focus_window",
             "desktop.control.hotkey",
+            "desktop.control.scroll",
             "desktop.control.drag",
         }
 
@@ -94,6 +97,9 @@ class TestDesktopBridgeTools:
             desktop_client=FakeDesktopClient(
                 implemented={
                     "desktop.ax.find",
+                    "desktop.wait.window",
+                    "desktop.wait.element",
+                    "desktop.control.scroll",
                     "desktop.view.windows",
                     "desktop.view.frontmost_app",
                     "desktop.control.launch_app",
@@ -140,6 +146,27 @@ class TestDesktopBridgeTools:
                 "title": "Injected",
             },
         )
+        waited_window = await mcp.call_tool(
+            "desktop.wait.window",
+            {
+                "request_id": "req-injected-wait-window",
+                "session_id": "sess-injected-wait-window",
+                "user_id": "user-injected-wait-window",
+                "agent_name": "pytest",
+                "window_id": "w1",
+            },
+        )
+        waited_element = await mcp.call_tool(
+            "desktop.wait.element",
+            {
+                "request_id": "req-injected-wait-element",
+                "session_id": "sess-injected-wait-element",
+                "user_id": "user-injected-wait-element",
+                "agent_name": "pytest",
+                "window_id": "w1",
+                "title": "Injected",
+            },
+        )
         launch = await mcp.call_tool(
             "desktop.control.launch_app",
             {
@@ -160,21 +187,37 @@ class TestDesktopBridgeTools:
                 "window_id": "w1",
             },
         )
+        scroll = await mcp.call_tool(
+            "desktop.control.scroll",
+            {
+                "request_id": "req-injected-scroll",
+                "session_id": "sess-injected-scroll",
+                "user_id": "user-injected-scroll",
+                "agent_name": "pytest",
+                "delta_y": -3,
+            },
+        )
 
         windows_text = self._text(windows)
         frontmost_text = self._text(frontmost)
         found_text = self._text(found)
+        waited_window_text = self._text(waited_window)
+        waited_element_text = self._text(waited_element)
         launch_text = self._text(launch)
         focus_text = self._text(focus)
+        scroll_text = self._text(scroll)
         assert '"ok": true' in windows_text.lower()
         assert "Safari" in windows_text
         assert '"ok": true' in frontmost_text.lower()
         assert '"pid": 42' in frontmost_text
         assert '"matched": true' in found_text.lower()
+        assert '"matched": true' in waited_window_text.lower()
+        assert '"matched": true' in waited_element_text.lower()
         assert '"ok": true' in launch_text.lower()
         assert "Safari" in launch_text
         assert '"ok": true' in focus_text.lower()
         assert "Injected" in focus_text
+        assert '"ok": true' in scroll_text.lower()
 
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:
@@ -236,4 +279,7 @@ async def test_desktop_stdio_tools_list():
     assert tools_resp is not None
     names = {t["name"] for t in tools_resp["result"]["tools"]}
     assert "desktop.view.windows" in names
+    assert "desktop.wait.window" in names
+    assert "desktop.wait.element" in names
+    assert "desktop.control.scroll" in names
     assert "desktop.control.drag" in names

@@ -17,7 +17,10 @@ from src.tools.desktop import (
     desktop_control_focus_window,
     desktop_control_hotkey,
     desktop_control_launch_app,
+    desktop_control_scroll,
     desktop_control_type,
+    desktop_wait_element,
+    desktop_wait_window,
     desktop_view_frontmost_app,
     desktop_view_screenshot,
     desktop_view_windows,
@@ -116,13 +119,16 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 
 ## デスクトップ操作
 - desktop_view_windows で現在のウィンドウ一覧を取得
+- desktop_wait_window で対象ウィンドウの出現を待てる
 - desktop_view_frontmost_app で前面アプリを確認
 - desktop_view_screenshot でデスクトップのスクリーンショットを取得
 - desktop_ax_find で selector に一致する UI 要素を確認
+- desktop_wait_element で selector の出現を待てる
 - desktop_ax_snapshot で Accessibility tree を取得
 - desktop_control_launch_app / focus_window でアプリやウィンドウを前面化できる
 - desktop_control_click / type は座標だけでなく Accessibility selector でも指定できる
-- desktop_control_click / type / hotkey / drag / launch_app / focus_window は高リスク操作なので、承認が必要な場合がある
+- desktop_control_scroll で前面 UI をスクロールできる
+- desktop_control_click / type / hotkey / drag / scroll / launch_app / focus_window は高リスク操作なので、承認が必要な場合がある
 
 ## マルチエージェント委譲（Google ADK準拠）
 - 単純な検索・ファイル操作・シェル実行は直接ツールを使う（委譲しない）
@@ -152,15 +158,18 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         browser_screenshot,
         browser_extract_text,
         desktop_view_windows,
+        desktop_wait_window,
         desktop_view_frontmost_app,
         desktop_view_screenshot,
         desktop_ax_find,
+        desktop_wait_element,
         desktop_ax_snapshot,
         desktop_control_click,
         desktop_control_type,
         desktop_control_launch_app,
         desktop_control_focus_window,
         desktop_control_hotkey,
+        desktop_control_scroll,
         desktop_control_drag,
         run_shell,
         read_file,

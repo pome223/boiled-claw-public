@@ -21,8 +21,11 @@ from src.desktop import (
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitWindowRequest,
     DesktopWindowsRequest,
 )
 
@@ -201,6 +204,16 @@ class _FakeQuartz:
         return {"kind": "keyboard", "keycode": keycode, "is_down": is_down}
 
     @classmethod
+    def CGEventCreateScrollWheelEvent(cls, _source, units, wheels, delta_y, delta_x):
+        return {
+            "kind": "scroll",
+            "units": units,
+            "wheels": wheels,
+            "delta_y": delta_y,
+            "delta_x": delta_x,
+        }
+
+    @classmethod
     def CGEventKeyboardSetUnicodeString(cls, event, length, text):
         event["length"] = length
         event["text"] = text
@@ -320,6 +333,57 @@ async def test_pyobjc_client_ax_find_returns_target_descriptor():
                 role="AXButton",
                 identifier="open-button",
             ),
+        )
+    )
+
+    assert result.ok is True
+    assert result.matched is True
+    assert result.target is not None
+    assert result.target.identifier == "open-button"
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_wait_window_matches_existing_window():
+    client = PyObjCDesktopClient(quartz_module=_FakeQuartz())
+
+    result = await client.wait_window(
+        DesktopWaitWindowRequest(
+            request_id="req-wait-window",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Safari",
+            timeout_seconds=0.01,
+            poll_interval_seconds=0.001,
+        )
+    )
+
+    assert result.ok is True
+    assert result.matched is True
+    assert result.window is not None
+    assert result.window.window_id == "7"
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_wait_element_matches_existing_element():
+    client = PyObjCDesktopClient(
+        appkit_module=_FakeAppKit(),
+        quartz_module=_FakeQuartz(),
+    )
+
+    result = await client.wait_element(
+        DesktopWaitElementRequest(
+            request_id="req-wait-element",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="7",
+                identifier="open-button",
+            ),
+            timeout_seconds=0.01,
+            poll_interval_seconds=0.001,
         )
     )
 
@@ -507,6 +571,29 @@ async def test_pyobjc_client_hotkey_posts_keyboard_events_with_flags():
     assert _FakeQuartz.posted[0][1]["flags"] == (
         _FakeQuartz.kCGEventFlagMaskCommand | _FakeQuartz.kCGEventFlagMaskShift
     )
+
+
+@pytest.mark.asyncio
+async def test_pyobjc_client_scroll_posts_scroll_event():
+    _FakeQuartz.posted = []
+    client = PyObjCDesktopClient(quartz_module=_FakeQuartz())
+
+    result = await client.scroll(
+        DesktopScrollRequest(
+            request_id="req-scroll",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            delta_x=2,
+            delta_y=-4,
+        )
+    )
+
+    assert result.ok is True
+    assert len(_FakeQuartz.posted) == 1
+    assert _FakeQuartz.posted[0][1]["kind"] == "scroll"
+    assert _FakeQuartz.posted[0][1]["delta_x"] == 2
+    assert _FakeQuartz.posted[0][1]["delta_y"] == -4
 
 
 @pytest.mark.asyncio

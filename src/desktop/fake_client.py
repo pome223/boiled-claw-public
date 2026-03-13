@@ -24,10 +24,15 @@ from src.desktop.models import (
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
     DesktopTargetDescriptor,
     DesktopTypeRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitElementResult,
+    DesktopWaitWindowRequest,
+    DesktopWaitWindowResult,
     DesktopWindowDescriptor,
     DesktopWindowsRequest,
     DesktopWindowsResult,
@@ -87,6 +92,21 @@ class FakeDesktopClient(DesktopClient):
             return DesktopWindowsResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
         return DesktopWindowsResult(ok=True, windows=self._windows)
 
+    async def wait_window(
+        self, request: DesktopWaitWindowRequest
+    ) -> DesktopWaitWindowResult:
+        if "desktop.wait.window" not in self._implemented:
+            return DesktopWaitWindowResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        for window in self._windows:
+            if request.window_id and window.window_id != request.window_id:
+                continue
+            if request.app_name and window.app_name != request.app_name:
+                continue
+            if request.title and window.title != request.title:
+                continue
+            return DesktopWaitWindowResult(ok=True, matched=True, window=window)
+        return DesktopWaitWindowResult(ok=True, matched=False)
+
     async def frontmost_app(
         self, request: DesktopFrontmostAppRequest
     ) -> DesktopFrontmostAppResult:
@@ -114,6 +134,14 @@ class FakeDesktopClient(DesktopClient):
             return DesktopAxFindResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
         target = self._resolve_target_from_request(request.target)
         return DesktopAxFindResult(ok=True, matched=target is not None, target=target)
+
+    async def wait_element(
+        self, request: DesktopWaitElementRequest
+    ) -> DesktopWaitElementResult:
+        if "desktop.wait.element" not in self._implemented:
+            return DesktopWaitElementResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        target = self._resolve_target_from_request(request.target)
+        return DesktopWaitElementResult(ok=True, matched=target is not None, target=target)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
         self.last_click_request = request
@@ -167,6 +195,10 @@ class FakeDesktopClient(DesktopClient):
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
         del request
         return self._control_result("desktop.control.hotkey")
+
+    async def scroll(self, request: DesktopScrollRequest) -> DesktopControlResult:
+        del request
+        return self._control_result("desktop.control.scroll")
 
     async def drag(self, request: DesktopDragRequest) -> DesktopControlResult:
         del request

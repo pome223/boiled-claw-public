@@ -6,15 +6,18 @@ import pytest
 
 from src.desktop import (
     DesktopAxFindRequest,
-    FakeDesktopClient,
     DesktopClickRequest,
     DesktopElementSelector,
     DesktopFocusWindowRequest,
     DesktopFrontmostAppRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitWindowRequest,
     DesktopWindowBounds,
     DesktopWindowDescriptor,
     DesktopWindowsRequest,
+    FakeDesktopClient,
 )
 
 
@@ -166,3 +169,64 @@ async def test_fake_desktop_client_tracks_selector_click_and_launch_focus():
     assert focus.ok is True
     assert focus.target is not None
     assert focus.target.title == "Example"
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_waits_and_scrolls_when_capabilities_exist():
+    client = FakeDesktopClient(
+        implemented={
+            "desktop.view.windows",
+            "desktop.wait.window",
+            "desktop.ax.find",
+            "desktop.wait.element",
+            "desktop.control.scroll",
+        },
+        windows=[
+            DesktopWindowDescriptor(
+                window_id="w1",
+                app_name="Safari",
+                title="Example",
+                bounds=DesktopWindowBounds(x=10, y=20, width=800, height=600),
+            )
+        ],
+    )
+
+    waited_window = await client.wait_window(
+        DesktopWaitWindowRequest(
+            request_id="req-wait-window",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Safari",
+        )
+    )
+    waited_element = await client.wait_element(
+        DesktopWaitElementRequest(
+            request_id="req-wait-element",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="w1",
+                title="Open",
+            ),
+        )
+    )
+    scrolled = await client.scroll(
+        DesktopScrollRequest(
+            request_id="req-scroll",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            delta_y=-3,
+        )
+    )
+
+    assert waited_window.ok is True
+    assert waited_window.matched is True
+    assert waited_window.window is not None
+    assert waited_element.ok is True
+    assert waited_element.matched is True
+    assert waited_element.target is not None
+    assert scrolled.ok is True

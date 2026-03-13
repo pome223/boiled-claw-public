@@ -19,9 +19,12 @@ from src.desktop import (
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
     DesktopDragRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitWindowRequest,
     DesktopWindowsRequest,
 )
 from src.security.audit import AuditEventType, get_audit_logger
@@ -156,6 +159,73 @@ async def desktop_view_windows(
         tool_context=tool_context,
     )
     return {"windows": [window.model_dump() for window in result.windows]}
+
+
+async def desktop_wait_window(
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    title: Optional[str] = None,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.2,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopWaitWindowRequest(
+        request_id=f"desktop-wait-window-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=None,
+        app_name=app_name,
+        window_id=window_id,
+        title=title,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.wait.window",
+        args={
+            "app_name": app_name,
+            "window_id": window_id,
+            "title": title,
+            "timeout_seconds": timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.wait_window(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop wait window failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_VIEW,
+            action="wait_window",
+            resource=title or window_id or app_name or "desktop",
+            result=error,
+            metadata={**_executor_metadata(), "request_id": request.request_id},
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_VIEW,
+        action="wait_window",
+        resource=title or window_id or app_name or "desktop",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "matched": result.matched,
+        },
+        tool_context=tool_context,
+    )
+    return {
+        "matched": result.matched,
+        "window": result.window.model_dump() if result.window else None,
+    }
 
 
 async def desktop_view_frontmost_app(
@@ -395,6 +465,85 @@ async def desktop_ax_find(
     _audit_desktop_event(
         event_type=AuditEventType.DESKTOP_VIEW,
         action="ax_find",
+        resource=app_name or window_id or identifier or title or "desktop",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "matched": result.matched,
+        },
+        tool_context=tool_context,
+    )
+    return {
+        "matched": result.matched,
+        "target": result.target.model_dump() if result.target else None,
+    }
+
+
+async def desktop_wait_element(
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+    index: int = 0,
+    timeout_seconds: float = 5.0,
+    poll_interval_seconds: float = 0.2,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    selector = _selector_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        index=index,
+    )
+    if selector is None:
+        return {"error": "desktop wait element requires a selector target"}
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopWaitElementRequest(
+        request_id=f"desktop-wait-element-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=None,
+        target=selector,
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.wait.element",
+        args={
+            "selector": selector.model_dump(exclude_none=True),
+            "timeout_seconds": timeout_seconds,
+            "poll_interval_seconds": poll_interval_seconds,
+        },
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.wait_element(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop wait element failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_VIEW,
+            action="wait_element",
+            resource=app_name or window_id or identifier or title or "desktop",
+            result=error,
+            metadata={**_executor_metadata(), "request_id": request.request_id},
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_VIEW,
+        action="wait_element",
         resource=app_name or window_id or identifier or title or "desktop",
         result="success",
         metadata={
@@ -791,6 +940,74 @@ async def desktop_control_hotkey(
     )
     if result is None or not result.ok:
         return {"error": (result.error if result else payload["error"]) or "desktop hotkey failed"}
+    return {"success": True}
+
+
+async def desktop_control_scroll(
+    delta_x: int = 0,
+    delta_y: int = 0,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    approval_error, approval_token = await _check_desktop_policy(
+        "desktop_control_scroll",
+        {"delta_x": delta_x, "delta_y": delta_y},
+        tool_context,
+    )
+    if approval_error:
+        return {"error": approval_error}
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = DesktopScrollRequest(
+        request_id=f"desktop-scroll-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+        delta_x=delta_x,
+        delta_y=delta_y,
+    )
+    result, payload = await execute_desktop_call(
+        request=request,
+        tool_name="desktop.control.scroll",
+        args={"delta_x": delta_x, "delta_y": delta_y},
+        get_client=get_desktop_client,
+        invoke=lambda client, req: client.scroll(req),
+        ok_getter=lambda result: result.ok,
+        error_payload=lambda error: {"error": error},
+        metadata=_executor_metadata(),
+    )
+    if result is None or not result.ok:
+        error = (result.error if result else payload["error"]) or "desktop scroll failed"
+        _audit_desktop_event(
+            event_type=AuditEventType.DESKTOP_CONTROL,
+            action="scroll",
+            resource="desktop",
+            result=error,
+            metadata={
+                **_executor_metadata(),
+                "request_id": request.request_id,
+                "approval_token": approval_token,
+                "delta_x": delta_x,
+                "delta_y": delta_y,
+            },
+            tool_context=tool_context,
+        )
+        return {"error": error}
+
+    _audit_desktop_event(
+        event_type=AuditEventType.DESKTOP_CONTROL,
+        action="scroll",
+        resource="desktop",
+        result="success",
+        metadata={
+            **_executor_metadata(),
+            "request_id": request.request_id,
+            "approval_token": approval_token,
+            "delta_x": delta_x,
+            "delta_y": delta_y,
+        },
+        tool_context=tool_context,
+    )
     return {"success": True}
 
 

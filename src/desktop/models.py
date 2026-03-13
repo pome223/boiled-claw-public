@@ -95,6 +95,27 @@ class DesktopWindowsResult(BaseModel):
     error: Optional[str] = None
 
 
+class DesktopWaitWindowRequest(DesktopRequestBase):
+    app_name: Optional[str] = None
+    window_id: Optional[str] = None
+    title: Optional[str] = None
+    timeout_seconds: float = Field(default=5.0, gt=0.0, le=120.0)
+    poll_interval_seconds: float = Field(default=0.2, gt=0.0, le=5.0)
+
+    @model_validator(mode="after")
+    def validate_wait_target(self) -> "DesktopWaitWindowRequest":
+        if self.app_name or self.window_id or self.title:
+            return self
+        raise ValueError("desktop wait.window requires app_name, window_id, or title")
+
+
+class DesktopWaitWindowResult(BaseModel):
+    ok: bool
+    matched: bool = False
+    window: Optional[DesktopWindowDescriptor] = None
+    error: Optional[str] = None
+
+
 class DesktopFrontmostAppRequest(DesktopRequestBase):
     pass
 
@@ -122,6 +143,19 @@ class DesktopAxFindRequest(DesktopRequestBase):
 
 
 class DesktopAxFindResult(BaseModel):
+    ok: bool
+    matched: bool = False
+    target: Optional[DesktopTargetDescriptor] = None
+    error: Optional[str] = None
+
+
+class DesktopWaitElementRequest(DesktopRequestBase):
+    target: DesktopElementSelector
+    timeout_seconds: float = Field(default=5.0, gt=0.0, le=120.0)
+    poll_interval_seconds: float = Field(default=0.2, gt=0.0, le=5.0)
+
+
+class DesktopWaitElementResult(BaseModel):
     ok: bool
     matched: bool = False
     target: Optional[DesktopTargetDescriptor] = None
@@ -177,6 +211,17 @@ class DesktopHotkeyRequest(DesktopRequestBase):
     keys: list[str] = Field(min_length=1)
 
 
+class DesktopScrollRequest(DesktopRequestBase):
+    delta_x: int = 0
+    delta_y: int = 0
+
+    @model_validator(mode="after")
+    def validate_scroll_delta(self) -> "DesktopScrollRequest":
+        if self.delta_x == 0 and self.delta_y == 0:
+            raise ValueError("desktop scroll requires non-zero delta_x or delta_y")
+        return self
+
+
 class DesktopDragRequest(DesktopRequestBase):
     start_x: int
     start_y: int
@@ -198,16 +243,21 @@ __all__ = [
     "DesktopWindowDescriptor",
     "DesktopWindowsRequest",
     "DesktopWindowsResult",
+    "DesktopWaitWindowRequest",
+    "DesktopWaitWindowResult",
     "DesktopFrontmostAppRequest",
     "DesktopFrontmostAppResult",
     "DesktopAxSnapshotRequest",
     "DesktopAxSnapshotResult",
     "DesktopAxFindRequest",
     "DesktopAxFindResult",
+    "DesktopWaitElementRequest",
+    "DesktopWaitElementResult",
     "DesktopLaunchAppRequest",
     "DesktopFocusWindowRequest",
     "DesktopClickRequest",
     "DesktopTypeRequest",
     "DesktopHotkeyRequest",
+    "DesktopScrollRequest",
     "DesktopDragRequest",
 ]

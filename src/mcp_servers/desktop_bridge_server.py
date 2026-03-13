@@ -27,8 +27,11 @@ from src.desktop import (
     DesktopFrontmostAppRequest,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopTypeRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitWindowRequest,
     DesktopWindowsRequest,
 )
 
@@ -106,6 +109,36 @@ def create_server(
         return (await client.windows(request)).model_dump()
 
     @mcp.tool(
+        name="desktop.wait.window",
+        description="Wait for a matching window to appear on the host desktop.",
+    )
+    async def desktop_wait_window(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        app_name: Optional[str] = None,
+        window_id: Optional[str] = None,
+        title: Optional[str] = None,
+        timeout_seconds: float = 5.0,
+        poll_interval_seconds: float = 0.2,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopWaitWindowRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            app_name=app_name,
+            window_id=window_id,
+            title=title,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        return (await client.wait_window(request)).model_dump()
+
+    @mcp.tool(
         name="desktop.view.frontmost_app",
         description="Inspect the frontmost app on the host desktop.",
     )
@@ -160,6 +193,46 @@ def create_server(
             ),
         )
         return (await client.ax_find(request)).model_dump()
+
+    @mcp.tool(
+        name="desktop.wait.element",
+        description="Wait for a matching accessibility element from the host desktop.",
+    )
+    async def desktop_wait_element(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        app_name: Optional[str] = None,
+        window_id: Optional[str] = None,
+        role: Optional[str] = None,
+        title: Optional[str] = None,
+        identifier: Optional[str] = None,
+        value_contains: Optional[str] = None,
+        index: int = 0,
+        timeout_seconds: float = 5.0,
+        poll_interval_seconds: float = 0.2,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopWaitElementRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            target=_selector(
+                app_name=app_name,
+                window_id=window_id,
+                role=role,
+                title=title,
+                identifier=identifier,
+                value_contains=value_contains,
+                index=index,
+            ),
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+        return (await client.wait_element(request)).model_dump()
 
     @mcp.tool(
         name="desktop.ax.snapshot",
@@ -350,6 +423,27 @@ def create_server(
             keys=keys,
         )
         return (await client.hotkey(request)).model_dump()
+
+    @mcp.tool(name="desktop.control.scroll", description="Scroll on the host desktop.")
+    async def desktop_control_scroll(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        delta_x: int = 0,
+        delta_y: int = 0,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = DesktopScrollRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            delta_x=delta_x,
+            delta_y=delta_y,
+        )
+        return (await client.scroll(request)).model_dump()
 
     @mcp.tool(name="desktop.control.drag", description="Drag on the host desktop.")
     async def desktop_control_drag(

@@ -25,9 +25,14 @@ from src.desktop import (
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
     DesktopTypeRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitElementResult,
+    DesktopWaitWindowRequest,
+    DesktopWaitWindowResult,
     DesktopWindowsRequest,
     DesktopWindowsResult,
     build_default_desktop_client,
@@ -109,6 +114,12 @@ class DesktopBridgeClient(DesktopClient):
         payload = await self._call_tool("desktop.view.windows", request.model_dump())
         return DesktopWindowsResult.model_validate(payload)
 
+    async def wait_window(
+        self, request: DesktopWaitWindowRequest
+    ) -> DesktopWaitWindowResult:
+        payload = await self._call_tool("desktop.wait.window", request.model_dump())
+        return DesktopWaitWindowResult.model_validate(payload)
+
     async def frontmost_app(
         self, request: DesktopFrontmostAppRequest
     ) -> DesktopFrontmostAppResult:
@@ -124,6 +135,12 @@ class DesktopBridgeClient(DesktopClient):
     async def ax_find(self, request: DesktopAxFindRequest) -> DesktopAxFindResult:
         payload = await self._call_tool("desktop.ax.find", request.model_dump())
         return DesktopAxFindResult.model_validate(payload)
+
+    async def wait_element(
+        self, request: DesktopWaitElementRequest
+    ) -> DesktopWaitElementResult:
+        payload = await self._call_tool("desktop.wait.element", request.model_dump())
+        return DesktopWaitElementResult.model_validate(payload)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
         payload = await self._call_tool("desktop.control.click", request.model_dump())
@@ -147,6 +164,10 @@ class DesktopBridgeClient(DesktopClient):
 
     async def hotkey(self, request: DesktopHotkeyRequest) -> DesktopControlResult:
         payload = await self._call_tool("desktop.control.hotkey", request.model_dump())
+        return DesktopControlResult.model_validate(payload)
+
+    async def scroll(self, request: DesktopScrollRequest) -> DesktopControlResult:
+        payload = await self._call_tool("desktop.control.scroll", request.model_dump())
         return DesktopControlResult.model_validate(payload)
 
     async def drag(self, request: DesktopDragRequest) -> DesktopControlResult:

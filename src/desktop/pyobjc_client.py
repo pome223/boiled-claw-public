@@ -7,6 +7,7 @@ the minimum viable control primitives needed for desktop automation.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 import subprocess
 import tempfile
@@ -33,10 +34,15 @@ from src.desktop.models import (
     DesktopFrontmostAppResult,
     DesktopHotkeyRequest,
     DesktopLaunchAppRequest,
+    DesktopScrollRequest,
     DesktopScreenshotRequest,
     DesktopScreenshotResult,
     DesktopTargetDescriptor,
     DesktopTypeRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitElementResult,
+    DesktopWaitWindowRequest,
+    DesktopWaitWindowResult,
     DesktopWindowBounds,
     DesktopWindowDescriptor,
     DesktopWindowsRequest,
@@ -64,14 +70,18 @@ class PyObjCDesktopClient(DesktopClient):
         implemented = set()
         if self._quartz is not None:
             implemented.add("desktop.view.windows")
+            implemented.add("desktop.wait.window")
         if _supports_ax_snapshot(self._quartz, self._appkit):
             implemented.add("desktop.ax.find")
+            implemented.add("desktop.wait.element")
             implemented.add("desktop.ax.snapshot")
         if _supports_mouse_click(self._quartz):
             implemented.add("desktop.control.click")
             implemented.add("desktop.control.drag")
         if _supports_text_input(self._quartz):
             implemented.add("desktop.control.type")
+        if _supports_scroll(self._quartz):
+            implemented.add("desktop.control.scroll")
         if _supports_open_command():
             implemented.add("desktop.control.launch_app")
         if _supports_focus_window(self._quartz, self._appkit):
@@ -155,6 +165,37 @@ class PyObjCDesktopClient(DesktopClient):
 
         return DesktopWindowsResult(ok=True, windows=descriptors)
 
+    async def wait_window(
+        self, request: DesktopWaitWindowRequest
+    ) -> DesktopWaitWindowResult:
+        if self._quartz is None:
+            return DesktopWaitWindowResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        deadline = asyncio.get_running_loop().time() + request.timeout_seconds
+        while True:
+            result = await self.windows(
+                DesktopWindowsRequest(
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    user_id=request.user_id,
+                    agent_name=request.agent_name,
+                    approval_token=request.approval_token,
+                    include_minimized=True,
+                )
+            )
+            if not result.ok:
+                return DesktopWaitWindowResult(ok=False, error=result.error)
+            for window in result.windows:
+                if request.window_id and window.window_id != request.window_id:
+                    continue
+                if request.app_name and window.app_name != request.app_name:
+                    continue
+                if request.title and request.title not in window.title:
+                    continue
+                return DesktopWaitWindowResult(ok=True, matched=True, window=window)
+            if asyncio.get_running_loop().time() >= deadline:
+                return DesktopWaitWindowResult(ok=True, matched=False)
+            await asyncio.sleep(request.poll_interval_seconds)
+
     async def frontmost_app(
         self, request: DesktopFrontmostAppRequest
     ) -> DesktopFrontmostAppResult:
@@ -221,6 +262,35 @@ class PyObjCDesktopClient(DesktopClient):
                 resolved["element"],
             ),
         )
+
+    async def wait_element(
+        self, request: DesktopWaitElementRequest
+    ) -> DesktopWaitElementResult:
+        if not _supports_ax_snapshot(self._quartz, self._appkit):
+            return DesktopWaitElementResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        deadline = asyncio.get_running_loop().time() + request.timeout_seconds
+        while True:
+            result = await self.ax_find(
+                DesktopAxFindRequest(
+                    request_id=request.request_id,
+                    session_id=request.session_id,
+                    user_id=request.user_id,
+                    agent_name=request.agent_name,
+                    approval_token=request.approval_token,
+                    target=request.target,
+                )
+            )
+            if not result.ok:
+                return DesktopWaitElementResult(ok=False, error=result.error)
+            if result.matched:
+                return DesktopWaitElementResult(
+                    ok=True,
+                    matched=True,
+                    target=result.target,
+                )
+            if asyncio.get_running_loop().time() >= deadline:
+                return DesktopWaitElementResult(ok=True, matched=False)
+            await asyncio.sleep(request.poll_interval_seconds)
 
     async def click(self, request: DesktopClickRequest) -> DesktopControlResult:
         if request.target is not None:
@@ -373,6 +443,19 @@ class PyObjCDesktopClient(DesktopClient):
         _set_event_flags(self._quartz, up, flags)
         self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, down)
         self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, up)
+        return DesktopControlResult(ok=True)
+
+    async def scroll(self, request: DesktopScrollRequest) -> DesktopControlResult:
+        if not _supports_scroll(self._quartz):
+            return DesktopControlResult(ok=False, error=DESKTOP_NOT_IMPLEMENTED)
+        event = self._quartz.CGEventCreateScrollWheelEvent(
+            None,
+            getattr(self._quartz, "kCGScrollEventUnitLine", 1),
+            2,
+            int(request.delta_y),
+            int(request.delta_x),
+        )
+        self._quartz.CGEventPost(self._quartz.kCGHIDEventTap, event)
         return DesktopControlResult(ok=True)
 
     async def drag(self, request: DesktopDragRequest) -> DesktopControlResult:
@@ -781,6 +864,15 @@ def _supports_text_input(quartz_module: Any | None) -> bool:
 
 def _supports_hotkey(quartz_module: Any | None) -> bool:
     return _supports_text_input(quartz_module) and hasattr(quartz_module, "CGEventSetFlags")
+
+
+def _supports_scroll(quartz_module: Any | None) -> bool:
+    return (
+        quartz_module is not None
+        and hasattr(quartz_module, "CGEventCreateScrollWheelEvent")
+        and hasattr(quartz_module, "CGEventPost")
+        and hasattr(quartz_module, "kCGHIDEventTap")
+    )
 
 
 def _supports_ax_press(quartz_module: Any | None) -> bool:
