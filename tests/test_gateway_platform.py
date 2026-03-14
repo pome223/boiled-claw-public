@@ -13,6 +13,7 @@ import src.memory_lifecycle.adk_memory_service as adk_memory_module
 import src.memory_lifecycle.promoted_store as promoted_store_module
 import src.runtime.tool_events as tool_events_module
 import src.security.tool_policy as tool_policy_module
+from src.gateway.routing import RoutingDecision
 from src.gateway.transcript import TranscriptStore
 
 
@@ -199,6 +200,142 @@ async def test_run_agent_http_uses_runner_for_non_stock_query(monkeypatch, tmp_p
         "message": "runner response",
         "ok": True,
     }
+
+
+@pytest.mark.asyncio
+async def test_compose_grounded_agent_message_uses_original_request_for_freshness(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    calls: list[str] = []
+
+    async def _fake_search(*, query, timelimit="", region="wt-wt"):
+        calls.append(query)
+        return {"results": [{"title": "ok", "url": "https://example.com"}]}
+
+    monkeypatch.setattr(server_module, "web_search", _fake_search)
+
+    routed_message = (
+        "[Gateway routing]\n"
+        "[Specialist output from browser_automator]\n"
+        "最新のブラウザ要約\n"
+        "[Original user request]\n"
+        "ブラウザを操作して、天気を見て"
+    )
+    composed = await gateway._compose_grounded_agent_message(
+        "sess-1",
+        "alice",
+        routed_message,
+        research_message="ブラウザを操作して、天気を見て",
+        agent_name="root_agent",
+        emit_tool_events=False,
+        allow_forced_research=True,
+    )
+
+    assert calls == []
+    assert "[Grounding from web_search]" not in composed
+
+
+@pytest.mark.asyncio
+async def test_run_specialist_prepass_detects_browser_runtime_failure(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="browser_automator",
+            content=types.Content(
+                role="tool",
+                parts=[
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id="browser-fail",
+                            name="browser_navigate",
+                            response={
+                                "error": "Playwright is not installed. Run: pip install playwright && playwright install",
+                                "success": False,
+                            },
+                        )
+                    )
+                ],
+            ),
+        )
+        yield Event(
+            author="browser_automator",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="stale fallback summary")],
+            ),
+        )
+
+    monkeypatch.setattr(
+        gateway.specialist_runners["browser_automator"],
+        "run_async",
+        _fake_run_async,
+    )
+
+    result = await gateway._run_specialist_prepass(
+        session_id="sess-1",
+        user_id="alice",
+        message="ブラウザを操作して、天気を見て",
+        specialist_name="browser_automator",
+    )
+
+    assert result.text == "stale fallback summary"
+    assert result.infrastructure_blocked is True
+    assert result.tool_failures[0].tool_name == "browser_navigate"
+
+
+@pytest.mark.asyncio
+async def test_run_agent_http_returns_browser_runtime_error_without_root_fallback(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    gateway._run_agent_http = server_module.GatewayServer._run_agent_http.__get__(
+        gateway,
+        server_module.GatewayServer,
+    )
+
+    async def _fake_select_route_for_message(**kwargs):
+        return RoutingDecision(
+            target="specialist",
+            specialist="browser_automator",
+            handoff_mode="preflight_then_root",
+            reason="browser task",
+            confidence=0.95,
+        )
+
+    async def _fake_run_specialist_prepass(**kwargs):
+        return server_module.SpecialistPrepassResult(
+            text="fallback weather summary",
+            tool_failures=[
+                server_module.SpecialistToolFailure(
+                    tool_name="browser_navigate",
+                    error="Playwright is not installed. Run: pip install playwright && playwright install",
+                    infrastructure=True,
+                )
+            ],
+            used_tools={"browser_navigate", "web_search"},
+        )
+
+    async def _unexpected_run_async(*args, **kwargs):
+        raise AssertionError("root runner should not execute after browser runtime failure")
+        yield  # pragma: no cover
+
+    async def _noop_routing_event(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(gateway, "_select_route_for_message", _fake_select_route_for_message)
+    monkeypatch.setattr(gateway, "_run_specialist_prepass", _fake_run_specialist_prepass)
+    monkeypatch.setattr(gateway, "_emit_routing_event", _noop_routing_event)
+    monkeypatch.setattr(gateway.runner, "run_async", _unexpected_run_async)
+
+    result = await gateway._run_agent_http(
+        user_id="alice",
+        session_id="sess-1",
+        message="ブラウザを操作して、天気を見て",
+    )
+
+    assert result["ok"] is False
+    assert result["type"] == "error"
+    assert "ブラウザ操作は実行できませんでした" in result["message"]
+    assert "web_search" in result["message"]
 
 
 def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
