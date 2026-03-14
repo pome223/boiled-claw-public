@@ -12,6 +12,7 @@ Typed Gateway Protocol v1:
 import asyncio
 from collections.abc import AsyncIterator, Mapping
 from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 import hashlib
 import json
 from datetime import datetime
@@ -64,6 +65,45 @@ _FRESHNESS_KEYWORDS = {
     "公演", "ライブ", "フェス", "開催", "話題", "リサーチ", "調査",
     "推測", "予測", "見通し", "発表", "gtc", "tour", "festival",
 }
+
+_BROWSER_TOOL_NAMES = {
+    "browser_navigate",
+    "browser_extract_text",
+    "browser_screenshot",
+    "host.browser.navigate",
+    "host.browser.extract_text",
+    "host.browser.screenshot",
+}
+_BROWSER_INFRA_ERROR_FRAGMENTS = (
+    "playwright is not installed",
+    "host bridge is not enabled",
+    "host_bridge_enabled is true but host_bridge_url is not set",
+    "host bridge tool call failed",
+    "host bridge returned empty tool content",
+    "host bridge returned non-json tool content",
+)
+
+
+@dataclass
+class SpecialistToolFailure:
+    tool_name: str
+    error: str
+    infrastructure: bool = False
+
+
+@dataclass
+class SpecialistPrepassResult:
+    text: str = ""
+    tool_failures: list[SpecialistToolFailure] = field(default_factory=list)
+    used_tools: set[str] = field(default_factory=set)
+
+    @property
+    def infrastructure_blocked(self) -> bool:
+        return any(item.infrastructure for item in self.tool_failures)
+
+    @property
+    def browser_failure(self) -> bool:
+        return any(item.tool_name in _BROWSER_TOOL_NAMES for item in self.tool_failures)
 
 
 class ConnectionManager:
@@ -350,6 +390,49 @@ class GatewayServer:
             return summarized
         return {"value": str(payload)[:400]}
 
+    @staticmethod
+    def _tool_response_error(response: Any) -> str | None:
+        if not isinstance(response, dict):
+            return None
+        error = str(response.get("error") or "").strip()
+        if error:
+            return error
+        if response.get("success") is False:
+            return "tool reported success=false"
+        if response.get("ok") is False:
+            return "tool reported ok=false"
+        return None
+
+    @staticmethod
+    def _is_browser_infrastructure_error(tool_name: str, error: str) -> bool:
+        if tool_name not in _BROWSER_TOOL_NAMES:
+            return False
+        normalized = (error or "").strip().lower()
+        return any(fragment in normalized for fragment in _BROWSER_INFRA_ERROR_FRAGMENTS)
+
+    def _format_specialist_runtime_failure(
+        self,
+        specialist_name: str,
+        result: SpecialistPrepassResult,
+    ) -> str:
+        first_error = next(
+            (item.error for item in result.tool_failures if item.error),
+            "required runtime is unavailable",
+        )
+        if specialist_name == "browser_automator" and result.infrastructure_blocked:
+            return (
+                "ブラウザ操作は実行できませんでした。\n"
+                f"- 原因: {first_error}\n"
+                "- 現在のリクエストでは、ブラウザを実際に操作せずに web_search へ自動フォールバックしません。\n"
+                "- 対応: Host Bridge を有効化して host 側で Playwright を実行するか、"
+                "この実行環境に Playwright をインストールしてください。"
+            )
+
+        return (
+            f"{specialist_name} の実行に失敗しました。\n"
+            f"- 原因: {first_error}"
+        )
+
     async def _emit_runner_tool_events(
         self,
         session_id: str,
@@ -407,16 +490,18 @@ class GatewayServer:
         user_id: str,
         message: str,
         *,
+        research_message: str | None = None,
         agent_name: str = "",
         request_id: str | None = None,
         emit_tool_events: bool = False,
         allow_forced_research: bool = True,
     ) -> str:
         composed = self._compose_agent_message(session_id, message)
-        if not allow_forced_research or not self._should_force_web_research(message):
+        search_query = research_message or message
+        if not allow_forced_research or not self._should_force_web_research(search_query):
             return composed
 
-        timelimit = self._select_web_search_timelimit(message)
+        timelimit = self._select_web_search_timelimit(search_query)
         request_key = request_id or f"grounding:{session_id}"
         resolved_agent_name = agent_name or root_agent.name
         if emit_tool_events:
@@ -426,7 +511,7 @@ class GatewayServer:
                     tool_name="web_search",
                     agent_name=resolved_agent_name,
                     args={
-                        "query": message,
+                        "query": search_query,
                         "timelimit": timelimit,
                         "region": "jp-jp",
                     },
@@ -435,7 +520,7 @@ class GatewayServer:
             )
 
         result = await web_search(
-            query=message,
+            query=search_query,
             timelimit=timelimit,
             region="jp-jp",
         )
@@ -444,7 +529,7 @@ class GatewayServer:
             user_id=user_id,
             session_id=session_id,
             action="search",
-            resource=message,
+            resource=search_query,
             result="success" if result.get("results") else "empty",
             metadata={
                 "timelimit": timelimit,
@@ -464,7 +549,7 @@ class GatewayServer:
                 ),
             )
 
-        grounding = self._format_web_grounding(message, result)
+        grounding = self._format_web_grounding(search_query, result)
         return (
             f"{composed}\n\n"
             "[Grounding from web_search]\n"
@@ -525,10 +610,10 @@ class GatewayServer:
         message: str,
         specialist_name: str,
         request_id: str | None = None,
-    ) -> str:
+    ) -> SpecialistPrepassResult:
         runner = self.specialist_runners.get(specialist_name)
         if runner is None:
-            return ""
+            return SpecialistPrepassResult()
 
         full_message = message
         if specialist_name == "web_researcher":
@@ -536,6 +621,7 @@ class GatewayServer:
                 session_id,
                 user_id,
                 message,
+                research_message=message,
                 agent_name=specialist_name,
                 request_id=request_id,
                 emit_tool_events=True,
@@ -543,6 +629,7 @@ class GatewayServer:
             )
         content = types.Content(role="user", parts=[types.Part(text=full_message)])
         partial = ""
+        result = SpecialistPrepassResult()
         async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
@@ -553,11 +640,31 @@ class GatewayServer:
                 event,
                 fallback_request_id=request_id,
             )
+            for function_call in event.get_function_calls():
+                if function_call.name:
+                    result.used_tools.add(function_call.name)
+            for function_response in event.get_function_responses():
+                if function_response.name:
+                    result.used_tools.add(function_response.name)
+                error = self._tool_response_error(function_response.response or {})
+                if not error:
+                    continue
+                result.tool_failures.append(
+                    SpecialistToolFailure(
+                        tool_name=function_response.name or "unknown_tool",
+                        error=error,
+                        infrastructure=self._is_browser_infrastructure_error(
+                            function_response.name or "",
+                            error,
+                        ),
+                    )
+                )
             if event.is_final_response() and event.content and event.content.parts:
                 for part in event.content.parts:
                     if part.text:
                         partial += part.text
-        return partial.strip()
+        result.text = partial.strip()
+        return result
 
     def _routing_history_block(self, session_id: str, limit: int = 8) -> str:
         lines: list[str] = []
@@ -1740,13 +1847,20 @@ class GatewayServer:
                     agent_name=decision.specialist,
                 )
                 if not decision.preflight_specialist:
-                    partial = await self._run_specialist_prepass(
+                    prepass = await self._run_specialist_prepass(
                         session_id=session_id,
                         user_id=user_id,
                         message=message,
                         specialist_name=decision.specialist,
                         request_id=request_id,
                     )
+                    if prepass.infrastructure_blocked:
+                        partial = self._format_specialist_runtime_failure(
+                            decision.specialist,
+                            prepass,
+                        )
+                    else:
+                        partial = prepass.text
                     if not partial.strip():
                         partial = "Specialist did not return a response."
                     self.transcript.append(
@@ -1760,9 +1874,9 @@ class GatewayServer:
                     )
                     return
 
-                specialist_output = ""
+                prepass = SpecialistPrepassResult()
                 try:
-                    specialist_output = await self._run_specialist_prepass(
+                    prepass = await self._run_specialist_prepass(
                         session_id=session_id,
                         user_id=user_id,
                         message=message,
@@ -1780,11 +1894,39 @@ class GatewayServer:
                         user_id=user_id,
                         agent_name="root_agent",
                     )
-                    specialist_output = ""
+                    prepass = SpecialistPrepassResult()
+                if prepass.infrastructure_blocked:
+                    partial = self._format_specialist_runtime_failure(
+                        decision.specialist,
+                        prepass,
+                    )
+                    await self._emit_routing_event(
+                        session_id,
+                        status="blocked",
+                        message=(
+                            f"{decision.specialist} runtime unavailable; "
+                            "not forwarding browser context to root_agent."
+                        ),
+                        user_id=user_id,
+                        agent_name=decision.specialist,
+                    )
+                    self.transcript.append(
+                        session_id,
+                        "assistant",
+                        partial,
+                        user_id=user_id,
+                        request_id=request_id,
+                        metadata={"type": "specialist_runtime_error"},
+                    )
+                    await self.manager.send_json(
+                        session_id,
+                        ev_chat_done(partial, request_id, aborted=False),
+                    )
+                    return
                 routed_message = self._format_root_routing_message(
                     message,
                     decision,
-                    specialist_output=specialist_output,
+                    specialist_output=prepass.text,
                 )
                 await self._emit_routing_event(
                     session_id,
@@ -1800,6 +1942,7 @@ class GatewayServer:
                 session_id,
                 user_id,
                 routed_message,
+                research_message=message,
                 agent_name=root_agent.name,
                 request_id=request_id,
                 emit_tool_events=True,
@@ -2064,12 +2207,23 @@ class GatewayServer:
                 agent_name=decision.specialist,
             )
             if not decision.preflight_specialist:
-                response_text = await self._run_specialist_prepass(
+                prepass = await self._run_specialist_prepass(
                     session_id=session_id,
                     user_id=user_id,
                     message=message,
                     specialist_name=decision.specialist,
                 )
+                if prepass.infrastructure_blocked:
+                    response_text = self._format_specialist_runtime_failure(
+                        decision.specialist,
+                        prepass,
+                    )
+                    return {
+                        "type": "error",
+                        "message": response_text,
+                        "ok": False,
+                    }
+                response_text = prepass.text
                 if not response_text.strip():
                     response_text = "Specialist did not return a response."
                 return {
@@ -2078,9 +2232,9 @@ class GatewayServer:
                     "ok": True,
                 }
 
-            specialist_output = ""
+            prepass = SpecialistPrepassResult()
             try:
-                specialist_output = await self._run_specialist_prepass(
+                prepass = await self._run_specialist_prepass(
                     session_id=session_id,
                     user_id=user_id,
                     message=message,
@@ -2097,11 +2251,30 @@ class GatewayServer:
                     user_id=user_id,
                     agent_name="root_agent",
                 )
-                specialist_output = ""
+                prepass = SpecialistPrepassResult()
+            if prepass.infrastructure_blocked:
+                await self._emit_routing_event(
+                    session_id,
+                    status="blocked",
+                    message=(
+                        f"{decision.specialist} runtime unavailable; "
+                        "not forwarding browser context to root_agent."
+                    ),
+                    user_id=user_id,
+                    agent_name=decision.specialist,
+                )
+                return {
+                    "type": "error",
+                    "message": self._format_specialist_runtime_failure(
+                        decision.specialist,
+                        prepass,
+                    ),
+                    "ok": False,
+                }
             routed_message = self._format_root_routing_message(
                 message,
                 decision,
-                specialist_output=specialist_output,
+                specialist_output=prepass.text,
             )
             await self._emit_routing_event(
                 session_id,
@@ -2117,6 +2290,7 @@ class GatewayServer:
             session_id,
             user_id,
             routed_message,
+            research_message=message,
             agent_name=root_agent.name,
             emit_tool_events=False,
             allow_forced_research=not (
