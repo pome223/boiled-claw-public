@@ -1641,6 +1641,11 @@ class GatewayServer:
                     elif event_name == "chat.abort":
                         request_id = data.get("request_id")
                         aborted = await self.manager.abort(session_id)
+                        await self._desktop_emergency_stop(
+                            session_id=session_id,
+                            user_id=user_id,
+                            reason="Abort requested from Web UI",
+                        )
                         if not aborted:
                             await self.manager.send_json(
                                 session_id,
@@ -1779,6 +1784,7 @@ class GatewayServer:
     ) -> None:
         """Abort existing task then start a new agent run."""
         await self.manager.abort(session_id)
+        await self._desktop_clear_stop(session_id=session_id, user_id=user_id)
         task = asyncio.create_task(
             self._agent_run_task(session_id, user_id, message, request_id),
             name=f"agent:{session_id}",
@@ -1794,6 +1800,7 @@ class GatewayServer:
         request_id: Optional[str] = None,
     ) -> None:
         await self.manager.abort(session_id)
+        await self._desktop_clear_stop(session_id=session_id, user_id=user_id)
         task = asyncio.create_task(
             self._control_loop_task(
                 session_id,
@@ -2498,6 +2505,70 @@ class GatewayServer:
                 reason=approval_request.get("reason", ""),
             ),
         )
+
+    async def _desktop_emergency_stop(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        reason: str,
+    ) -> bool:
+        if not getattr(self.settings, "desktop_bridge_enabled", False):
+            return False
+        try:
+            from src.bridges.desktop_bridge_client import get_desktop_client
+            from src.desktop import DesktopEmergencyStopRequest
+
+            client = get_desktop_client()
+            result = await client.emergency_stop(
+                DesktopEmergencyStopRequest(
+                    request_id=f"gateway-stop-{uuid.uuid4().hex[:12]}",
+                    session_id=session_id,
+                    user_id=user_id,
+                    agent_name="gateway",
+                    reason=reason,
+                )
+            )
+            return bool(result.ok)
+        except Exception as exc:
+            self.audit_logger.log_error(
+                error=str(exc),
+                user_id=user_id,
+                session_id=session_id,
+                context={"action": "desktop_emergency_stop"},
+            )
+            return False
+
+    async def _desktop_clear_stop(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+    ) -> bool:
+        if not getattr(self.settings, "desktop_bridge_enabled", False):
+            return False
+        try:
+            from src.bridges.desktop_bridge_client import get_desktop_client
+            from src.desktop import DesktopClearStopRequest
+
+            client = get_desktop_client()
+            result = await client.clear_stop(
+                DesktopClearStopRequest(
+                    request_id=f"gateway-clear-stop-{uuid.uuid4().hex[:12]}",
+                    session_id=session_id,
+                    user_id=user_id,
+                    agent_name="gateway",
+                )
+            )
+            return bool(result.ok)
+        except Exception as exc:
+            self.audit_logger.log_error(
+                error=str(exc),
+                user_id=user_id,
+                session_id=session_id,
+                context={"action": "desktop_clear_stop"},
+            )
+            return False
 
     # ------------------------------------------------------------------
     # session / transcript helpers

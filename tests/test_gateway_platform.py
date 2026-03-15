@@ -804,6 +804,62 @@ def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
             )
 
 
+def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, str] = {}
+
+    async def _fake_stop(*, session_id: str, user_id: str, reason: str):
+        captured["session_id"] = session_id
+        captured["user_id"] = user_id
+        captured["reason"] = reason
+        return True
+
+    monkeypatch.setattr(gateway, "_desktop_emergency_stop", _fake_stop)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.abort"})
+
+            done = ws.receive_json()
+            assert done["event"] == "chat.done"
+
+    assert captured["user_id"] == "alice"
+    assert captured["reason"] == "Abort requested from Web UI"
+
+
+@pytest.mark.asyncio
+async def test_start_agent_run_clears_desktop_stop(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, str] = {}
+
+    async def _fake_clear(*, session_id: str, user_id: str):
+        captured["session_id"] = session_id
+        captured["user_id"] = user_id
+        return True
+
+    async def _fake_abort(session_id: str):
+        return False
+
+    async def _fake_agent_task(session_id: str, user_id: str, message: str, request_id=None):
+        return None
+
+    monkeypatch.setattr(gateway, "_desktop_clear_stop", _fake_clear)
+    monkeypatch.setattr(gateway.manager, "abort", _fake_abort)
+    monkeypatch.setattr(gateway, "_agent_run_task", _fake_agent_task)
+
+    await gateway._start_agent_run(
+        session_id="sess-clear-1",
+        user_id="alice",
+        message="hello",
+    )
+    await asyncio.sleep(0)
+
+    assert captured == {"session_id": "sess-clear-1", "user_id": "alice"}
+
+
 def test_websocket_tool_approval_falls_back_to_control_loop(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
