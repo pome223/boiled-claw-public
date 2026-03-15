@@ -228,22 +228,24 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   height: 100%;
+  min-height: 0;
 }
 
 .chat-pane {
   min-width: 0;
   display: grid;
   grid-template-rows: 1fr auto;
+  min-height: 0;
 }
 
 .inspector {
   border-left: 1px solid var(--line);
   padding: 14px;
   background: rgba(7, 14, 26, 0.6);
-}
-
-.inspector h3 {
-  margin: 0 0 10px;
+  display: grid;
+  grid-template-rows: min-content;
+  align-content: start;
+  min-height: 0;
 }
 
 .messages {
@@ -284,6 +286,97 @@ body {
   color: #ffe3a2;
   background: rgba(143, 103, 25, 0.2);
   border-color: rgba(249, 199, 92, 0.3);
+}
+
+.bubble.approval {
+  align-self: flex-start;
+  max-width: min(88%, 760px);
+  background: rgba(23, 38, 69, 0.94);
+  border-color: rgba(95, 156, 255, 0.34);
+  box-shadow: 0 14px 28px rgba(2, 6, 14, 0.26);
+}
+
+.bubble.approval.approval-resolved {
+  border-color: rgba(90, 223, 172, 0.32);
+}
+
+.bubble.approval.approval-denied {
+  border-color: rgba(255, 111, 127, 0.38);
+}
+
+.approval-card {
+  display: grid;
+  gap: 10px;
+}
+
+.approval-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.approval-title {
+  font-weight: 700;
+}
+
+.approval-status {
+  flex-shrink: 0;
+}
+
+.approval-meta,
+.approval-args {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+
+.approval-reason {
+  color: #dbe7ff;
+}
+
+.approval-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.approval-note {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.event-stream-panel {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(6, 12, 22, 0.56);
+  overflow: hidden;
+}
+
+.event-stream-panel summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  font-weight: 700;
+}
+
+.event-stream-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.event-stream-panel summary::after {
+  content: "Open";
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-family: "IBM Plex Mono", monospace;
+}
+
+.event-stream-panel[open] summary::after {
+  content: "Close";
 }
 
 .composer {
@@ -365,6 +458,11 @@ textarea {
   white-space: pre-wrap;
 }
 
+.event-log {
+  margin: 0 14px 14px;
+  max-height: min(44vh, 440px);
+}
+
 .event-row {
   border-bottom: 1px dashed rgba(165, 187, 237, 0.18);
   padding: 0 0 7px;
@@ -434,7 +532,7 @@ textarea {
   .inspector {
     border-left: none;
     border-top: 1px solid var(--line);
-    max-height: 42vh;
+    max-height: none;
   }
 }
 
