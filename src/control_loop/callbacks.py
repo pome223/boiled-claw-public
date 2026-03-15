@@ -162,6 +162,8 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
             _ensure_capability(required_caps, "desktop.view.windows")
             _ensure_capability(required_caps, "desktop.control.focus_window")
             _ensure_capability(required_caps, "desktop.control.click")
+            _ensure_capability(required_caps, "desktop.control.hotkey")
+            _ensure_capability(required_caps, "desktop.control.scroll")
             _ensure_capability(required_caps, "desktop.ax.find")
             _ensure_capability(required_caps, "desktop.wait.element")
             _ensure_capability(required_caps, "desktop.view.screenshot")

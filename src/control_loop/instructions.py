@@ -91,6 +91,8 @@ Minimum browser-operation capability set:
 - desktop.view.windows
 - desktop.control.focus_window
 - desktop.control.click
+- desktop.control.hotkey
+- desktop.control.scroll
 - desktop.ax.find
 - desktop.wait.element
 - desktop.view.screenshot
