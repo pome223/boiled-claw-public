@@ -32,7 +32,7 @@ from pathlib import Path
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
 from src.agents.sub_agents import SUB_AGENTS
-from src.control_loop.root_workflow import ControlLoop
+from src.control_loop.root_workflow import ControlLoop, ExecutionResult
 from src.gateway.routing_agent import routing_agent
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.security.audit import get_audit_logger, AuditEventType
@@ -51,7 +51,12 @@ from src.gateway.protocol import (
     ev_tool_start, ev_tool_result,
     normalize_client_event, validate_client_event,
 )
-from src.gateway.routing import RoutingDecision, decision_from_payload, heuristic_decision
+from src.gateway.routing import (
+    RoutingDecision,
+    decision_from_payload,
+    heuristic_decision,
+    targets_user_browser,
+)
 from src.runtime.tool_events import set_tool_event_notifier
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
@@ -90,6 +95,13 @@ _BROWSER_INFRA_ERROR_FRAGMENTS = (
     "host bridge returned empty tool content",
     "host bridge returned non-json tool content",
 )
+_USER_BROWSER_REQUIRED_CAPABILITIES = {
+    "desktop.view.windows",
+    "desktop.control.focus_window",
+    "desktop.ax.find",
+    "desktop.control.click",
+    "desktop.control.type",
+}
 
 
 @dataclass
@@ -439,6 +451,56 @@ class GatewayServer:
         return (
             f"{specialist_name} の実行に失敗しました。\n"
             f"- 原因: {first_error}"
+        )
+
+    async def _current_browser_runtime_error(
+        self,
+        message: str,
+    ) -> str | None:
+        if not targets_user_browser(message):
+            return None
+
+        if not getattr(self.settings, "desktop_bridge_enabled", False):
+            return (
+                "現在開いているブラウザや既存のスプレッドシートは操作できませんでした。\n"
+                "- 原因: Desktop Bridge が無効です。\n"
+                "- このリクエストは、managed browser やローカル CSV ではなく、"
+                "あなたが今開いているブラウザを対象にする必要があります。\n"
+                "- 対応: DESKTOP_BRIDGE_ENABLED=true と DESKTOP_BRIDGE_URL を設定し、"
+                "host 側で Desktop Bridge を起動してください。"
+            )
+
+        try:
+            from src.bridges.desktop_bridge_client import get_desktop_client
+
+            client = get_desktop_client()
+            capability_result = await client.capabilities()
+        except Exception as exc:
+            return (
+                "現在開いているブラウザや既存のスプレッドシートは操作できませんでした。\n"
+                f"- 原因: Desktop Bridge capability check failed: {exc}\n"
+                "- 対応: Desktop Bridge を起動し、host 側 runtime が正常応答することを確認してください。"
+            )
+
+        implemented = {
+            capability.name
+            for capability in capability_result.capabilities
+            if capability.implemented
+        }
+        missing = sorted(_USER_BROWSER_REQUIRED_CAPABILITIES - implemented)
+        if not missing:
+            return None
+
+        available = ", ".join(sorted(implemented)) or "(none)"
+        required = ", ".join(sorted(_USER_BROWSER_REQUIRED_CAPABILITIES))
+        missing_text = ", ".join(missing)
+        return (
+            "現在開いているブラウザや既存のスプレッドシートは操作できませんでした。\n"
+            f"- 原因: Desktop Bridge に必要 capability が不足しています: {missing_text}\n"
+            f"- 必要 capability: {required}\n"
+            f"- 利用可能 capability: {available}\n"
+            "- このリクエストは、managed browser やローカル CSV に置き換えず、"
+            "現在のブラウザを対象にする必要があります。"
         )
 
     async def _emit_runner_tool_events(
@@ -2048,6 +2110,26 @@ class GatewayServer:
         request_id: Optional[str] = None,
     ) -> None:
         try:
+            current_browser_error = await self._current_browser_runtime_error(goal)
+            if current_browser_error:
+                self.transcript.append(
+                    session_id,
+                    "assistant",
+                    current_browser_error,
+                    user_id=user_id,
+                    request_id=request_id,
+                    metadata={
+                        "type": "control_loop",
+                        "success": False,
+                        "error": "desktop_bridge_unavailable",
+                    },
+                )
+                await self.manager.send_json(
+                    session_id,
+                    ev_chat_done(current_browser_error, request_id, aborted=False),
+                )
+                return
+
             result = await self.control_loop.run(
                 goal=goal,
                 user_id=user_id,
@@ -2364,6 +2446,16 @@ class GatewayServer:
         goal: str,
         constraints: list[str],
     ):
+        current_browser_error = await self._current_browser_runtime_error(goal)
+        if current_browser_error:
+            return ExecutionResult(
+                request_id=f"http_{uuid.uuid4().hex[:12]}",
+                session_id=session_id,
+                user_id=user_id,
+                final_text=current_browser_error,
+                success=False,
+                metadata={"error": "desktop_bridge_unavailable"},
+            )
         return await self.control_loop.run(
             goal=goal,
             user_id=user_id,

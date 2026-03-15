@@ -116,6 +116,26 @@ _SPREADSHEET_KEYWORDS = {
     "表計算",
 }
 
+_CURRENT_BROWSER_KEYWORDS = {
+    "私が開いているブラウザ",
+    "今開いているブラウザ",
+    "開いているブラウザ",
+    "今のブラウザ",
+    "現在のブラウザ",
+    "既存のブラウザ",
+    "私のブラウザ",
+    "今開いているタブ",
+    "開いているタブ",
+    "今のタブ",
+    "現在のタブ",
+    "既存のタブ",
+    "今開いているスプレッドシート",
+    "開いているスプレッドシート",
+    "今のスプレッドシート",
+    "現在のスプレッドシート",
+    "既存のスプレッドシート",
+}
+
 _DESKTOP_VIEW_KEYWORDS = {
     "画面",
     "スクリーン",
@@ -458,6 +478,13 @@ def decision_from_payload(
 
 def _contains_any(text: str, keywords: set[str]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+def targets_user_browser(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    return _contains_any(normalized, _CURRENT_BROWSER_KEYWORDS)
 
 
 def _is_browser_only_flow(text: str) -> bool:

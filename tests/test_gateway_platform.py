@@ -338,6 +338,30 @@ async def test_run_agent_http_returns_browser_runtime_error_without_root_fallbac
     assert "web_search" in result["message"]
 
 
+@pytest.mark.asyncio
+async def test_run_control_loop_http_rejects_current_browser_request_without_desktop_bridge(
+    monkeypatch,
+    tmp_path,
+):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _unexpected_control_loop_run(*args, **kwargs):
+        raise AssertionError("control loop should not execute without current-browser runtime")
+
+    monkeypatch.setattr(gateway.control_loop, "run", _unexpected_control_loop_run)
+
+    result = await gateway._run_control_loop_http(
+        user_id="alice",
+        session_id="sess-browser",
+        goal="私が開いているブラウザのスプレッドシートに GTC の予想を書いて",
+        constraints=[],
+    )
+
+    assert result.success is False
+    assert "現在開いているブラウザや既存のスプレッドシートは操作できませんでした" in result.final_text
+    assert "Desktop Bridge が無効です" in result.final_text
+
+
 def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
