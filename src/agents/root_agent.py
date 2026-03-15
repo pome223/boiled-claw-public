@@ -48,12 +48,13 @@ from src.tools.subagents import (
     subagents_steer,
 )
 from src.agents.sub_agents import SUB_AGENTS
+from src.agents.model_config import DEFAULT_MODEL
 
 root_agent = Agent(
     name="boiled_claw",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description=(
-        "boiled-claw: Your personal AI agent powered by Gemini 3.0 Flash. "
+        f"boiled-claw: Your personal AI agent powered by {DEFAULT_MODEL.name}. "
         "Multi-channel support, browser automation, memory system, and extensible architecture."
     ),
     instruction="""

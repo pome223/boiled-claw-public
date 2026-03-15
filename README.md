@@ -1,12 +1,12 @@
 # 🦀 boiled-claw
 
-> Your personal AI agent powered by Google ADK and Gemini 3.0 Flash. Any platform, any channel.
+> Your personal AI agent powered by Google ADK and Gemini 3.1 Flash Lite Preview. Any platform, any channel.
 
 OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベースのパーソナルAIエージェントです。
 
 ## 特徴
 
-- 🤖 **Gemini 3.0 Flash** - 最新の高速AIモデル
+- 🤖 **Gemini 3.1 Flash Lite Preview** - 既定の高速AIモデル
 - 🔍 **Web検索** - DuckDuckGo API 経由
 - 🌐 **ブラウザ自動化** - Playwright によるスクレイピング、スクリーンショット
 - 💻 **シェル実行** - セキュリティポリシー付き安全なコマンド実行
@@ -227,7 +227,7 @@ DESKTOP_BRIDGE_URL=http://127.0.0.1:8767/sse
 boiled-claw/
 ├── src/
 │   ├── agents/
-│   │   ├── root_agent.py       # メインエージェント (gemini-3.0-flash)
+│   │   ├── root_agent.py       # メインエージェント (gemini-3.1-flash-lite-preview)
 │   │   ├── sub_agents.py       # サブエージェント定義
 │   │   └── model_config.py     # モデル設定管理
 │   ├── gateway/
@@ -507,7 +507,7 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 ## ロードマップ
 
 - [x] 基本エージェント構造 (Google ADK)
-- [x] Gemini 3.0 Flash モデル
+- [x] Gemini 3.1 Flash Lite Preview モデル
 - [x] Web検索ツール
 - [x] シェル実行ツール
 - [x] ファイル操作ツール

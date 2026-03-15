@@ -15,7 +15,7 @@ def test_root_agent_exists():
 
 
 def test_root_agent_model():
-    """Root agentのモデルがgemini-3.0-flashであることを確認"""
+    """Root agentのモデルが既定モデルと一致することを確認"""
     assert root_agent.model == DEFAULT_MODEL.name
 
 
@@ -55,7 +55,7 @@ def test_root_agent_has_orchestration_tools():
 
 def test_model_config():
     """モデル設定が正しいことを確認"""
-    assert DEFAULT_MODEL.name == "gemini-3-flash-preview"
+    assert DEFAULT_MODEL.name == "gemini-3.1-flash-lite-preview"
     assert DEFAULT_MODEL.temperature == 0.7
 
     config = get_model_config("default")

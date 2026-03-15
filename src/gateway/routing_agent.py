@@ -1,6 +1,7 @@
 """Intent router for Gateway entrypoints."""
 
 from google.adk.agents import LlmAgent
+from src.agents.model_config import DEFAULT_MODEL
 
 
 _ROUTING_INSTRUCTION = """
@@ -70,7 +71,7 @@ Rules for valid output:
 
 routing_agent = LlmAgent(
     name="routing_agent",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     instruction=_ROUTING_INSTRUCTION,
     description="Chooses root_agent, control_loop, specialist, or dynamic_agent for an incoming request.",
 )

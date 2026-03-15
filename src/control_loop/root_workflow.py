@@ -25,6 +25,7 @@ from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService, Session
 from google.genai.types import Content, Part
 
+from src.agents.model_config import DEFAULT_MODEL
 from src.control_loop.callbacks import (
     curator_callback,
     policy_judge_callback,
@@ -88,7 +89,7 @@ def _chain_after_callbacks(
 # Planner + PolicyJudge (after callback)
 planner_with_policy = LlmAgent(
     name="planner",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     instruction=planner_agent.instruction,
     output_key=StateKeys.TEMP_PLANNER_DRAFT,
     after_agent_callback=policy_judge_callback,
@@ -98,7 +99,7 @@ planner_with_policy = LlmAgent(
 # Verifier + Repair + Curator (chained after callbacks)
 verifier_with_hooks = LlmAgent(
     name="verifier",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     instruction=verifier_agent.instruction,
     output_key=StateKeys.VERIFY_LAST_REPORT,
     after_agent_callback=_chain_after_callbacks(repair_callback, curator_callback),
@@ -111,7 +112,7 @@ verifier_with_hooks = LlmAgent(
 # Executor (with guarded tools, no callbacks)
 executor_with_tools = LlmAgent(
     name="executor",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     instruction=executor_agent.instruction,
     tools=[
         guarded_web_search,

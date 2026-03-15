@@ -36,12 +36,13 @@ from src.tools.desktop import (
     desktop_view_windows,
 )
 from src.tools.memory import memory_store, memory_search
+from src.agents.model_config import DEFAULT_MODEL
 
 
 # Web検索特化エージェント
 web_agent = Agent(
     name="web_researcher",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="Web検索と情報収集を専門とするエージェント",
     instruction="""
 あなたはWeb検索のスペシャリストです。
@@ -64,7 +65,7 @@ web_agent = Agent(
 # ファイル操作特化エージェント
 file_agent = Agent(
     name="file_manager",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="ファイル操作とコード解析を専門とするエージェント",
     instruction="""
 あなたはファイル操作のスペシャリストです。
@@ -87,7 +88,7 @@ file_agent = Agent(
 # システム操作特化エージェント
 system_agent = Agent(
     name="system_operator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="システムコマンド実行とタスク自動化を専門とするエージェント",
     instruction="""
 あなたはシステム操作のスペシャリストです。
@@ -114,7 +115,7 @@ system_agent = Agent(
 # メモリ管理エージェント
 memory_agent = Agent(
     name="memory_keeper",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="会話履歴とメモリ管理を専門とするエージェント",
     instruction="""
 あなたはメモリ管理のスペシャリストです。
@@ -137,7 +138,7 @@ memory_agent = Agent(
 # ブラウザ自動化エージェント
 browser_agent = Agent(
     name="browser_automator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="ブラウザ自動化とスクレイピングを専門とするエージェント",
     instruction="""
 あなたはブラウザ自動化のスペシャリストです。
@@ -176,7 +177,7 @@ browser_agent = Agent(
 
 control_ui_chat_agent = Agent(
     name="control_ui_chat_operator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="boiled-claw Control UI の /chat ページとの会話を専門とするエージェント",
     instruction="""
 あなたは boiled-claw Control UI の `/chat` ページ専用オペレーターです。
@@ -204,7 +205,7 @@ control_ui_chat_agent = Agent(
 
 desktop_agent = Agent(
     name="desktop_operator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="Desktop view/control を専門とするエージェント",
     instruction="""
 あなたは desktop automation のスペシャリストです。
