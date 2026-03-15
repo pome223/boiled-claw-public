@@ -17,7 +17,7 @@ from src.control_loop.instructions import (
     build_planner_instruction,
     build_verifier_instruction,
 )
-from src.control_loop.root_workflow import ControlLoop
+from src.control_loop.root_workflow import ControlLoop, planner_with_policy
 import src.memory_lifecycle.candidate_store as candidate_store_module
 from src.memory_lifecycle.adk_memory_service import PromotedMemoryService
 from src.memory_lifecycle.candidate_store import CandidateStore
@@ -346,10 +346,28 @@ def test_policy_judge_requires_human_for_desktop_control():
         }
     )
 
-    policy_judge_callback(callback_context, types.Content(role="model", parts=[]))
+    policy_judge_callback(callback_context)
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
     assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-desktop-1"
+
+
+def test_planner_after_agent_callback_accepts_callback_context_only():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "plan-simple-1",
+                "goal": "inspect the page",
+                "risk_level": "low",
+                "required_capabilities": [{"name": "browser.navigate"}],
+            }
+        }
+    )
+
+    planner_with_policy.after_agent_callback(callback_context=callback_context)
+
+    assert callback_context.state[StateKeys.APPROVAL_STATUS] == "policy_approved"
+    assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-simple-1"
 
 
 @pytest.mark.asyncio

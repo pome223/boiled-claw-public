@@ -69,13 +69,13 @@ _CONTROL_LOOP_AUTHOR = "control_loop"
 # ── Callback helpers ───────────────────────────────────────────────────────
 
 def _chain_after_callbacks(
-    *cbs: Callable[[CallbackContext, Content], Optional[Content]],
-) -> Callable[[CallbackContext, Content], Optional[Content]]:
+    *cbs: Callable[[CallbackContext], None],
+) -> Callable[[CallbackContext], None]:
     """複数の after_agent_callback を順番に呼ぶ合成関数を返す。"""
-    def chained(ctx: CallbackContext, response: Content) -> Optional[Content]:
+    def chained(ctx: CallbackContext) -> None:
         for cb in cbs:
-            cb(ctx, response)
-        return None
+            cb(ctx)
+        return
     return chained
 
 
