@@ -23,6 +23,7 @@ const tabTitle = document.getElementById("tabTitle");
 const tabSubtitle = document.getElementById("tabSubtitle");
 const messagesEl = document.getElementById("messages");
 const eventLogEl = document.getElementById("eventLog");
+const eventCountBadgeEl = document.getElementById("eventCountBadge");
 const rawLogEl = document.getElementById("rawLog");
 const sessionListEl = document.getElementById("sessionList");
 const statusDotEl = document.getElementById("statusDot");
@@ -68,15 +69,14 @@ const addCronBtn = document.getElementById("addCronBtn");
 const refreshCronBtn = document.getElementById("refreshCronBtn");
 const cronResultEl = document.getElementById("cronResult");
 
-// approval elements
-const approvalListEl = document.getElementById("approvalList");
-
 let socket = null;
 let waitingIndicator = null;
 const sessions = [];
 let pendingMessage = null;
 const messageHistory = [];
 let currentSessionId = null;
+const inlineApprovals = new Map();
+const MAX_EVENT_ROWS = 200;
 
 // --- streaming state ---
 let _streamingBubble = null;
@@ -216,14 +216,142 @@ function addSystemMessage(text) {
   return appendBubble("system", text);
 }
 
+function approvalStateLabel(status) {
+  switch (status) {
+    case "approving": return "approving";
+    case "denying": return "denying";
+    case "approved": return "approved";
+    case "denied": return "denied";
+    default: return "pending";
+  }
+}
+
+function approvalBubbleClass(model) {
+  let className = "bubble approval";
+  if (model.status === "approved") className += " approval-resolved";
+  if (model.status === "denied" || model.status === "denying") className += " approval-denied";
+  return className;
+}
+
+function approvalBodyHtml(model) {
+  const argsHtml = model.argsPreview
+    ? `<div class="approval-args">args: ${escapeHtml(model.argsPreview)}</div>`
+    : "";
+  const noteHtml = model.note
+    ? `<div class="approval-note">${escapeHtml(model.note)}</div>`
+    : "";
+  const actionsHtml = model.status === "pending"
+    ? [
+      `<div class="approval-actions">`,
+      `<button class="btn btn-sm approve-btn" data-id="${escapeAttr(model.requestId)}">Approve</button>`,
+      `<button class="btn btn-sm deny-btn" data-id="${escapeAttr(model.requestId)}">Deny</button>`,
+      `</div>`
+    ].join("")
+    : "";
+
+  return [
+    `<div class="approval-card">`,
+    `<div class="approval-header">`,
+    `<div class="approval-title">${escapeHtml(model.title)}</div>`,
+    `<span class="tag approval-status">${escapeHtml(approvalStateLabel(model.status))}</span>`,
+    `</div>`,
+    model.subtitle ? `<div class="approval-meta">${escapeHtml(model.subtitle)}</div>` : "",
+    model.reason ? `<div class="approval-reason">${escapeHtml(model.reason)}</div>` : "",
+    argsHtml,
+    noteHtml,
+    actionsHtml,
+    `</div>`
+  ].join("");
+}
+
+function wireApprovalButtons(bubble, model) {
+  const approveBtn = bubble.querySelector(".approve-btn");
+  const denyBtn = bubble.querySelector(".deny-btn");
+  if (approveBtn) {
+    approveBtn.addEventListener("click", () => {
+      sendApproval(model.requestId, true);
+    });
+  }
+  if (denyBtn) {
+    denyBtn.addEventListener("click", () => {
+      sendApproval(model.requestId, false);
+    });
+  }
+}
+
+function renderInlineApproval(model) {
+  const bubble = document.createElement("div");
+  bubble.className = approvalBubbleClass(model);
+  bubble.dataset.requestId = model.requestId;
+  bubble.innerHTML = approvalBodyHtml(model);
+  wireApprovalButtons(bubble, model);
+  model.element = bubble;
+  return bubble;
+}
+
+function updateInlineApprovalElement(model) {
+  const bubble = model.element;
+  if (!bubble || !bubble.isConnected) return;
+  bubble.className = approvalBubbleClass(model);
+  bubble.innerHTML = approvalBodyHtml(model);
+  wireApprovalButtons(bubble, model);
+}
+
+function upsertInlineApproval(model) {
+  const existing = inlineApprovals.get(model.requestId);
+  const next = {
+    createdAt: existing?.createdAt || Date.now(),
+    status: existing?.status || "pending",
+    note: existing?.note || "",
+    ...existing,
+    ...model
+  };
+  inlineApprovals.set(next.requestId, next);
+
+  if (next.element && next.element.isConnected) {
+    updateInlineApprovalElement(next);
+    return next;
+  }
+
+  const bubble = renderInlineApproval(next);
+  messagesEl.appendChild(bubble);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return next;
+}
+
+function updateInlineApprovalStatus(requestId, status, note = "") {
+  const existing = inlineApprovals.get(requestId);
+  if (!existing) return;
+  existing.status = status;
+  existing.note = note;
+  updateInlineApprovalElement(existing);
+}
+
+function parseApprovalResolutionMessage(message) {
+  const match = /^Approval\s+([a-z0-9]+):\s+(approved|denied)$/i.exec(message || "");
+  if (!match) return null;
+  return {
+    requestId: match[1],
+    status: match[2].toLowerCase() === "approved" ? "approved" : "denied"
+  };
+}
+
 function restoreMessages() {
   messagesEl.innerHTML = "";
+  inlineApprovals.forEach((model) => {
+    model.element = null;
+  });
   messageHistory.forEach(({ kind, text }) => {
     const b = document.createElement("div");
     b.className = `bubble ${kind}`;
     b.textContent = text;
     messagesEl.appendChild(b);
   });
+  Array.from(inlineApprovals.values())
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .forEach((model) => {
+      messagesEl.appendChild(renderInlineApproval(model));
+    });
   messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
@@ -240,6 +368,12 @@ function logEvent(name, payload) {
   row.className = "event-row";
   row.textContent = `[${ts}] ${name}${payload ? ` ${JSON.stringify(payload)}` : ""}`;
   eventLogEl.prepend(row);
+  while (eventLogEl.childElementCount > MAX_EVENT_ROWS) {
+    eventLogEl.removeChild(eventLogEl.lastElementChild);
+  }
+  if (eventCountBadgeEl) {
+    eventCountBadgeEl.textContent = String(eventLogEl.childElementCount);
+  }
   const line = `[${ts}] ${name}${payload ? ` ${JSON.stringify(payload)}` : ""}`;
   rawLogEl.textContent = `${line}\n${rawLogEl.textContent}`.slice(0, 12000);
 }
@@ -275,6 +409,7 @@ function requestGatewayHistory() {
 function handleChatHistory(payload) {
   const entries = payload.entries || [];
   messageHistory.length = 0;
+  inlineApprovals.clear();
   entries.forEach((e) => {
     if (e.role === "user") {
       messageHistory.push({ kind: "user", text: e.content });
@@ -437,8 +572,19 @@ function handleChatToken(payload) {
 
 function handleSystemEvent(payload) {
   const msg = payload.message || "";
-  addSystemMessage(msg);
   logEvent("system.event", { source: payload.source, status: payload.status, run_id: payload.run_id });
+  if (payload.source === "tools.approval" && payload.status === "resolved") {
+    const resolved = parseApprovalResolutionMessage(msg);
+    if (resolved) {
+      updateInlineApprovalStatus(
+        resolved.requestId,
+        resolved.status,
+        resolved.status === "approved" ? "Approved in chat UI" : "Denied in chat UI"
+      );
+      return;
+    }
+  }
+  addSystemMessage(msg);
 }
 
 function handleHealthTick(payload) {
@@ -460,42 +606,15 @@ function handleToolsApprovalRequest(payload) {
   const tool = payload.tool_name || "?";
   const agent = payload.agent_name || "?";
   const reason = payload.reason || "";
-
-  // Add to approval list UI when available
-  if (approvalListEl) {
-    const li = document.createElement("li");
-    li.className = "approval-item";
-    li.dataset.requestId = reqId;
-    li.innerHTML = [
-      `<div><strong>${escapeHtml(tool)}</strong> by <span class="mono">${escapeHtml(agent)}</span></div>`,
-      reason ? `<div class="muted">${escapeHtml(reason)}</div>` : "",
-      `<div class="muted mono">args: ${escapeHtml(JSON.stringify(payload.args || {}).slice(0, 120))}</div>`,
-      `<div class="memory-actions">`,
-      `<button class="btn btn-sm approve-btn" data-id="${escapeAttr(reqId)}">Approve</button>`,
-      `<button class="btn btn-sm deny-btn" data-id="${escapeAttr(reqId)}">Deny</button>`,
-      `</div>`,
-    ].join("");
-    approvalListEl.prepend(li);
-
-    li.querySelector(".approve-btn").addEventListener("click", () => {
-      sendApproval(reqId, true);
-      li.remove();
-    });
-    li.querySelector(".deny-btn").addEventListener("click", () => {
-      sendApproval(reqId, false);
-      li.remove();
-    });
-  }
-
-  if (!approvalListEl) {
-    const details = JSON.stringify(payload.args || {}, null, 2);
-    const approved = window.confirm(
-      `Approve ${tool} for ${agent}?\n\n${reason || "Approval required"}\n\n${details}`
-    );
-    sendApproval(reqId, approved);
-  }
-
-  addSystemMessage(`[approval] ${tool} by ${agent}: ${reason || "approval required"}`);
+  upsertInlineApproval({
+    requestId: reqId,
+    title: `${tool} by ${agent}`,
+    subtitle: "tool approval request",
+    reason: reason || "approval required",
+    argsPreview: JSON.stringify(payload.args || {}).slice(0, 220),
+    status: "pending",
+    note: "Respond inline to continue this run."
+  });
 }
 
 function handleControlApprovalRequest(payload) {
@@ -508,41 +627,15 @@ function handleControlApprovalRequest(payload) {
     ? payload.required_capabilities.join(", ")
     : "";
   const reason = payload.reason || "";
-
-  if (approvalListEl) {
-    const li = document.createElement("li");
-    li.className = "approval-item";
-    li.dataset.requestId = reqId;
-    li.innerHTML = [
-      `<div><strong>control plan</strong> <span class="mono">${escapeHtml(planId)}</span></div>`,
-      `<div>${escapeHtml(goal)}</div>`,
-      `<div class="muted">risk=${escapeHtml(risk)}${caps ? ` caps=${escapeHtml(caps)}` : ""}</div>`,
-      reason ? `<div class="muted">${escapeHtml(reason)}</div>` : "",
-      `<div class="memory-actions">`,
-      `<button class="btn btn-sm approve-btn" data-id="${escapeAttr(reqId)}">Approve</button>`,
-      `<button class="btn btn-sm deny-btn" data-id="${escapeAttr(reqId)}">Deny</button>`,
-      `</div>`,
-    ].join("");
-    approvalListEl.prepend(li);
-
-    li.querySelector(".approve-btn").addEventListener("click", () => {
-      sendApproval(reqId, true);
-      li.remove();
-    });
-    li.querySelector(".deny-btn").addEventListener("click", () => {
-      sendApproval(reqId, false);
-      li.remove();
-    });
-  }
-
-  if (!approvalListEl) {
-    const approved = window.confirm(
-      `Approve control plan?\n\nGoal: ${goal}\nRisk: ${risk}\nPlan: ${planId}\n${reason}`
-    );
-    sendApproval(reqId, approved);
-  }
-
-  addSystemMessage(`[control approval] ${goal} (${risk})`);
+  upsertInlineApproval({
+    requestId: reqId,
+    title: `control plan ${planId}`,
+    subtitle: caps ? `risk=${risk} caps=${caps}` : `risk=${risk}`,
+    reason: goal || reason || "control approval required",
+    argsPreview: reason && goal !== reason ? reason : "",
+    status: "pending",
+    note: "Respond inline to continue the control loop."
+  });
 }
 
 function sendApproval(requestId, approved) {
@@ -555,7 +648,11 @@ function sendApproval(requestId, approved) {
   };
   socket.send(JSON.stringify(payload));
   logEvent("tools.approval.sent", { request_id: requestId, approved });
-  addSystemMessage(`[approval] ${requestId}: ${approved ? "approved" : "denied"}`);
+  updateInlineApprovalStatus(
+    requestId,
+    approved ? "approving" : "denying",
+    approved ? "Approval sent. Waiting for gateway confirmation..." : "Denial sent. Waiting for gateway confirmation..."
+  );
 }
 
 // -----------------------------------------------------------------------
@@ -880,6 +977,7 @@ function activateTab(tabKey) {
 function switchSession(targetSessionId) {
   if (socket) socket.close();
   messageHistory.length = 0;
+  inlineApprovals.clear();
   restoreMessages();
   connect(targetSessionId);
 }

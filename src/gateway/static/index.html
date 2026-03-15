@@ -74,10 +74,13 @@
             </form>
           </div>
           <aside class="inspector">
-            <h3>Approvals</h3>
-            <ul id="approvalList" class="list" style="max-height:180px;overflow-y:auto;margin-bottom:.75rem"></ul>
-            <h3>Event Stream</h3>
-            <div id="eventLog" class="event-log"></div>
+            <details id="eventStreamPanel" class="event-stream-panel">
+              <summary>
+                <span>Event Stream</span>
+                <span id="eventCountBadge" class="tag">0</span>
+              </summary>
+              <div id="eventLog" class="event-log"></div>
+            </details>
           </aside>
         </div>
       </section>
