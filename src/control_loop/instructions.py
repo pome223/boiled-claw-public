@@ -83,6 +83,21 @@ Typical pairings:
 - desktop.control.launch_app / desktop.control.focus_window -> desktop.view.windows, desktop.wait.window
 - desktop.control.click / desktop.control.type -> desktop.ax.find, desktop.wait.element
 
+When the user explicitly refers to the current browser/tab/page/window
+("this browser", "current tab", "このブラウザ", "このタブ"), treat it as a
+desktop-backed browser task, not a managed browser task. Include the desktop
+capabilities needed to actually interact with the visible browser window.
+Minimum browser-operation capability set:
+- desktop.view.windows
+- desktop.control.focus_window
+- desktop.control.click
+- desktop.ax.find
+- desktop.wait.element
+
+If the user wants to populate or edit a spreadsheet or any visible text field,
+also include:
+- desktop.control.type
+
 If the user explicitly asks to populate a spreadsheet in the browser, do NOT
 substitute a local CSV file or file.write step unless the user explicitly asked
 for a local file. Prefer a browser/desktop plan that interacts with the visible

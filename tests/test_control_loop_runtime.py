@@ -470,6 +470,68 @@ def test_policy_judge_requires_human_for_desktop_control():
     assert callback_context.state[StateKeys.APPROVAL_REQUEST]["goal"] == "open the existing browser spreadsheet"
 
 
+def test_policy_judge_expands_current_browser_capabilities():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを操作して、",
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "browser-op-init-v1",
+                "goal": "このブラウザを操作して、",
+                "risk_level": "high",
+                "required_capabilities": [
+                    {"name": "desktop.ax.snapshot", "mode": "read"},
+                    {"name": "desktop.control.focus_window", "mode": "execute"},
+                    {"name": "desktop.view.windows", "mode": "read"},
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+    approval_required = set(
+        callback_context.state[StateKeys.APPROVAL_REQUEST]["required_capabilities"]
+    )
+
+    assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
+    assert "desktop.control.click" in required
+    assert "desktop.ax.find" in required
+    assert "desktop.wait.element" in required
+    assert "desktop.control.click" in approval_required
+
+
+def test_policy_judge_expands_type_for_current_browser_spreadsheet_goal():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: (
+                "このブラウザを使ってNvidaのGTCで紹介される可能性のある技術を"
+                "調べてスプレッドシーートにまとめて"
+            ),
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "nvidia-gtc-research-spreadsheet",
+                "goal": "visible spreadsheet workflow",
+                "risk_level": "high",
+                "required_capabilities": [
+                    {"name": "web.search", "mode": "network"},
+                    {"name": "browser.navigate", "mode": "network"},
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+
+    assert "desktop.control.click" in required
+    assert "desktop.control.type" in required
+    assert "desktop.ax.find" in required
+    assert "desktop.wait.element" in required
+
+
 def test_planner_after_agent_callback_accepts_callback_context_only():
     callback_context = SimpleNamespace(
         state={
@@ -486,6 +548,23 @@ def test_planner_after_agent_callback_accepts_callback_context_only():
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "policy_approved"
     assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-simple-1"
+
+
+@pytest.mark.asyncio
+async def test_planner_instruction_mentions_current_browser_desktop_capabilities():
+    ctx = _make_readonly_context(
+        {
+            StateKeys.TASK_GOAL: "このブラウザを操作して、",
+            StateKeys.TASK_CONSTRAINTS: [],
+            StateKeys.TEMP_REPAIR_PATCH: None,
+        }
+    )
+
+    planner = await build_planner_instruction(ctx)
+
+    assert "desktop.control.click" in planner
+    assert "desktop.control.type" in planner
+    assert "desktop-backed browser task" in planner
 
 
 @pytest.mark.asyncio
