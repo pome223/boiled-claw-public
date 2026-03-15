@@ -108,6 +108,23 @@ def test_http_run_persists_transcript_and_session_listing(monkeypatch, tmp_path)
         assert entries[1]["content"] == "echo:hello gateway"
 
 
+def test_chat_ui_and_static_assets_disable_caching(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        chat_response = client.get("/chat")
+        assert chat_response.status_code == 200
+        assert chat_response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
+        assert chat_response.headers["pragma"] == "no-cache"
+        assert chat_response.headers["expires"] == "0"
+
+        app_js_response = client.get("/chat-static/app.js")
+        assert app_js_response.status_code == 200
+        assert app_js_response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
+        assert app_js_response.headers["pragma"] == "no-cache"
+        assert app_js_response.headers["expires"] == "0"
+
+
 def test_gateway_package_exports_remain_available():
     import src.gateway as gateway_pkg
 

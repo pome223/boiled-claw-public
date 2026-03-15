@@ -275,6 +275,16 @@ class GatewayServer:
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
+        @self.app.middleware("http")
+        async def chat_cache_control_middleware(request: Request, call_next):
+            response = await call_next(request)
+            path = request.url.path
+            if path == "/chat" or path.startswith("/chat-static"):
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+            return response
+
         self.app.mount(
             "/chat-static",
             StaticFiles(directory=str(self.static_dir)),
