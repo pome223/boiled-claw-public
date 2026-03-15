@@ -45,6 +45,7 @@ class BrowserSession:
         self.playwright = None
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
+        self.headless = True
 
     async def start(self, headless: bool = True):
         """ブラウザセッションを開始"""
@@ -56,6 +57,7 @@ class BrowserSession:
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=headless)
         self.page = await self.browser.new_page()
+        self.headless = headless
 
     async def close(self):
         """ブラウザセッションを閉じる"""
@@ -137,13 +139,67 @@ def _validate_url(url: str) -> Tuple[bool, Optional[str]]:
 _browser_session: Optional[BrowserSession] = None
 
 
-async def get_browser_session() -> BrowserSession:
+async def get_browser_session(*, visible: Optional[bool] = None) -> BrowserSession:
     """ブラウザセッションを取得"""
     global _browser_session
+    settings = get_settings()
+    desired_headless = settings.browser_headless if visible is None else (not visible)
+
+    if (
+        _browser_session is not None
+        and visible is not None
+        and _browser_session.headless != desired_headless
+    ):
+        await _browser_session.close()
+        _browser_session = None
+
+    if _browser_session is not None:
+        return _browser_session
+
     if _browser_session is None:
         _browser_session = BrowserSession()
-        await _browser_session.start(headless=get_settings().browser_headless)
+        await _browser_session.start(headless=desired_headless)
     return _browser_session
+
+
+async def _maybe_activate_visible_browser(
+    session: BrowserSession,
+    *,
+    title: Optional[str] = None,
+) -> None:
+    if getattr(session, "headless", True) or session.page is None:
+        return
+
+    try:
+        await session.page.bring_to_front()
+    except Exception:
+        pass
+
+    try:
+        from src.bridges.desktop_bridge_client import get_desktop_client
+        from src.desktop import DesktopFocusWindowRequest
+    except Exception:
+        return
+
+    try:
+        desktop_client = get_desktop_client()
+        request_kwargs = {
+            "request_id": f"browser-focus-{uuid.uuid4().hex[:12]}",
+            "session_id": "browser-visible-session",
+            "user_id": "browser-visible-user",
+            "agent_name": "browser_runtime",
+        }
+        if title:
+            result = await desktop_client.focus_window(
+                DesktopFocusWindowRequest(title=title, **request_kwargs)
+            )
+            if result.ok:
+                return
+        await desktop_client.focus_window(
+            DesktopFocusWindowRequest(app_name="Chromium", **request_kwargs)
+        )
+    except Exception:
+        return
 
 
 async def _check_browser_policy(
@@ -208,6 +264,7 @@ async def _browser_navigate_local(
     url: str,
     wait_for: str = "load",
     timeout: int = 30000,
+    visible: Optional[bool] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     if not PLAYWRIGHT_AVAILABLE:
@@ -234,7 +291,7 @@ async def _browser_navigate_local(
         return payload
 
     try:
-        session = await get_browser_session()
+        session = await get_browser_session(visible=visible)
         page = session.page
         response = await page.goto(url, wait_until=wait_for, timeout=timeout)
         payload = {
@@ -243,11 +300,16 @@ async def _browser_navigate_local(
             "status": response.status if response else None,
             "success": True,
         }
+        await _maybe_activate_visible_browser(session, title=payload["title"])
         _audit_browser_event(
             action="navigate",
             resource=url,
             result="success",
-            metadata={"status": payload["status"], "title": payload["title"]},
+            metadata={
+                "status": payload["status"],
+                "title": payload["title"],
+                "visible": not session.headless,
+            },
             tool_context=tool_context,
         )
         return payload
@@ -520,6 +582,7 @@ async def browser_navigate(
     url: str,
     wait_for: str = "load",
     timeout: int = 30000,
+    visible: Optional[bool] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     """
@@ -529,13 +592,14 @@ async def browser_navigate(
         url: 移動先URL
         wait_for: 待機イベント ('load', 'domcontentloaded', 'networkidle')
         timeout: タイムアウト (ミリ秒)
+        visible: true の場合は visible browser window を優先する
 
     Returns:
         ページ情報 (title, url, status)
     """
     approval_error, approval_token = await _check_browser_policy(
         "browser_navigate",
-        {"url": url, "wait_for": wait_for, "timeout": timeout},
+        {"url": url, "wait_for": wait_for, "timeout": timeout, "visible": visible},
         tool_context,
     )
     if approval_error:
@@ -560,11 +624,17 @@ async def browser_navigate(
             url=url,
             wait_for=wait_for,
             timeout=timeout,
+            visible=visible,
         )
         result, payload = await execute_host_bridge_call(
             request=request,
             tool_name="host.browser.navigate",
-            args={"url": request.url, "wait_for": request.wait_for, "timeout": request.timeout},
+            args={
+                "url": request.url,
+                "wait_for": request.wait_for,
+                "timeout": request.timeout,
+                "visible": request.visible,
+            },
             get_client=get_host_bridge_client,
             invoke=lambda client, req: client.navigate_browser(req),
             ok_getter=lambda result: result.ok,
@@ -580,6 +650,7 @@ async def browser_navigate(
                     "executor": "host_bridge",
                     "request_id": request.request_id,
                     "approval_token": approval_token,
+                    "visible": request.visible,
                 },
                 tool_context=tool_context,
             )
@@ -598,12 +669,19 @@ async def browser_navigate(
                 "executor": "host_bridge",
                 "request_id": request.request_id,
                 "approval_token": approval_token,
+                "visible": request.visible,
             },
             tool_context=tool_context,
         )
         return payload
 
-    return await _browser_navigate_local(url, wait_for, timeout, tool_context)
+    return await _browser_navigate_local(
+        url,
+        wait_for,
+        timeout,
+        visible=visible,
+        tool_context=tool_context,
+    )
 
 
 async def browser_screenshot(

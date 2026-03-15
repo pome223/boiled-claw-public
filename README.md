@@ -171,6 +171,15 @@ Playwright を Host Bridge 側で使う場合は、host 側 Python 環境に bro
 `http://localhost:18789/chat` のような loopback URL を browser automation で開きたい場合は、
 Host Bridge / gateway の両方で `BROWSER_ALLOW_LOOPBACK=true` を有効にします。
 
+`browser_navigate(..., visible=true)` を使うと、Host Bridge 側で headless ではない
+Playwright managed browser を開けます。`control_ui_chat_operator` はこの visible mode を
+既定で使うので、`/chat` 向けの会話フローは user に見える Chromium window を優先します。
+Desktop Bridge も有効なら、visible browser window の前面化も補助します。
+現在の browser session は global singleton なので、`visible=true` と `visible=false` を
+明示的に切り替えると既存 session を閉じて作り直します。`visible=None` の呼び出しは
+既存 session をそのまま再利用します。前面化は best-effort で、現状は Playwright の
+Chromium window を前提に `bring_to_front()` と Desktop Bridge `focus_window(...)` を順に試します。
+
 ```bash
 pip install -e '.[browser]'
 playwright install

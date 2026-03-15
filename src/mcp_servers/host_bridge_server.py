@@ -171,7 +171,7 @@ def _capabilities() -> CapabilityListResult:
                 name="host.browser.navigate",
                 risk="medium",
                 requires_approval=True,
-                description="Navigate the host browser to a guarded URL.",
+                description="Navigate the host browser to a guarded URL, optionally in a visible window.",
                 implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
             ),
             CapabilityDescriptor(
@@ -213,7 +213,7 @@ def _capabilities() -> CapabilityListResult:
                 name="host.control_ui_chat.send_message",
                 risk="medium",
                 requires_approval=True,
-                description="Use the boiled-claw Control UI chat with deterministic selectors.",
+                description="Use the boiled-claw Control UI chat with deterministic selectors, optionally in a visible window.",
                 implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
             ),
         ]
@@ -420,6 +420,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
         url: str,
         wait_for: str = "load",
         timeout: int = 30000,
+        visible: Optional[bool] = None,
         approval_token: Optional[str] = None,
     ) -> dict:
         request = HostBrowserNavigateRequest(
@@ -431,11 +432,13 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             url=url,
             wait_for=wait_for,
             timeout=timeout,
+            visible=visible,
         )
         payload = await browser_tools._browser_navigate_local(
             request.url,
             wait_for=request.wait_for,
             timeout=request.timeout,
+            visible=request.visible,
             tool_context=None,
         )
         return HostBrowserNavigateResult.model_validate(
@@ -614,6 +617,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
         timeout_ms: int = 90000,
         connect_timeout_ms: int = 15000,
         stable_wait_ms: int = 800,
+        visible: bool = True,
         approval_token: Optional[str] = None,
     ) -> dict:
         request = HostControlUiChatSendMessageRequest(
@@ -627,6 +631,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             timeout_ms=timeout_ms,
             connect_timeout_ms=connect_timeout_ms,
             stable_wait_ms=stable_wait_ms,
+            visible=visible,
         )
         payload = await control_ui_chat_tools._control_ui_chat_send_message_local(
             request.url,
@@ -634,6 +639,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             timeout_ms=request.timeout_ms,
             connect_timeout_ms=request.connect_timeout_ms,
             stable_wait_ms=request.stable_wait_ms,
+            visible=request.visible,
             tool_context=None,
         )
         return HostControlUiChatSendMessageResult.model_validate(

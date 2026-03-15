@@ -126,7 +126,8 @@ class _FakeSession:
 @pytest.mark.asyncio
 async def test_control_ui_chat_send_message_local_success(monkeypatch):
     page = _FakePage()
-    async def fake_get_browser_session():
+    async def fake_get_browser_session(*, visible=None):
+        assert visible is True
         return _FakeSession(page)
 
     monkeypatch.setattr(browser_module, "PLAYWRIGHT_AVAILABLE", True)
@@ -149,7 +150,8 @@ async def test_control_ui_chat_send_message_local_auto_approves_inner_requests(m
     page = _FakePage()
     page.requires_inner_approval = True
 
-    async def fake_get_browser_session():
+    async def fake_get_browser_session(*, visible=None):
+        assert visible is True
         return _FakeSession(page)
 
     monkeypatch.setattr(browser_module, "PLAYWRIGHT_AVAILABLE", True)
@@ -191,6 +193,7 @@ async def test_control_ui_chat_send_message_uses_host_bridge_when_enabled(monkey
     class FakeClient:
         async def send_control_ui_chat_message(self, request):
             seen["approval_token"] = request.approval_token
+            seen["visible"] = request.visible
             from src.bridges.host_bridge_schema import HostControlUiChatSendMessageResult
 
             return HostControlUiChatSendMessageResult(
@@ -230,5 +233,6 @@ async def test_control_ui_chat_send_message_uses_host_bridge_when_enabled(monkey
     assert result["success"] is True
     assert result["assistant_reply"] == "bridge reply"
     assert seen["approval_token"]
+    assert seen["visible"] is True
     assert emitted[0][1]["tool_name"] == "host.control_ui_chat.send_message"
     assert emitted[0][1]["metadata"]["executor"] == "host_bridge"

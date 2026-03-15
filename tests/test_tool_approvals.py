@@ -292,6 +292,7 @@ async def test_browser_navigate_uses_host_bridge_when_enabled(monkeypatch):
     class FakeClient:
         async def navigate_browser(self, request):
             seen["navigate_approval_token"] = request.approval_token
+            seen["navigate_visible"] = request.visible
             from src.bridges.host_bridge_schema import HostBrowserNavigateResult
 
             return HostBrowserNavigateResult(
@@ -325,12 +326,14 @@ async def test_browser_navigate_uses_host_bridge_when_enabled(monkeypatch):
 
     result = await browser_module.browser_navigate(
         "https://example.com",
+        visible=True,
         tool_context=tool_context,
     )
 
     assert result["success"] is True
     assert result["title"] == "bridge title"
     assert seen["navigate_approval_token"]
+    assert seen["navigate_visible"] is True
     assert emitted[0][1]["tool_name"] == "host.browser.navigate"
     assert emitted[0][1]["metadata"]["executor"] == "host_bridge"
     assert emitted[1][1]["tool_name"] == "host.browser.navigate"
@@ -389,6 +392,81 @@ async def test_browser_extract_text_uses_host_bridge_when_enabled(monkeypatch):
     assert seen["extract_approval_token"]
     assert emitted[0][1]["tool_name"] == "host.browser.extract_text"
     assert emitted[1][1]["tool_name"] == "host.browser.extract_text"
+
+
+@pytest.mark.asyncio
+async def test_get_browser_session_keeps_visible_session_until_explicit_override(monkeypatch):
+    starts = []
+    closes = []
+
+    class FakeSession:
+        def __init__(self):
+            self.headless = True
+            self.page = object()
+
+        async def start(self, headless=True):
+            self.headless = headless
+            starts.append(headless)
+
+        async def close(self):
+            closes.append(self.headless)
+
+    monkeypatch.setattr(browser_module, "BrowserSession", FakeSession)
+    monkeypatch.setattr(browser_module, "_browser_session", None)
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(browser_headless=True),
+    )
+
+    visible_session = await browser_module.get_browser_session(visible=True)
+    reused_session = await browser_module.get_browser_session()
+    hidden_session = await browser_module.get_browser_session(visible=False)
+
+    assert visible_session is reused_session
+    assert hidden_session is not visible_session
+    assert starts == [False, True]
+    assert closes == [False]
+
+
+@pytest.mark.asyncio
+async def test_maybe_activate_visible_browser_brings_window_to_front(monkeypatch):
+    import src.bridges.desktop_bridge_client as desktop_bridge_client_module
+
+    calls = []
+
+    class FakePage:
+        def __init__(self):
+            self.brought_to_front = False
+
+        async def bring_to_front(self):
+            self.brought_to_front = True
+
+    class FakeSession:
+        def __init__(self):
+            self.headless = False
+            self.page = FakePage()
+
+    class FakeDesktopClient:
+        async def focus_window(self, request):
+            calls.append(request)
+            from src.desktop import DesktopControlResult
+
+            return DesktopControlResult(ok=True)
+
+    monkeypatch.setattr(
+        desktop_bridge_client_module,
+        "get_desktop_client",
+        lambda: FakeDesktopClient(),
+    )
+
+    session = FakeSession()
+    await browser_module._maybe_activate_visible_browser(session, title="boiled-claw Control UI")
+
+    assert session.page.brought_to_front is True
+    assert len(calls) == 1
+    assert calls[0].title == "boiled-claw Control UI"
+    assert calls[0].app_name is None
 
 
 @pytest.mark.asyncio

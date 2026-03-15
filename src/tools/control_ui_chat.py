@@ -216,6 +216,7 @@ async def _control_ui_chat_send_message_local(
     timeout_ms: int = 90000,
     connect_timeout_ms: int = 15000,
     stable_wait_ms: int = 800,
+    visible: bool = True,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     if not browser_tools.PLAYWRIGHT_AVAILABLE:
@@ -243,11 +244,12 @@ async def _control_ui_chat_send_message_local(
         return payload
 
     try:
-        session = await browser_tools.get_browser_session()
+        session = await browser_tools.get_browser_session(visible=visible)
         page = session.page
         response = None
         if not _same_page_url(getattr(page, "url", ""), url):
             response = await page.goto(url, wait_until="load", timeout=timeout_ms)
+        await browser_tools._maybe_activate_visible_browser(session, title=await page.title())
 
         await _wait_until(
             lambda: _locator_count(page, _CONTROL_UI_INPUT_SELECTOR),
@@ -292,6 +294,7 @@ async def _control_ui_chat_send_message_local(
                 "message_length": len(message),
                 "connected": connected,
                 "agent_bubble_count": payload["agent_bubble_count"],
+                "visible": visible,
             },
             tool_context=tool_context,
         )
@@ -314,6 +317,7 @@ async def control_ui_chat_send_message(
     timeout_ms: int = 90000,
     connect_timeout_ms: int = 15000,
     stable_wait_ms: int = 800,
+    visible: bool = True,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     """
@@ -325,6 +329,7 @@ async def control_ui_chat_send_message(
         timeout_ms: 返信待ちを含む全体タイムアウト
         connect_timeout_ms: Connect 待ちタイムアウト
         stable_wait_ms: assistant bubble が安定したとみなす待機時間
+        visible: true の場合は visible browser window を優先する
 
     Returns:
         送信結果と assistant reply
@@ -336,6 +341,7 @@ async def control_ui_chat_send_message(
             "message": message,
             "timeout_ms": timeout_ms,
             "connect_timeout_ms": connect_timeout_ms,
+            "visible": visible,
         },
         tool_context,
     )
@@ -363,6 +369,7 @@ async def control_ui_chat_send_message(
             timeout_ms=timeout_ms,
             connect_timeout_ms=connect_timeout_ms,
             stable_wait_ms=stable_wait_ms,
+            visible=visible,
         )
         result, payload = await execute_host_bridge_call(
             request=request,
@@ -373,6 +380,7 @@ async def control_ui_chat_send_message(
                 "timeout_ms": request.timeout_ms,
                 "connect_timeout_ms": request.connect_timeout_ms,
                 "stable_wait_ms": request.stable_wait_ms,
+                "visible": request.visible,
             },
             get_client=get_host_bridge_client,
             invoke=lambda client, req: client.send_control_ui_chat_message(req),
@@ -389,6 +397,7 @@ async def control_ui_chat_send_message(
                     "executor": "host_bridge",
                     "request_id": request.request_id,
                     "message_length": len(message),
+                    "visible": request.visible,
                 },
                 tool_context=tool_context,
             )
@@ -410,6 +419,7 @@ async def control_ui_chat_send_message(
                 "executor": "host_bridge",
                 "request_id": request.request_id,
                 "message_length": len(message),
+                "visible": request.visible,
             },
             tool_context=tool_context,
         )
@@ -421,5 +431,6 @@ async def control_ui_chat_send_message(
         timeout_ms=timeout_ms,
         connect_timeout_ms=connect_timeout_ms,
         stable_wait_ms=stable_wait_ms,
+        visible=visible,
         tool_context=tool_context,
     )
