@@ -160,6 +160,7 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
         )
         if has_desktop_browser_plan or "browser.navigate" in cap_names:
             _ensure_capability(required_caps, "desktop.view.windows")
+            _ensure_capability(required_caps, "desktop.control.launch_app")
             _ensure_capability(required_caps, "desktop.control.focus_window")
             _ensure_capability(required_caps, "desktop.control.click")
             _ensure_capability(required_caps, "desktop.control.hotkey")

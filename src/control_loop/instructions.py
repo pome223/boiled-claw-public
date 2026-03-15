@@ -89,6 +89,7 @@ desktop-backed browser task, not a managed browser task. Include the desktop
 capabilities needed to actually interact with the visible browser window.
 Minimum browser-operation capability set:
 - desktop.view.windows
+- desktop.control.launch_app
 - desktop.control.focus_window
 - desktop.control.click
 - desktop.control.hotkey
