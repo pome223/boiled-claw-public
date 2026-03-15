@@ -1374,10 +1374,17 @@ class GatewayServer:
 
             resumed_result = None
             if approved and pending:
+                resume_goal = (
+                    await self.control_loop.get_task_goal(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    or pending.get("goal", "")
+                )
                 resumed_result = await self._run_control_loop_http(
                     user_id=user_id,
                     session_id=session_id,
-                    goal=pending.get("goal", ""),
+                    goal=resume_goal,
                     constraints=_normalize_constraints(
                         (pending.get("plan") or {}).get("constraints")
                     ),
@@ -1701,10 +1708,17 @@ class GatewayServer:
                                 and control_loop_resolved
                                 and pending_control_request
                             ):
+                                resume_goal = (
+                                    await self.control_loop.get_task_goal(
+                                        user_id=user_id,
+                                        session_id=session_id,
+                                    )
+                                    or pending_control_request.get("goal", "")
+                                )
                                 await self._start_control_loop_run(
                                     session_id=session_id,
                                     user_id=user_id,
-                                    goal=pending_control_request.get("goal", ""),
+                                    goal=resume_goal,
                                     constraints=_normalize_constraints(
                                         (pending_control_request.get("plan") or {}).get(
                                             "constraints"

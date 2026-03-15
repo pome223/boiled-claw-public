@@ -451,6 +451,7 @@ async def test_guarded_desktop_control_type_passes_selector(monkeypatch):
 def test_policy_judge_requires_human_for_desktop_control():
     callback_context = SimpleNamespace(
         state={
+            StateKeys.TASK_GOAL: "open the existing browser spreadsheet",
             StateKeys.TEMP_PLANNER_DRAFT: {
                 "plan_id": "plan-desktop-1",
                 "goal": "click through the desktop flow",
@@ -466,6 +467,7 @@ def test_policy_judge_requires_human_for_desktop_control():
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
     assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-desktop-1"
+    assert callback_context.state[StateKeys.APPROVAL_REQUEST]["goal"] == "open the existing browser spreadsheet"
 
 
 def test_planner_after_agent_callback_accepts_callback_context_only():

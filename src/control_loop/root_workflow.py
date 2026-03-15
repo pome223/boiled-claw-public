@@ -404,6 +404,18 @@ class ControlLoop:
             return None
         return request
 
+    async def get_task_goal(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+    ) -> str | None:
+        session = await self._get_session(user_id, session_id)
+        if session is None:
+            return None
+        goal = session.state.get(StateKeys.TASK_GOAL)
+        return str(goal).strip() if goal else None
+
     async def _get_or_create_session(
         self,
         *,

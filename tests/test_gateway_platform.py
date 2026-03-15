@@ -845,6 +845,56 @@ def test_websocket_tool_approval_falls_back_to_control_loop(monkeypatch, tmp_pat
             assert resolved["status"] == "resolved"
 
 
+def test_websocket_control_loop_approval_resume_uses_session_task_goal(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    async def _fake_pending(*, user_id: str, session_id: str):
+        return {
+            "request_id": "plan_resume_1",
+            "goal": "planner rewritten goal",
+            "plan": {"constraints": ["keep-browser"]},
+        }
+
+    async def _fake_resolve(*, user_id: str, session_id: str, approved: bool, request_id: str | None = None):
+        assert approved is True
+        assert request_id == "plan_resume_1"
+        return True
+
+    async def _fake_task_goal(*, user_id: str, session_id: str):
+        return "original user goal"
+
+    async def _fake_start(*, session_id: str, user_id: str, goal: str, constraints: list[str], request_id=None):
+        captured["goal"] = goal
+        captured["constraints"] = constraints
+
+    monkeypatch.setattr(gateway.control_loop, "get_pending_approval", _fake_pending)
+    monkeypatch.setattr(gateway.control_loop, "resolve_human_approval", _fake_resolve)
+    monkeypatch.setattr(gateway.control_loop, "get_task_goal", _fake_task_goal)
+    monkeypatch.setattr(gateway, "_start_control_loop_run", _fake_start)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json(
+                {
+                    "event": "tools.approval",
+                    "request_id": "plan_resume_1",
+                    "approved": True,
+                }
+            )
+
+            resolved = ws.receive_json()
+            assert resolved["event"] == "system.event"
+            assert resolved["source"] == "tools.approval"
+            assert resolved["status"] == "resolved"
+
+    assert captured["goal"] == "original user goal"
+    assert captured["constraints"] == ["keep-browser"]
+
+
 def test_http_control_loop_run_returns_pending_approval(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 

@@ -91,10 +91,11 @@ def policy_judge_callback(
     # Human approval が必要な capability
     needs_human = bool(cap_names & _HUMAN_REQUIRED_CAPS) or risk_level == "critical"
     if needs_human:
+        original_goal = callback_context.state.get(StateKeys.TASK_GOAL) or plan.get("goal", "")
         approval_request = {
             "request_id": f"plan_{uuid.uuid4().hex[:12]}",
             "plan_id": plan.get("plan_id", ""),
-            "goal": plan.get("goal", ""),
+            "goal": original_goal,
             "risk_level": risk_level,
             "required_capabilities": sorted(cap_names),
             "reason": (
