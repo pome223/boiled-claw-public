@@ -327,6 +327,13 @@ function updateInlineApprovalStatus(requestId, status, note = "") {
   updateInlineApprovalElement(existing);
 }
 
+function getPendingInlineApprovalIds() {
+  return Array.from(inlineApprovals.values())
+    .filter((model) => model.status === "pending")
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((model) => model.requestId);
+}
+
 function parseApprovalResolutionMessage(message) {
   const match = /^Approval\s+([a-z0-9]+):\s+(approved|denied)$/i.exec(message || "");
   if (!match) return null;
@@ -1112,9 +1119,25 @@ function sendMessage(text) {
 
 function abortRun() {
   if (!socket || socket.readyState !== WebSocket.OPEN) return;
-  socket.send(JSON.stringify({ event: "chat.abort" }));
-  logEvent("socket.abort");
-  addSystemMessage("abort sent...");
+
+  const pendingApprovalIds = getPendingInlineApprovalIds();
+  if (pendingApprovalIds.length) {
+    pendingApprovalIds.forEach((requestId) => {
+      sendApproval(requestId, false);
+      updateInlineApprovalStatus(
+        requestId,
+        "denying",
+        "Stop requested from Web UI."
+      );
+    });
+    addSystemMessage("stop sent for pending approvals...");
+  }
+
+  if (_runInProgress) {
+    socket.send(JSON.stringify({ event: "chat.abort" }));
+    logEvent("socket.abort");
+    addSystemMessage("abort sent...");
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -1146,6 +1169,12 @@ chatForm.addEventListener("submit", (e) => {
 });
 messageInputEl.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatForm.requestSubmit(); }
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Escape" || e.defaultPrevented || e.repeat) return;
+  if (!_runInProgress && getPendingInlineApprovalIds().length === 0) return;
+  e.preventDefault();
+  abortRun();
 });
 
 // -----------------------------------------------------------------------
