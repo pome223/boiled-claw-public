@@ -94,6 +94,7 @@ Minimum browser-operation capability set:
 - desktop.ax.find
 - desktop.wait.element
 - desktop.view.screenshot
+- desktop.ax.snapshot
 
 If the user wants to populate or edit a spreadsheet or any visible text field,
 also include:

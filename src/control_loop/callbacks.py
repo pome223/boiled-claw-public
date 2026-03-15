@@ -165,6 +165,7 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
             _ensure_capability(required_caps, "desktop.ax.find")
             _ensure_capability(required_caps, "desktop.wait.element")
             _ensure_capability(required_caps, "desktop.view.screenshot")
+            _ensure_capability(required_caps, "desktop.ax.snapshot")
 
             if _needs_text_entry(normalized_goal):
                 _ensure_capability(required_caps, "desktop.control.type")
