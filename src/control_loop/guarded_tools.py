@@ -172,6 +172,50 @@ async def guarded_browser_extract_text(
     return await browser_extract_text(selector)
 
 
+async def guarded_browser_click(
+    selector: str,
+    timeout: int = 30000,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    """browser.navigate と同じ承認のもとでクリックを許可する。"""
+    if tool_context is not None:
+        _check_approval(tool_context, "browser.navigate")
+        _check_capability_in_plan(tool_context, "browser.navigate")
+
+    from src.tools.browser import browser_click
+    return await browser_click(selector, timeout=timeout)
+
+
+async def guarded_browser_fill(
+    selector: str,
+    text: str,
+    timeout: int = 30000,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    """browser.navigate と同じ承認のもとで入力を許可する。"""
+    if tool_context is not None:
+        _check_approval(tool_context, "browser.navigate")
+        _check_capability_in_plan(tool_context, "browser.navigate")
+
+    from src.tools.browser import browser_fill
+    return await browser_fill(selector, text, timeout=timeout)
+
+
+async def guarded_browser_press(
+    key: str,
+    selector: str | None = None,
+    timeout: int = 30000,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    """browser.navigate と同じ承認のもとでキー送信を許可する。"""
+    if tool_context is not None:
+        _check_approval(tool_context, "browser.navigate")
+        _check_capability_in_plan(tool_context, "browser.navigate")
+
+    from src.tools.browser import browser_press
+    return await browser_press(key, selector=selector, timeout=timeout)
+
+
 async def guarded_desktop_view_windows(
     include_minimized: bool = False,
     tool_context: ToolContext | None = None,

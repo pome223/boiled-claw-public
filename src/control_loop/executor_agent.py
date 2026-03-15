@@ -3,8 +3,11 @@
 from google.adk.agents import LlmAgent
 
 from src.control_loop.guarded_tools import (
+    guarded_browser_click,
     guarded_web_search,
+    guarded_browser_fill,
     guarded_read_file,
+    guarded_browser_press,
     guarded_write_file,
     guarded_memory_read,
     guarded_browser_navigate,
@@ -39,6 +42,9 @@ executor_agent = LlmAgent(
         guarded_memory_read,
         guarded_browser_navigate,
         guarded_browser_extract_text,
+        guarded_browser_click,
+        guarded_browser_fill,
+        guarded_browser_press,
         guarded_desktop_view_windows,
         guarded_desktop_wait_window,
         guarded_desktop_view_frontmost_app,

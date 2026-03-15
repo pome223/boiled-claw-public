@@ -23,10 +23,18 @@ from src.bridges.host_bridge_schema import (
     BridgePingResult,
     CapabilityDescriptor,
     CapabilityListResult,
+    HostControlUiChatSendMessageRequest,
+    HostControlUiChatSendMessageResult,
+    HostBrowserClickRequest,
+    HostBrowserClickResult,
     HostBrowserExtractTextRequest,
     HostBrowserExtractTextResult,
+    HostBrowserFillRequest,
+    HostBrowserFillResult,
     HostBrowserNavigateRequest,
     HostBrowserNavigateResult,
+    HostBrowserPressRequest,
+    HostBrowserPressResult,
     HostBrowserScreenshotRequest,
     HostBrowserScreenshotResult,
     HostFileListRequest,
@@ -40,6 +48,7 @@ from src.bridges.host_bridge_schema import (
 )
 from src.security.policy import get_security_policy
 from src.tools import browser as browser_tools
+from src.tools import control_ui_chat as control_ui_chat_tools
 
 
 # Best-effort guard only. The actual security boundary is policy.is_command_allowed()
@@ -173,10 +182,38 @@ def _capabilities() -> CapabilityListResult:
                 implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
             ),
             CapabilityDescriptor(
+                name="host.browser.click",
+                risk="medium",
+                requires_approval=True,
+                description="Click an element in the current host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
+                name="host.browser.fill",
+                risk="medium",
+                requires_approval=True,
+                description="Fill a form field in the current host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
+                name="host.browser.press",
+                risk="medium",
+                requires_approval=True,
+                description="Send a key press to the current host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
                 name="host.browser.screenshot",
                 risk="medium",
                 requires_approval=True,
                 description="Capture a screenshot from the host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
+                name="host.control_ui_chat.send_message",
+                risk="medium",
+                requires_approval=True,
+                description="Use the boiled-claw Control UI chat with deterministic selectors.",
                 implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
             ),
         ]
@@ -282,7 +319,11 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
 
     @mcp.tool(name="ping", description="Host Bridge health probe.")
     def ping() -> dict:
-        return BridgePingResult(transport=transport_hint).model_dump()
+        return BridgePingResult(
+            service="host-bridge",
+            version="v1",
+            transport=transport_hint,
+        ).model_dump()
 
     @mcp.tool(name="capabilities.list", description="List implemented host capabilities.")
     def list_capabilities() -> dict:
@@ -430,6 +471,105 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
         ).model_dump()
 
     @mcp.tool(
+        name="host.browser.click",
+        description="Click an element in the current host browser page.",
+    )
+    async def host_browser_click(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: str,
+        timeout: int = 30000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserClickRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+            timeout=timeout,
+        )
+        payload = await browser_tools._browser_click_local(
+            request.selector,
+            timeout=request.timeout,
+            tool_context=None,
+        )
+        return HostBrowserClickResult.model_validate(
+            _normalize_browser_payload(payload, default_selector=request.selector)
+        ).model_dump()
+
+    @mcp.tool(
+        name="host.browser.fill",
+        description="Fill a form field in the current host browser page.",
+    )
+    async def host_browser_fill(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: str,
+        text: str,
+        timeout: int = 30000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserFillRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+            text=text,
+            timeout=timeout,
+        )
+        payload = await browser_tools._browser_fill_local(
+            request.selector,
+            request.text,
+            timeout=request.timeout,
+            tool_context=None,
+        )
+        return HostBrowserFillResult.model_validate(
+            _normalize_browser_payload(payload, default_selector=request.selector)
+        ).model_dump()
+
+    @mcp.tool(
+        name="host.browser.press",
+        description="Send a key press to the current host browser page.",
+    )
+    async def host_browser_press(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        key: str,
+        selector: Optional[str] = None,
+        timeout: int = 30000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserPressRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            key=key,
+            selector=selector,
+            timeout=timeout,
+        )
+        payload = await browser_tools._browser_press_local(
+            request.key,
+            selector=request.selector,
+            timeout=request.timeout,
+            tool_context=None,
+        )
+        return HostBrowserPressResult.model_validate(
+            _normalize_browser_payload(payload, default_selector=request.selector)
+        ).model_dump()
+
+    @mcp.tool(
         name="host.browser.screenshot",
         description="Capture a screenshot from the current host browser page.",
     )
@@ -458,6 +598,55 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
         )
         return HostBrowserScreenshotResult.model_validate(
             _normalize_browser_payload(payload)
+        ).model_dump()
+
+    @mcp.tool(
+        name="host.control_ui_chat.send_message",
+        description="Send a message through the boiled-claw Control UI chat and wait for the assistant reply.",
+    )
+    async def host_control_ui_chat_send_message(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        url: str,
+        message: str,
+        timeout_ms: int = 90000,
+        connect_timeout_ms: int = 15000,
+        stable_wait_ms: int = 800,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostControlUiChatSendMessageRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            url=url,
+            message=message,
+            timeout_ms=timeout_ms,
+            connect_timeout_ms=connect_timeout_ms,
+            stable_wait_ms=stable_wait_ms,
+        )
+        payload = await control_ui_chat_tools._control_ui_chat_send_message_local(
+            request.url,
+            request.message,
+            timeout_ms=request.timeout_ms,
+            connect_timeout_ms=request.connect_timeout_ms,
+            stable_wait_ms=request.stable_wait_ms,
+            tool_context=None,
+        )
+        return HostControlUiChatSendMessageResult.model_validate(
+            {
+                "ok": payload.get("success", False),
+                "url": payload.get("url"),
+                "title": payload.get("title", ""),
+                "message": payload.get("message", ""),
+                "assistant_reply": payload.get("assistant_reply", ""),
+                "connected": payload.get("connected", False),
+                "agent_bubble_count": payload.get("agent_bubble_count", 0),
+                "error": payload.get("error"),
+            }
         ).model_dump()
 
     return mcp

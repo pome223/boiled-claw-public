@@ -74,6 +74,10 @@ class Settings(BaseSettings):
     # Browser settings
     browser_headless: bool = Field(default=True, description="Headless browser mode")
     browser_timeout: int = Field(default=30000, description="Browser timeout (ms)")
+    browser_allow_loopback: bool = Field(
+        default=False,
+        description="Allow browser automation to access localhost / loopback URLs",
+    )
 
     # Host Bridge settings
     host_bridge_enabled: bool = Field(default=False, description="Enable Host Bridge execution")

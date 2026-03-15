@@ -8,7 +8,15 @@ from google.adk.agents import Agent
 from src.tools.web_search import web_search
 from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
-from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
+from src.tools.browser import (
+    browser_click,
+    browser_extract_text,
+    browser_fill,
+    browser_navigate,
+    browser_press,
+    browser_screenshot,
+)
+from src.tools.control_ui_chat import control_ui_chat_send_message
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
@@ -116,8 +124,12 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 
 ## ブラウザ自動化
 - browser_navigate でWebページに移動
+- browser_click で要素をクリック
+- browser_fill でフォーム入力
+- browser_press で Enter などのキー送信
 - browser_extract_text でテキスト抽出
 - browser_screenshot でスクリーンショット取得
+- boiled-claw Control UI の `/chat` を相手に会話する場合は `control_ui_chat_send_message` を優先する
 - robots.txtとサイトポリシーを尊重する
 
 ## デスクトップ操作
@@ -159,8 +171,12 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         web_search,
         stock_price,
         browser_navigate,
+        browser_click,
+        browser_fill,
+        browser_press,
         browser_screenshot,
         browser_extract_text,
+        control_ui_chat_send_message,
         desktop_view_windows,
         desktop_wait_window,
         desktop_view_frontmost_app,

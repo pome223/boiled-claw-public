@@ -19,8 +19,6 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from google.adk.agents.callback_context import CallbackContext
-from google.genai.types import Content
-
 from src.control_loop.constants import DEFAULT_MAX_REPAIR_ATTEMPTS
 from src.runtime.state_keys import StateKeys
 from src.tools.context import resolve_callback_context
@@ -51,8 +49,7 @@ _ALWAYS_DENIED_CAPS: set[str] = {"admin"}
 
 def policy_judge_callback(
     callback_context: CallbackContext,
-    response: Content,
-) -> Optional[Content]:
+) -> None:
     """
     planner_agent の after_agent_callback。
     temp:planner_draft を読み、capability と risk_level を評価して:
@@ -65,7 +62,7 @@ def policy_judge_callback(
     if not raw_draft:
         callback_context.state[StateKeys.APPROVAL_STATUS] = "denied"
         logger.warning("policy_judge_callback: temp:planner_draft is empty")
-        return None
+        return
 
     try:
         plan = (
@@ -76,7 +73,7 @@ def policy_judge_callback(
     except (json.JSONDecodeError, TypeError) as e:
         callback_context.state[StateKeys.APPROVAL_STATUS] = "denied"
         logger.error("policy_judge_callback: JSON parse error: %s", e)
-        return None
+        return
 
     required_caps: list[dict] = plan.get("required_capabilities", [])
     cap_names = {c.get("name", "") for c in required_caps}
@@ -89,7 +86,7 @@ def policy_judge_callback(
         callback_context.state[StateKeys.APPROVAL_REQUEST] = None
         callback_context.state[StateKeys.PLAN_RISK_LEVEL] = risk_level
         logger.warning("policy_judge_callback: denied caps=%s", denied)
-        return None
+        return
 
     # Human approval が必要な capability
     needs_human = bool(cap_names & _HUMAN_REQUIRED_CAPS) or risk_level == "critical"
@@ -114,7 +111,7 @@ def policy_judge_callback(
             cap_names & _HUMAN_REQUIRED_CAPS,
             risk_level,
         )
-        return None
+        return
 
     # 自動承認
     callback_context.state[StateKeys.PLAN_APPROVED] = plan
@@ -124,7 +121,7 @@ def policy_judge_callback(
     logger.info(
         "policy_judge_callback: policy_approved (risk=%s)", risk_level
     )
-    return None
+    return
 
 
 # ── Repair callback ────────────────────────────────────────────────────────
@@ -135,8 +132,7 @@ _REPAIR_THRESHOLD_SCORE = 0.85
 
 def repair_callback(
     callback_context: CallbackContext,
-    response: Content,
-) -> Optional[Content]:
+) -> None:
     """
     verifier_agent の after_agent_callback。
     verify:last_report を読み、repair が必要かどうかを判断して:
@@ -149,7 +145,7 @@ def repair_callback(
     """
     raw_report = callback_context.state.get(StateKeys.VERIFY_LAST_REPORT)
     if not raw_report:
-        return None
+        return
 
     try:
         report = (
@@ -158,14 +154,14 @@ def repair_callback(
             else json.loads(raw_report)
         )
     except (json.JSONDecodeError, TypeError):
-        return None
+        return
 
     status = report.get("status", "error")
     if status == "pass":
         # 検証通過: repair 不要、repair:count をリセット
         callback_context.state[StateKeys.REPAIR_COUNT] = 0
         callback_context.state[StateKeys.TEMP_REPAIR_PATCH] = None
-        return None
+        return
 
     # fail / partial_pass → repair 判断
     repair_count = callback_context.state.get(StateKeys.REPAIR_COUNT, 0)
@@ -174,7 +170,7 @@ def repair_callback(
         logger.warning(
             "repair_callback: max repair attempts (%d) reached", _MAX_REPAIR_ATTEMPTS
         )
-        return None
+        return
 
     repair_actions = report.get("repair_actions", [])
     failed_criteria = [
@@ -199,7 +195,7 @@ def repair_callback(
         repair_count + 1,
         status,
     )
-    return None
+    return
 
 
 # ── Curator callback ───────────────────────────────────────────────────────
@@ -207,8 +203,7 @@ def repair_callback(
 
 def curator_callback(
     callback_context: CallbackContext,
-    response: Content,
-) -> Optional[Content]:
+) -> None:
     """
     verifier_agent pass 後の memory candidate 抽出 callback。
     verify:last_report が pass のとき、session の情報から memory candidate を
@@ -219,7 +214,7 @@ def curator_callback(
     """
     raw_report = callback_context.state.get(StateKeys.VERIFY_LAST_REPORT)
     if not raw_report:
-        return None
+        return
 
     try:
         report = (
@@ -228,20 +223,20 @@ def curator_callback(
             else json.loads(raw_report)
         )
     except (json.JSONDecodeError, TypeError):
-        return None
+        return
 
     if report.get("status") != "pass":
-        return None
+        return
 
     # approved plan から memory candidates を生成
     raw_plan = callback_context.state.get(StateKeys.PLAN_APPROVED)
     if not raw_plan:
-        return None
+        return
 
     try:
         plan = raw_plan if isinstance(raw_plan, dict) else json.loads(raw_plan)
     except (json.JSONDecodeError, TypeError):
-        return None
+        return
 
     candidate_ids = _extract_and_register_candidates(
         plan=plan,
@@ -255,7 +250,7 @@ def curator_callback(
             "curator_callback: %d candidate(s) registered", len(candidate_ids)
         )
 
-    return None
+    return
 
 
 def _extract_and_register_candidates(

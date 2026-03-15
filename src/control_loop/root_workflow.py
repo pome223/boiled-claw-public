@@ -33,8 +33,11 @@ from src.control_loop.callbacks import (
 from src.control_loop.constants import DEFAULT_MAX_REPAIR_ATTEMPTS
 from src.control_loop.executor_agent import executor_agent
 from src.control_loop.guarded_tools import (
+    guarded_browser_click,
     guarded_browser_extract_text,
+    guarded_browser_fill,
     guarded_browser_navigate,
+    guarded_browser_press,
     guarded_desktop_ax_find,
     guarded_desktop_ax_snapshot,
     guarded_desktop_control_click,
@@ -69,13 +72,13 @@ _CONTROL_LOOP_AUTHOR = "control_loop"
 # ── Callback helpers ───────────────────────────────────────────────────────
 
 def _chain_after_callbacks(
-    *cbs: Callable[[CallbackContext, Content], Optional[Content]],
-) -> Callable[[CallbackContext, Content], Optional[Content]]:
+    *cbs: Callable[[CallbackContext], None],
+) -> Callable[[CallbackContext], None]:
     """複数の after_agent_callback を順番に呼ぶ合成関数を返す。"""
-    def chained(ctx: CallbackContext, response: Content) -> Optional[Content]:
+    def chained(ctx: CallbackContext) -> None:
         for cb in cbs:
-            cb(ctx, response)
-        return None
+            cb(ctx)
+        return
     return chained
 
 
@@ -116,6 +119,9 @@ executor_with_tools = LlmAgent(
         guarded_memory_read,
         guarded_browser_navigate,
         guarded_browser_extract_text,
+        guarded_browser_click,
+        guarded_browser_fill,
+        guarded_browser_press,
         guarded_desktop_view_windows,
         guarded_desktop_wait_window,
         guarded_desktop_view_frontmost_app,

@@ -10,11 +10,19 @@ from mcp.client.sse import sse_client
 
 from src.bridges.host_bridge_schema import (
     BridgePingResult,
+    HostControlUiChatSendMessageRequest,
+    HostControlUiChatSendMessageResult,
+    HostBrowserClickRequest,
+    HostBrowserClickResult,
     CapabilityListResult,
     HostBrowserExtractTextRequest,
     HostBrowserExtractTextResult,
+    HostBrowserFillRequest,
+    HostBrowserFillResult,
     HostBrowserNavigateRequest,
     HostBrowserNavigateResult,
+    HostBrowserPressRequest,
+    HostBrowserPressResult,
     HostBrowserScreenshotRequest,
     HostBrowserScreenshotResult,
     HostFileListRequest,
@@ -108,6 +116,18 @@ class HostBridgeClient:
         payload = await self._call_tool("host.browser.navigate", request.model_dump())
         return HostBrowserNavigateResult.model_validate(payload)
 
+    async def click_browser(self, request: HostBrowserClickRequest) -> HostBrowserClickResult:
+        payload = await self._call_tool("host.browser.click", request.model_dump())
+        return HostBrowserClickResult.model_validate(payload)
+
+    async def fill_browser(self, request: HostBrowserFillRequest) -> HostBrowserFillResult:
+        payload = await self._call_tool("host.browser.fill", request.model_dump())
+        return HostBrowserFillResult.model_validate(payload)
+
+    async def press_browser(self, request: HostBrowserPressRequest) -> HostBrowserPressResult:
+        payload = await self._call_tool("host.browser.press", request.model_dump())
+        return HostBrowserPressResult.model_validate(payload)
+
     async def screenshot_browser(
         self,
         request: HostBrowserScreenshotRequest,
@@ -121,6 +141,13 @@ class HostBridgeClient:
     ) -> HostBrowserExtractTextResult:
         payload = await self._call_tool("host.browser.extract_text", request.model_dump())
         return HostBrowserExtractTextResult.model_validate(payload)
+
+    async def send_control_ui_chat_message(
+        self,
+        request: HostControlUiChatSendMessageRequest,
+    ) -> HostControlUiChatSendMessageResult:
+        payload = await self._call_tool("host.control_ui_chat.send_message", request.model_dump())
+        return HostControlUiChatSendMessageResult.model_validate(payload)
 
 
 def get_host_bridge_client() -> Optional[HostBridgeClient]:

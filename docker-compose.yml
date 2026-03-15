@@ -14,6 +14,17 @@ services:
       - GATEWAY_HOST=0.0.0.0
       - GATEWAY_PORT=18789
       - FILE_WORKSPACE_PATHS=/app/data,/app/skills
+      - HOST_BRIDGE_ENABLED=${HOST_BRIDGE_ENABLED:-false}
+      - HOST_BRIDGE_URL=${HOST_BRIDGE_URL:-}
+      - HOST_BRIDGE_TIMEOUT_SECONDS=${HOST_BRIDGE_TIMEOUT_SECONDS:-5}
+      - HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+      - BROWSER_ALLOW_LOOPBACK=${BROWSER_ALLOW_LOOPBACK:-false}
+      - DESKTOP_BRIDGE_ENABLED=${DESKTOP_BRIDGE_ENABLED:-false}
+      - DESKTOP_BRIDGE_URL=${DESKTOP_BRIDGE_URL:-}
+      - DESKTOP_BRIDGE_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_TIMEOUT_SECONDS:-5}
+      - DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills
@@ -48,9 +59,20 @@ services:
       - .env
     environment:
       - FILE_WORKSPACE_PATHS=/app/data,/app/skills
+      - HOST_BRIDGE_ENABLED=${HOST_BRIDGE_ENABLED:-false}
+      - HOST_BRIDGE_URL=${HOST_BRIDGE_URL:-}
+      - HOST_BRIDGE_TIMEOUT_SECONDS=${HOST_BRIDGE_TIMEOUT_SECONDS:-5}
+      - HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+      - BROWSER_ALLOW_LOOPBACK=${BROWSER_ALLOW_LOOPBACK:-false}
+      - DESKTOP_BRIDGE_ENABLED=${DESKTOP_BRIDGE_ENABLED:-false}
+      - DESKTOP_BRIDGE_URL=${DESKTOP_BRIDGE_URL:-}
+      - DESKTOP_BRIDGE_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_TIMEOUT_SECONDS:-5}
+      - DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
     volumes:
       - ./data:/app/data
       - ./skills:/app/skills
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     network_mode: "service:boiled-claw-gateway"
     depends_on:
       boiled-claw-gateway:
@@ -72,9 +94,20 @@ services:
     environment:
       - FILE_WORKSPACE_PATHS=/workspace/data,/workspace/skills
       - GATEWAY_URL=http://boiled-claw-gateway:18789
+      - HOST_BRIDGE_ENABLED=${HOST_BRIDGE_ENABLED:-false}
+      - HOST_BRIDGE_URL=${HOST_BRIDGE_URL:-}
+      - HOST_BRIDGE_TIMEOUT_SECONDS=${HOST_BRIDGE_TIMEOUT_SECONDS:-5}
+      - HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+      - BROWSER_ALLOW_LOOPBACK=${BROWSER_ALLOW_LOOPBACK:-false}
+      - DESKTOP_BRIDGE_ENABLED=${DESKTOP_BRIDGE_ENABLED:-false}
+      - DESKTOP_BRIDGE_URL=${DESKTOP_BRIDGE_URL:-}
+      - DESKTOP_BRIDGE_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_TIMEOUT_SECONDS:-5}
+      - DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
     volumes:
       - .:/workspace
     working_dir: /workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       boiled-claw-gateway:
         condition: service_healthy

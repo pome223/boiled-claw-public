@@ -67,12 +67,20 @@ _FRESHNESS_KEYWORDS = {
 }
 
 _BROWSER_TOOL_NAMES = {
+    "control_ui_chat_send_message",
     "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "browser_press",
     "browser_extract_text",
     "browser_screenshot",
     "host.browser.navigate",
+    "host.browser.click",
+    "host.browser.fill",
+    "host.browser.press",
     "host.browser.extract_text",
     "host.browser.screenshot",
+    "host.control_ui_chat.send_message",
 }
 _BROWSER_INFRA_ERROR_FRAGMENTS = (
     "playwright is not installed",
@@ -419,7 +427,7 @@ class GatewayServer:
             (item.error for item in result.tool_failures if item.error),
             "required runtime is unavailable",
         )
-        if specialist_name == "browser_automator" and result.infrastructure_blocked:
+        if specialist_name in {"browser_automator", "control_ui_chat_operator"} and result.infrastructure_blocked:
             return (
                 "ブラウザ操作は実行できませんでした。\n"
                 f"- 原因: {first_error}\n"

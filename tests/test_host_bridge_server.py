@@ -36,8 +36,12 @@ class TestHostBridgeTools:
             "host.file.write",
             "host.file.list",
             "host.browser.navigate",
+            "host.browser.click",
+            "host.browser.fill",
+            "host.browser.press",
             "host.browser.extract_text",
             "host.browser.screenshot",
+            "host.control_ui_chat.send_message",
         }
 
     @pytest.mark.asyncio
@@ -56,8 +60,12 @@ class TestHostBridgeTools:
         assert "host.file.write" in text
         assert "host.file.list" in text
         assert "host.browser.navigate" in text
+        assert "host.browser.click" in text
+        assert "host.browser.fill" in text
+        assert "host.browser.press" in text
         assert "host.browser.extract_text" in text
         assert "host.browser.screenshot" in text
+        assert "host.control_ui_chat.send_message" in text
 
     @pytest.mark.asyncio
     async def test_host_shell_run_success(self, mcp):
@@ -194,6 +202,79 @@ class TestHostBridgeTools:
         assert "main" in text
 
     @pytest.mark.asyncio
+    async def test_host_browser_click_success(self, mcp, monkeypatch):
+        async def fake_click(selector, timeout=30000, tool_context=None):
+            return {
+                "selector": selector,
+                "success": True,
+            }
+
+        monkeypatch.setattr(server_module.browser_tools, "_browser_click_local", fake_click)
+        result = await mcp.call_tool(
+            "host.browser.click",
+            {
+                "request_id": "req-browser-click",
+                "session_id": "sess-browser-click",
+                "user_id": "user-browser-click",
+                "agent_name": "pytest",
+                "selector": "textarea",
+            },
+        )
+        text = self._text(result)
+        assert "textarea" in text
+        assert '"ok": true' in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_browser_fill_success(self, mcp, monkeypatch):
+        async def fake_fill(selector, text, timeout=30000, tool_context=None):
+            return {
+                "selector": selector,
+                "text_length": len(text),
+                "success": True,
+            }
+
+        monkeypatch.setattr(server_module.browser_tools, "_browser_fill_local", fake_fill)
+        result = await mcp.call_tool(
+            "host.browser.fill",
+            {
+                "request_id": "req-browser-fill",
+                "session_id": "sess-browser-fill",
+                "user_id": "user-browser-fill",
+                "agent_name": "pytest",
+                "selector": "textarea",
+                "text": "Hello World",
+            },
+        )
+        text = self._text(result)
+        assert "textarea" in text
+        assert '"text_length": 11' in text
+
+    @pytest.mark.asyncio
+    async def test_host_browser_press_success(self, mcp, monkeypatch):
+        async def fake_press(key, selector=None, timeout=30000, tool_context=None):
+            return {
+                "key": key,
+                "selector": selector,
+                "success": True,
+            }
+
+        monkeypatch.setattr(server_module.browser_tools, "_browser_press_local", fake_press)
+        result = await mcp.call_tool(
+            "host.browser.press",
+            {
+                "request_id": "req-browser-press",
+                "session_id": "sess-browser-press",
+                "user_id": "user-browser-press",
+                "agent_name": "pytest",
+                "key": "Enter",
+                "selector": "textarea",
+            },
+        )
+        text = self._text(result)
+        assert "Enter" in text
+        assert '"ok": true' in text.lower()
+
+    @pytest.mark.asyncio
     async def test_host_browser_screenshot_success(self, mcp, monkeypatch, tmp_path):
         async def fake_screenshot(path=None, full_page=False, tool_context=None):
             return {
@@ -216,6 +297,39 @@ class TestHostBridgeTools:
         )
         text = self._text(result)
         assert "capture.png" in text
+        assert '"ok": true' in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_control_ui_chat_send_message_success(self, mcp, monkeypatch):
+        async def fake_control_ui_chat(url, message, timeout_ms=90000, connect_timeout_ms=15000, stable_wait_ms=800, tool_context=None):
+            return {
+                "url": url,
+                "title": "boiled-claw Control UI",
+                "message": message,
+                "assistant_reply": "bridge operator reply",
+                "connected": True,
+                "agent_bubble_count": 1,
+                "success": True,
+            }
+
+        monkeypatch.setattr(
+            server_module.control_ui_chat_tools,
+            "_control_ui_chat_send_message_local",
+            fake_control_ui_chat,
+        )
+        result = await mcp.call_tool(
+            "host.control_ui_chat.send_message",
+            {
+                "request_id": "req-control-ui-chat",
+                "session_id": "sess-control-ui-chat",
+                "user_id": "user-control-ui-chat",
+                "agent_name": "pytest",
+                "url": "http://localhost:18789/chat",
+                "message": "Hello World",
+            },
+        )
+        text = self._text(result)
+        assert "bridge operator reply" in text
         assert '"ok": true' in text.lower()
 
 
@@ -281,8 +395,12 @@ async def test_stdio_tools_list():
         "host.file.write",
         "host.file.list",
         "host.browser.navigate",
+        "host.browser.click",
+        "host.browser.fill",
+        "host.browser.press",
         "host.browser.extract_text",
         "host.browser.screenshot",
+        "host.control_ui_chat.send_message",
     }
 
 

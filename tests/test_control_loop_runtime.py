@@ -17,7 +17,7 @@ from src.control_loop.instructions import (
     build_planner_instruction,
     build_verifier_instruction,
 )
-from src.control_loop.root_workflow import ControlLoop
+from src.control_loop.root_workflow import ControlLoop, planner_with_policy
 import src.memory_lifecycle.candidate_store as candidate_store_module
 from src.memory_lifecycle.adk_memory_service import PromotedMemoryService
 from src.memory_lifecycle.candidate_store import CandidateStore
@@ -163,6 +163,66 @@ async def test_guarded_memory_read_prefers_adk_memory():
     assert result["source"] == "adk_memory"
     assert result["count"] == 1
     assert result["results"][0]["content"] == "remembered fact"
+
+
+@pytest.mark.asyncio
+async def test_guarded_browser_fill_uses_browser_navigate_capability(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "browser.navigate"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_fill(selector, text, timeout=30000, tool_context=None):
+        seen["selector"] = selector
+        seen["text"] = text
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.browser.browser_fill", _fake_fill)
+
+    result = await guarded_tools_module.guarded_browser_fill(
+        "textarea",
+        "Hello World",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["selector"] == "textarea"
+    assert seen["text"] == "Hello World"
+
+
+@pytest.mark.asyncio
+async def test_guarded_browser_press_passes_selector(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "browser.navigate"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_press(key, selector=None, timeout=30000, tool_context=None):
+        seen["key"] = key
+        seen["selector"] = selector
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.browser.browser_press", _fake_press)
+
+    result = await guarded_tools_module.guarded_browser_press(
+        "Enter",
+        selector="textarea",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["key"] == "Enter"
+    assert seen["selector"] == "textarea"
 
 
 @pytest.mark.asyncio
@@ -346,10 +406,28 @@ def test_policy_judge_requires_human_for_desktop_control():
         }
     )
 
-    policy_judge_callback(callback_context, types.Content(role="model", parts=[]))
+    policy_judge_callback(callback_context)
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
     assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-desktop-1"
+
+
+def test_planner_after_agent_callback_accepts_callback_context_only():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "plan-simple-1",
+                "goal": "inspect the page",
+                "risk_level": "low",
+                "required_capabilities": [{"name": "browser.navigate"}],
+            }
+        }
+    )
+
+    planner_with_policy.after_agent_callback(callback_context=callback_context)
+
+    assert callback_context.state[StateKeys.APPROVAL_STATUS] == "policy_approved"
+    assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-simple-1"
 
 
 @pytest.mark.asyncio

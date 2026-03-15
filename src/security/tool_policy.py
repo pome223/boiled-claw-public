@@ -65,6 +65,7 @@ _DEFAULT_RULES: List[ToolRule] = [
     ToolRule("write_file", "approve", "file writes need approval"),
     ToolRule("read_file", "allow", "file reads are safe"),
     ToolRule("browser_*", "approve", "browser automation needs approval"),
+    ToolRule("control_ui_chat_*", "approve", "control UI browser automation needs approval"),
     ToolRule("desktop_view_windows", "allow", "desktop window listing is low risk"),
     ToolRule("desktop_view_frontmost_app", "allow", "frontmost app query is low risk"),
     ToolRule("desktop_wait_window", "allow", "waiting for a window is low risk"),

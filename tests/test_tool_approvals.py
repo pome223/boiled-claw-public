@@ -20,6 +20,32 @@ from src.tools import file_manager as file_module
 from src.tools import shell as shell_module
 
 
+def test_browser_validate_url_blocks_loopback_by_default(monkeypatch):
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(browser_allow_loopback=False),
+    )
+
+    valid, reason = browser_module._validate_url("http://localhost:18789/chat")
+
+    assert valid is False
+    assert "blocked" in reason.lower()
+
+
+def test_browser_validate_url_allows_loopback_when_enabled(monkeypatch):
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(browser_allow_loopback=True),
+    )
+
+    valid, reason = browser_module._validate_url("http://localhost:18789/chat")
+
+    assert valid is True
+    assert reason is None
+
+
 @pytest.mark.asyncio
 async def test_tool_policy_request_approval_round_trip():
     engine = ToolPolicyEngine()
@@ -54,6 +80,11 @@ async def test_run_shell_waits_for_approval(monkeypatch):
 
     engine.set_notifier(notifier)
     monkeypatch.setattr(shell_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        shell_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=False),
+    )
 
     tool_context = SimpleNamespace(
         agent_name="boiled_claw",
@@ -413,6 +444,169 @@ async def test_browser_screenshot_uses_host_bridge_when_enabled(monkeypatch):
     assert seen["screenshot_approval_token"]
     assert emitted[0][1]["tool_name"] == "host.browser.screenshot"
     assert emitted[1][1]["tool_name"] == "host.browser.screenshot"
+
+
+@pytest.mark.asyncio
+async def test_browser_click_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def click_browser(self, request):
+            seen["click_approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostBrowserClickResult
+
+            return HostBrowserClickResult(
+                ok=True,
+                selector=request.selector,
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(browser_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await browser_module.browser_click(
+        "textarea",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["selector"] == "textarea"
+    assert seen["click_approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.browser.click"
+    assert emitted[1][1]["tool_name"] == "host.browser.click"
+
+
+@pytest.mark.asyncio
+async def test_browser_fill_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def fill_browser(self, request):
+            seen["fill_approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostBrowserFillResult
+
+            return HostBrowserFillResult(
+                ok=True,
+                selector=request.selector,
+                text_length=len(request.text),
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(browser_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await browser_module.browser_fill(
+        "textarea",
+        "Hello World",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["text_length"] == 11
+    assert seen["fill_approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.browser.fill"
+    assert emitted[1][1]["tool_name"] == "host.browser.fill"
+
+
+@pytest.mark.asyncio
+async def test_browser_press_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def press_browser(self, request):
+            seen["press_approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostBrowserPressResult
+
+            return HostBrowserPressResult(
+                ok=True,
+                key=request.key,
+                selector=request.selector,
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(browser_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        browser_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(browser_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await browser_module.browser_press(
+        "Enter",
+        selector="textarea",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["key"] == "Enter"
+    assert seen["press_approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.browser.press"
+    assert emitted[1][1]["tool_name"] == "host.browser.press"
 
 
 @pytest.mark.asyncio

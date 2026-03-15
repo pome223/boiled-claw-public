@@ -71,6 +71,45 @@ async def _ws_collect(url: str, send: dict, *, collect_event: str, timeout: floa
         raise TimeoutError(f"Did not receive '{collect_event}' within {timeout}s")
 
 
+async def _ws_run_with_auto_approvals(
+    url: str,
+    send: dict,
+    *,
+    timeout: float = 60.0,
+) -> tuple[dict, list[dict]]:
+    """WS 接続して send を送り、approval を自動で返しつつ chat.done まで収集する。"""
+    events: list[dict] = []
+    async with websockets.connect(url) as ws:
+        raw = await asyncio.wait_for(ws.recv(), timeout=10)
+        connected = json.loads(raw)
+        assert connected.get("event") == "connected"
+        events.append(connected)
+
+        await ws.send(json.dumps(send))
+
+        deadline = asyncio.get_event_loop().time() + timeout
+        while asyncio.get_event_loop().time() < deadline:
+            remaining = deadline - asyncio.get_event_loop().time()
+            raw = await asyncio.wait_for(ws.recv(), timeout=remaining)
+            payload = json.loads(raw)
+            events.append(payload)
+            event = payload.get("event")
+            if event in {"tools.approval_request", "control.approval_request"}:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "event": "tools.approval",
+                            "request_id": payload["request_id"],
+                            "approved": True,
+                        }
+                    )
+                )
+                continue
+            if event == "chat.done":
+                return payload, events
+    raise TimeoutError(f"Did not receive 'chat.done' within {timeout}s")
+
+
 # ---------------------------------------------------------------------------
 # HTTP API tests
 # ---------------------------------------------------------------------------
@@ -478,6 +517,50 @@ class TestWebSocketProtocol:
             assert history_payload is not None
             assert "entries" in history_payload
             assert len(history_payload["entries"]) >= 2  # user + assistant
+
+    @pytest.mark.asyncio
+    async def test_ws_control_ui_chat_operator_uses_dedicated_tool(self):
+        """Control UI chat flow should use the dedicated operator instead of generic browser exploration."""
+        url = f"{WS_URL}/ws/e2e_ws_control_ui_chat"
+        done_payload, events = await _ws_run_with_auto_approvals(
+            url,
+            send={
+                "event": "chat.send",
+                "text": "http://localhost:18789/chat にアクセスして Hello World と送って返答を教えて",
+            },
+            timeout=90.0,
+        )
+
+        tool_starts = [event for event in events if event.get("event") == "tool.start"]
+        tool_results = [event for event in events if event.get("event") == "tool.result"]
+        tool_names = {event.get("tool_name") for event in tool_starts}
+
+        assert "control_ui_chat_send_message" in tool_names
+        assert "browser_extract_text" not in tool_names
+        assert "browser_screenshot" not in tool_names
+        assert "browser_fill" not in tool_names
+        assert "browser_click" not in tool_names
+
+        control_ui_result = next(
+            (
+                event
+                for event in tool_results
+                if event.get("tool_name") in {"control_ui_chat_send_message", "host.control_ui_chat.send_message"}
+            ),
+            None,
+        )
+        assert control_ui_result is not None
+
+        if control_ui_result["result"].get("ok") is False or control_ui_result["result"].get("success") is False:
+            error_text = json.dumps(control_ui_result["result"], ensure_ascii=False)
+            assert "Playwright is not installed" in error_text or "Host Bridge" in error_text
+            assert "ブラウザ操作は実行できませんでした" in done_payload["text"]
+        else:
+            result_payload = control_ui_result["result"]
+            assistant_reply = result_payload.get("assistant_reply") or ""
+            assert assistant_reply.strip()
+            assert done_payload["aborted"] is False
+            assert len(done_payload["text"]) > 0
 
     @pytest.mark.asyncio
     async def test_ws_chat_inject(self):

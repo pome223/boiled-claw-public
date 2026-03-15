@@ -15,8 +15,11 @@ from google.adk.agents.context import Context as ToolContext
 from src.bridges.host_bridge_client import get_host_bridge_client
 from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import (
+    HostBrowserClickRequest,
     HostBrowserExtractTextRequest,
+    HostBrowserFillRequest,
     HostBrowserNavigateRequest,
+    HostBrowserPressRequest,
     HostBrowserScreenshotRequest,
 )
 from src.config.settings import get_settings
@@ -111,13 +114,18 @@ def _validate_url(url: str) -> Tuple[bool, Optional[str]]:
     if not hostname:
         return False, "Missing hostname"
 
-    if hostname.lower() in _BLOCKED_HOSTS:
+    settings = get_settings()
+    allow_loopback = getattr(settings, "browser_allow_loopback", False)
+
+    if hostname.lower() in _BLOCKED_HOSTS and not allow_loopback:
         return False, f"Access to '{hostname}' is blocked"
 
     try:
         ip = ipaddress.ip_address(hostname)
         for network in _PRIVATE_NETWORKS:
             if ip in network:
+                if allow_loopback and ip.is_loopback:
+                    return True, None
                 return False, f"Access to private/loopback address {ip} is blocked"
     except ValueError:
         pass  # ホスト名（IP でない）は IP チェックをスキップ
@@ -357,6 +365,152 @@ async def _browser_extract_text_local(
             resource=selector or "body",
             result=f"error:{e}",
             metadata={},
+            tool_context=tool_context,
+        )
+        return payload
+
+
+async def _browser_click_local(
+    selector: str,
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    if not PLAYWRIGHT_AVAILABLE:
+        payload = _playwright_missing_payload()
+        _audit_browser_event(
+            action="click",
+            resource=selector,
+            result="error",
+            metadata={"reason": "playwright_missing"},
+            tool_context=tool_context,
+        )
+        return payload
+
+    try:
+        session = await get_browser_session()
+        page = session.page
+        await page.click(selector, timeout=timeout)
+        payload = {"selector": selector, "success": True}
+        _audit_browser_event(
+            action="click",
+            resource=selector,
+            result="success",
+            metadata={"timeout": timeout},
+            tool_context=tool_context,
+        )
+        return payload
+    except Exception as e:
+        payload = {"error": str(e), "selector": selector, "success": False}
+        _audit_browser_event(
+            action="click",
+            resource=selector,
+            result=f"error:{e}",
+            metadata={"timeout": timeout},
+            tool_context=tool_context,
+        )
+        return payload
+
+
+async def _browser_fill_local(
+    selector: str,
+    text: str,
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    if not PLAYWRIGHT_AVAILABLE:
+        payload = _playwright_missing_payload()
+        _audit_browser_event(
+            action="fill",
+            resource=selector,
+            result="error",
+            metadata={"reason": "playwright_missing"},
+            tool_context=tool_context,
+        )
+        return payload
+
+    try:
+        session = await get_browser_session()
+        page = session.page
+        await page.fill(selector, text, timeout=timeout)
+        payload = {
+            "selector": selector,
+            "text_length": len(text),
+            "success": True,
+        }
+        _audit_browser_event(
+            action="fill",
+            resource=selector,
+            result="success",
+            metadata={"timeout": timeout, "text_length": len(text)},
+            tool_context=tool_context,
+        )
+        return payload
+    except Exception as e:
+        payload = {
+            "error": str(e),
+            "selector": selector,
+            "text_length": len(text),
+            "success": False,
+        }
+        _audit_browser_event(
+            action="fill",
+            resource=selector,
+            result=f"error:{e}",
+            metadata={"timeout": timeout, "text_length": len(text)},
+            tool_context=tool_context,
+        )
+        return payload
+
+
+async def _browser_press_local(
+    key: str,
+    selector: Optional[str] = None,
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    if not PLAYWRIGHT_AVAILABLE:
+        payload = _playwright_missing_payload()
+        _audit_browser_event(
+            action="press",
+            resource=selector or key,
+            result="error",
+            metadata={"reason": "playwright_missing"},
+            tool_context=tool_context,
+        )
+        return payload
+
+    try:
+        session = await get_browser_session()
+        page = session.page
+        if selector:
+            await page.press(selector, key, timeout=timeout)
+        else:
+            await page.keyboard.press(key)
+        payload = {
+            "key": key,
+            "selector": selector,
+            "success": True,
+        }
+        _audit_browser_event(
+            action="press",
+            resource=selector or key,
+            result="success",
+            metadata={"timeout": timeout, "key": key},
+            tool_context=tool_context,
+        )
+        return payload
+    except Exception as e:
+        payload = {
+            "error": str(e),
+            "key": key,
+            "selector": selector,
+            "success": False,
+        }
+        _audit_browser_event(
+            action="press",
+            resource=selector or key,
+            result=f"error:{e}",
+            metadata={"timeout": timeout, "key": key},
             tool_context=tool_context,
         )
         return payload
@@ -628,7 +782,11 @@ async def browser_extract_text(
     return await _browser_extract_text_local(selector, tool_context)
 
 
-async def browser_click(selector: str, timeout: int = 30000) -> Dict[str, Any]:
+async def browser_click(
+    selector: str,
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
     """
     要素をクリックする
 
@@ -639,31 +797,60 @@ async def browser_click(selector: str, timeout: int = 30000) -> Dict[str, Any]:
     Returns:
         クリック結果
     """
-    if not PLAYWRIGHT_AVAILABLE:
-        return {
-            "error": "Playwright is not installed. Run: pip install playwright && playwright install"
-        }
+    approval_error, approval_token = await _check_browser_policy(
+        "browser_click",
+        {"selector": selector, "timeout": timeout},
+        tool_context,
+    )
+    if approval_error:
+        _audit_browser_event(
+            action="click",
+            resource=selector,
+            result=approval_error,
+            metadata={"timeout": timeout},
+            tool_context=tool_context,
+        )
+        return {"error": approval_error, "selector": selector, "success": False}
 
-    try:
-        session = await get_browser_session()
-        page = session.page
+    settings = get_settings()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    if settings.host_bridge_enabled:
+        request = HostBrowserClickRequest(
+            request_id=f"host-browser-click-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=approval_token,
+            selector=selector,
+            timeout=timeout,
+        )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.browser.click",
+            args={"selector": request.selector, "timeout": request.timeout},
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.click_browser(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: _bridge_browser_error_payload(error, selector=selector),
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
+            return {
+                "selector": result.selector or selector,
+                "success": result.ok,
+                **({"error": result.error} if result.error else {}),
+            }
+        return payload
 
-        await page.click(selector, timeout=timeout)
-
-        return {
-            "selector": selector,
-            "success": True,
-        }
-
-    except Exception as e:
-        return {
-            "error": str(e),
-            "selector": selector,
-            "success": False,
-        }
+    return await _browser_click_local(selector, timeout, tool_context)
 
 
-async def browser_fill(selector: str, text: str, timeout: int = 30000) -> Dict[str, Any]:
+async def browser_fill(
+    selector: str,
+    text: str,
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
     """
     フォーム入力フィールドに入力する
 
@@ -675,26 +862,131 @@ async def browser_fill(selector: str, text: str, timeout: int = 30000) -> Dict[s
     Returns:
         入力結果
     """
-    if not PLAYWRIGHT_AVAILABLE:
-        return {
-            "error": "Playwright is not installed. Run: pip install playwright && playwright install"
-        }
+    approval_error, approval_token = await _check_browser_policy(
+        "browser_fill",
+        {"selector": selector, "text": text, "timeout": timeout},
+        tool_context,
+    )
+    if approval_error:
+        _audit_browser_event(
+            action="fill",
+            resource=selector,
+            result=approval_error,
+            metadata={"timeout": timeout, "text_length": len(text)},
+            tool_context=tool_context,
+        )
+        return {"error": approval_error, "selector": selector, "success": False}
 
-    try:
-        session = await get_browser_session()
-        page = session.page
+    settings = get_settings()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    if settings.host_bridge_enabled:
+        request = HostBrowserFillRequest(
+            request_id=f"host-browser-fill-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=approval_token,
+            selector=selector,
+            text=text,
+            timeout=timeout,
+        )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.browser.fill",
+            args={
+                "selector": request.selector,
+                "text": request.text,
+                "timeout": request.timeout,
+            },
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.fill_browser(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: _bridge_browser_error_payload(error, selector=selector),
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
+            return {
+                "selector": result.selector or selector,
+                "text_length": result.text_length,
+                "success": result.ok,
+                **({"error": result.error} if result.error else {}),
+            }
+        return payload
 
-        await page.fill(selector, text, timeout=timeout)
+    return await _browser_fill_local(selector, text, timeout, tool_context)
 
-        return {
-            "selector": selector,
-            "text": text,
-            "success": True,
-        }
 
-    except Exception as e:
-        return {
-            "error": str(e),
-            "selector": selector,
-            "success": False,
-        }
+async def browser_press(
+    key: str,
+    selector: Optional[str] = None,
+    timeout: int = 30000,
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    """
+    キー入力を送る
+
+    Args:
+        key: 送信するキー名 (例: Enter, Escape)
+        selector: 指定時は対象要素に対して送る
+        timeout: タイムアウト (ミリ秒)
+
+    Returns:
+        入力結果
+    """
+    approval_error, approval_token = await _check_browser_policy(
+        "browser_press",
+        {"key": key, "selector": selector, "timeout": timeout},
+        tool_context,
+    )
+    if approval_error:
+        _audit_browser_event(
+            action="press",
+            resource=selector or key,
+            result=approval_error,
+            metadata={"timeout": timeout, "key": key},
+            tool_context=tool_context,
+        )
+        return {"error": approval_error, "key": key, "selector": selector, "success": False}
+
+    settings = get_settings()
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    if settings.host_bridge_enabled:
+        request = HostBrowserPressRequest(
+            request_id=f"host-browser-press-{uuid.uuid4().hex[:12]}",
+            session_id=ctx.get("session_id") or "standalone-session",
+            user_id=ctx.get("user_id") or "standalone-user",
+            agent_name=ctx.get("agent_name") or "unknown_agent",
+            approval_token=approval_token,
+            key=key,
+            selector=selector,
+            timeout=timeout,
+        )
+        result, payload = await execute_host_bridge_call(
+            request=request,
+            tool_name="host.browser.press",
+            args={
+                "key": request.key,
+                "selector": request.selector,
+                "timeout": request.timeout,
+            },
+            get_client=get_host_bridge_client,
+            invoke=lambda client, req: client.press_browser(req),
+            ok_getter=lambda result: result.ok,
+            error_payload=lambda error: _bridge_browser_error_payload(error, selector=selector),
+            metadata={"executor": "host_bridge"},
+        )
+        if result is not None:
+            return {
+                "key": result.key or key,
+                "selector": result.selector if result.selector is not None else selector,
+                "success": result.ok,
+                **({"error": result.error} if result.error else {}),
+            }
+        return payload
+
+    return await _browser_press_local(
+        key,
+        selector=selector,
+        timeout=timeout,
+        tool_context=tool_context,
+    )
