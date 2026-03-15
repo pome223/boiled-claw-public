@@ -499,6 +499,7 @@ def test_policy_judge_expands_current_browser_capabilities():
     assert "desktop.control.click" in required
     assert "desktop.ax.find" in required
     assert "desktop.wait.element" in required
+    assert "desktop.view.screenshot" in required
     assert "desktop.control.click" in approval_required
 
 
@@ -530,6 +531,7 @@ def test_policy_judge_expands_type_for_current_browser_spreadsheet_goal():
     assert "desktop.control.type" in required
     assert "desktop.ax.find" in required
     assert "desktop.wait.element" in required
+    assert "desktop.view.screenshot" in required
 
 
 def test_planner_after_agent_callback_accepts_callback_context_only():
@@ -564,6 +566,7 @@ async def test_planner_instruction_mentions_current_browser_desktop_capabilities
 
     assert "desktop.control.click" in planner
     assert "desktop.control.type" in planner
+    assert "desktop.view.screenshot" in planner
     assert "desktop-backed browser task" in planner
 
 

@@ -95,6 +95,7 @@ _TEXT_ENTRY_KEYWORDS: set[str] = {
 _DESKTOP_MODE_BY_CAPABILITY: dict[str, str] = {
     "desktop.view.windows": "read",
     "desktop.view.frontmost_app": "read",
+    "desktop.view.screenshot": "read",
     "desktop.wait.window": "read",
     "desktop.ax.find": "read",
     "desktop.wait.element": "read",
@@ -163,6 +164,7 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
             _ensure_capability(required_caps, "desktop.control.click")
             _ensure_capability(required_caps, "desktop.ax.find")
             _ensure_capability(required_caps, "desktop.wait.element")
+            _ensure_capability(required_caps, "desktop.view.screenshot")
 
             if _needs_text_entry(normalized_goal):
                 _ensure_capability(required_caps, "desktop.control.type")
