@@ -605,6 +605,26 @@ textarea {
   font-size: 0.78rem;
 }
 
+.approve-btn {
+  background: rgba(53, 207, 154, 0.22);
+  border-color: rgba(53, 207, 154, 0.5);
+  color: var(--ok);
+}
+
+.approve-btn:hover {
+  background: rgba(53, 207, 154, 0.36);
+}
+
+.deny-btn {
+  background: rgba(255, 111, 127, 0.18);
+  border-color: rgba(255, 111, 127, 0.45);
+  color: var(--bad);
+}
+
+.deny-btn:hover {
+  background: rgba(255, 111, 127, 0.32);
+}
+
 /* Sessions tab */
 .session-item {
   cursor: pointer;
