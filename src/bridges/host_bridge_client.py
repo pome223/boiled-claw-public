@@ -10,6 +10,8 @@ from mcp.client.sse import sse_client
 
 from src.bridges.host_bridge_schema import (
     BridgePingResult,
+    HostControlUiChatSendMessageRequest,
+    HostControlUiChatSendMessageResult,
     HostBrowserClickRequest,
     HostBrowserClickResult,
     CapabilityListResult,
@@ -139,6 +141,13 @@ class HostBridgeClient:
     ) -> HostBrowserExtractTextResult:
         payload = await self._call_tool("host.browser.extract_text", request.model_dump())
         return HostBrowserExtractTextResult.model_validate(payload)
+
+    async def send_control_ui_chat_message(
+        self,
+        request: HostControlUiChatSendMessageRequest,
+    ) -> HostControlUiChatSendMessageResult:
+        payload = await self._call_tool("host.control_ui_chat.send_message", request.model_dump())
+        return HostControlUiChatSendMessageResult.model_validate(payload)
 
 
 def get_host_bridge_client() -> Optional[HostBridgeClient]:

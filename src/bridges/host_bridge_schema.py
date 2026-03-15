@@ -192,3 +192,27 @@ class HostBrowserExtractTextResult(BaseModel):
     selector: str = "body"
     length: int = 0
     error: Optional[str] = None
+
+
+class HostControlUiChatSendMessageRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    url: str = Field(min_length=1)
+    message: str = Field(min_length=1)
+    timeout_ms: int = Field(default=90000, ge=1000, le=300000)
+    connect_timeout_ms: int = Field(default=15000, ge=1000, le=120000)
+    stable_wait_ms: int = Field(default=800, ge=100, le=10000)
+
+
+class HostControlUiChatSendMessageResult(BaseModel):
+    ok: bool
+    url: Optional[str] = None
+    title: str = ""
+    message: str = ""
+    assistant_reply: str = ""
+    connected: bool = False
+    agent_bubble_count: int = 0
+    error: Optional[str] = None

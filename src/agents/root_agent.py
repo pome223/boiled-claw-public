@@ -16,6 +16,7 @@ from src.tools.browser import (
     browser_press,
     browser_screenshot,
 )
+from src.tools.control_ui_chat import control_ui_chat_send_message
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
@@ -128,6 +129,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - browser_press で Enter などのキー送信
 - browser_extract_text でテキスト抽出
 - browser_screenshot でスクリーンショット取得
+- boiled-claw Control UI の `/chat` を相手に会話する場合は `control_ui_chat_send_message` を優先する
 - robots.txtとサイトポリシーを尊重する
 
 ## デスクトップ操作
@@ -174,6 +176,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         browser_press,
         browser_screenshot,
         browser_extract_text,
+        control_ui_chat_send_message,
         desktop_view_windows,
         desktop_wait_window,
         desktop_view_frontmost_app,

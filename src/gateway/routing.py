@@ -84,16 +84,25 @@ _BROWSER_KEYWORDS = {
 
 _BROWSER_INTERACTION_KEYWORDS = {
     "click",
+    "chat",
     "fill",
     "form",
     "input",
     "press",
+    "question",
+    "ask",
+    "message",
+    "talk",
     "submit",
     "type",
     "入力",
     "打って",
     "押して",
     "送信",
+    "聞いて",
+    "質問",
+    "会話",
+    "話して",
 }
 
 _DESKTOP_VIEW_KEYWORDS = {
@@ -405,6 +414,15 @@ def decision_from_payload(
     *,
     fallback_message: str,
 ) -> RoutingDecision:
+    if _is_control_ui_chat_flow(fallback_message):
+        return RoutingDecision(
+            target="specialist",
+            specialist="browser_automator",
+            handoff_mode="direct",
+            reason="boiled-claw Control UI chat flow should stay on browser_automator",
+            confidence=0.9,
+        )
+
     decision = coerce_decision(payload)
     if decision.target == "control_loop" and _is_browser_only_flow(fallback_message):
         return RoutingDecision(
@@ -448,6 +466,17 @@ def _is_browser_only_flow(text: str) -> bool:
         and not has_memory
         and not has_dynamic
         and not has_skill
+    )
+
+
+def _is_control_ui_chat_flow(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+
+    return (
+        ("localhost:18789/chat" in normalized or "127.0.0.1:18789/chat" in normalized)
+        and _contains_any(normalized, _BROWSER_INTERACTION_KEYWORDS)
     )
 
 

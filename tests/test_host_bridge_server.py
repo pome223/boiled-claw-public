@@ -41,6 +41,7 @@ class TestHostBridgeTools:
             "host.browser.press",
             "host.browser.extract_text",
             "host.browser.screenshot",
+            "host.control_ui_chat.send_message",
         }
 
     @pytest.mark.asyncio
@@ -64,6 +65,7 @@ class TestHostBridgeTools:
         assert "host.browser.press" in text
         assert "host.browser.extract_text" in text
         assert "host.browser.screenshot" in text
+        assert "host.control_ui_chat.send_message" in text
 
     @pytest.mark.asyncio
     async def test_host_shell_run_success(self, mcp):
@@ -297,6 +299,39 @@ class TestHostBridgeTools:
         assert "capture.png" in text
         assert '"ok": true' in text.lower()
 
+    @pytest.mark.asyncio
+    async def test_host_control_ui_chat_send_message_success(self, mcp, monkeypatch):
+        async def fake_control_ui_chat(url, message, timeout_ms=90000, connect_timeout_ms=15000, stable_wait_ms=800, tool_context=None):
+            return {
+                "url": url,
+                "title": "boiled-claw Control UI",
+                "message": message,
+                "assistant_reply": "bridge operator reply",
+                "connected": True,
+                "agent_bubble_count": 1,
+                "success": True,
+            }
+
+        monkeypatch.setattr(
+            server_module.control_ui_chat_tools,
+            "_control_ui_chat_send_message_local",
+            fake_control_ui_chat,
+        )
+        result = await mcp.call_tool(
+            "host.control_ui_chat.send_message",
+            {
+                "request_id": "req-control-ui-chat",
+                "session_id": "sess-control-ui-chat",
+                "user_id": "user-control-ui-chat",
+                "agent_name": "pytest",
+                "url": "http://localhost:18789/chat",
+                "message": "Hello World",
+            },
+        )
+        text = self._text(result)
+        assert "bridge operator reply" in text
+        assert '"ok": true' in text.lower()
+
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:
     proc = await asyncio.create_subprocess_exec(
@@ -365,6 +400,7 @@ async def test_stdio_tools_list():
         "host.browser.press",
         "host.browser.extract_text",
         "host.browser.screenshot",
+        "host.control_ui_chat.send_message",
     }
 
 

@@ -50,3 +50,21 @@ def test_decision_from_payload_keeps_browser_only_flow_on_specialist():
     assert decision.target == "specialist"
     assert decision.specialist == "browser_automator"
     assert decision.handoff_mode == "direct"
+
+
+def test_decision_from_payload_keeps_control_ui_chat_flow_on_specialist():
+    decision = decision_from_payload(
+        {
+            "target": "control_loop",
+            "specialist": None,
+            "handoff_mode": "direct",
+            "reason": "multi-step browser task",
+            "confidence": 0.9,
+            "dynamic_agent": {},
+        },
+        fallback_message="http://localhost:18789/chat にアクセスして東京の今日の天気を聞いてみて",
+    )
+
+    assert decision.target == "specialist"
+    assert decision.specialist == "browser_automator"
+    assert decision.handoff_mode == "direct"

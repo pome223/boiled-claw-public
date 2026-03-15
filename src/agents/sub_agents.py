@@ -15,6 +15,7 @@ from src.tools.browser import (
     browser_press,
     browser_screenshot,
 )
+from src.tools.control_ui_chat import control_ui_chat_send_message
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
@@ -156,10 +157,14 @@ browser_agent = Agent(
 ## 注意
 - robots.txtとサイトポリシーを尊重する
 - 過度なリクエストを避ける
+- 対象が boiled-claw Control UI の `/chat`（例: `http://localhost:18789/chat`）なら、汎用 browser tool を組み合わせず `control_ui_chat_send_message` を優先する
+- Control UI では `Approvals` / `Event Stream` / `Sessions` / サイドバーを操作対象にしない
+- Control UI では `#messages` 内の assistant bubble だけを結果として扱う
 - browser 系 tool が実行環境の問題で失敗した場合は、その失敗を明示して止まる
 - Playwright 未導入や Host Bridge 未設定のときに、web_search や他エージェントへ自動フォールバックして「ブラウザで見た」とは言わない
 """,
     tools=[
+        control_ui_chat_send_message,
         browser_navigate,
         browser_click,
         browser_fill,

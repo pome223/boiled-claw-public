@@ -67,6 +67,7 @@ _FRESHNESS_KEYWORDS = {
 }
 
 _BROWSER_TOOL_NAMES = {
+    "control_ui_chat_send_message",
     "browser_navigate",
     "browser_click",
     "browser_fill",
@@ -79,6 +80,7 @@ _BROWSER_TOOL_NAMES = {
     "host.browser.press",
     "host.browser.extract_text",
     "host.browser.screenshot",
+    "host.control_ui_chat.send_message",
 }
 _BROWSER_INFRA_ERROR_FRAGMENTS = (
     "playwright is not installed",
