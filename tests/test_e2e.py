@@ -541,6 +541,13 @@ class TestWebSocketProtocol:
         assert "browser_fill" not in tool_names
         assert "browser_click" not in tool_names
 
+        host_control_ui_start = next(
+            (event for event in tool_starts if event.get("tool_name") == "host.control_ui_chat.send_message"),
+            None,
+        )
+        assert host_control_ui_start is not None
+        assert host_control_ui_start["args"].get("visible") is True
+
         control_ui_result = next(
             (
                 event

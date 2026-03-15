@@ -153,7 +153,10 @@ class TestHostBridgeTools:
 
     @pytest.mark.asyncio
     async def test_host_browser_navigate_success(self, mcp, monkeypatch):
-        async def fake_navigate(url, wait_for="load", timeout=30000, tool_context=None):
+        seen = {}
+
+        async def fake_navigate(url, wait_for="load", timeout=30000, visible=None, tool_context=None):
+            seen["visible"] = visible
             return {
                 "url": url,
                 "title": "Bridge Example",
@@ -170,11 +173,13 @@ class TestHostBridgeTools:
                 "user_id": "user-browser-nav",
                 "agent_name": "pytest",
                 "url": "https://example.com",
+                "visible": True,
             },
         )
         text = self._text(result)
         assert "Bridge Example" in text
         assert '"ok": true' in text.lower()
+        assert seen["visible"] is True
 
     @pytest.mark.asyncio
     async def test_host_browser_extract_text_success(self, mcp, monkeypatch):
@@ -301,7 +306,18 @@ class TestHostBridgeTools:
 
     @pytest.mark.asyncio
     async def test_host_control_ui_chat_send_message_success(self, mcp, monkeypatch):
-        async def fake_control_ui_chat(url, message, timeout_ms=90000, connect_timeout_ms=15000, stable_wait_ms=800, tool_context=None):
+        seen = {}
+
+        async def fake_control_ui_chat(
+            url,
+            message,
+            timeout_ms=90000,
+            connect_timeout_ms=15000,
+            stable_wait_ms=800,
+            visible=True,
+            tool_context=None,
+        ):
+            seen["visible"] = visible
             return {
                 "url": url,
                 "title": "boiled-claw Control UI",
@@ -326,11 +342,13 @@ class TestHostBridgeTools:
                 "agent_name": "pytest",
                 "url": "http://localhost:18789/chat",
                 "message": "Hello World",
+                "visible": True,
             },
         )
         text = self._text(result)
         assert "bridge operator reply" in text
         assert '"ok": true' in text.lower()
+        assert seen["visible"] is True
 
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:

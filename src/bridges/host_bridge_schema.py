@@ -98,6 +98,7 @@ class HostBrowserNavigateRequest(BaseModel):
     url: str = Field(min_length=1)
     wait_for: str = Field(default="load", min_length=1)
     timeout: int = Field(default=30000, ge=1, le=300000)
+    visible: Optional[bool] = None
 
 
 class HostBrowserNavigateResult(BaseModel):
@@ -205,6 +206,7 @@ class HostControlUiChatSendMessageRequest(BaseModel):
     timeout_ms: int = Field(default=90000, ge=1000, le=300000)
     connect_timeout_ms: int = Field(default=15000, ge=1000, le=120000)
     stable_wait_ms: int = Field(default=800, ge=100, le=10000)
+    visible: bool = True
 
 
 class HostControlUiChatSendMessageResult(BaseModel):

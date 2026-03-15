@@ -158,6 +158,7 @@ browser_agent = Agent(
 - robots.txtとサイトポリシーを尊重する
 - 過度なリクエストを避ける
 - 対象が boiled-claw Control UI の `/chat`（例: `http://localhost:18789/chat`）なら、このエージェントでは扱わず `control_ui_chat_operator` に任せる前提で止まる
+- ユーザーが「ブラウザを開いて」「見えるように」「目で確認したい」と言う場合は `browser_navigate(..., visible=true)` を優先する
 - browser 系 tool が実行環境の問題で失敗した場合は、その失敗を明示して止まる
 - Playwright 未導入や Host Bridge 未設定のときに、web_search や他エージェントへ自動フォールバックして「ブラウザで見た」とは言わない
 """,
@@ -188,7 +189,7 @@ control_ui_chat_agent = Agent(
 
 ## 行動
 1. 対象URLが `/chat` であることを確認する
-2. `control_ui_chat_send_message` を使って会話を実行する
+2. `control_ui_chat_send_message(visible=true)` を使って会話を実行する
 3. 返ってきた `assistant_reply` をそのまま要約せず返す
 
 ## 禁止
