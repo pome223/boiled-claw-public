@@ -682,6 +682,18 @@ def test_build_default_desktop_client_returns_pyobjc_when_modules_exist(monkeypa
     monkeypatch.setenv("BOILED_CLAW_DESKTOP_CLIENT", "auto")
     monkeypatch.setattr("src.desktop.factory.platform.system", lambda: "Darwin")
     monkeypatch.setitem(sys.modules, "AppKit", _FakeAppKit())
+    monkeypatch.setitem(sys.modules, "ApplicationServices", _FakeQuartz())
+
+    client = build_default_desktop_client()
+
+    assert isinstance(client, PyObjCDesktopClient)
+
+
+def test_build_default_desktop_client_falls_back_to_quartz_when_applicationservices_missing(monkeypatch):
+    monkeypatch.setenv("BOILED_CLAW_DESKTOP_CLIENT", "auto")
+    monkeypatch.setattr("src.desktop.factory.platform.system", lambda: "Darwin")
+    monkeypatch.setitem(sys.modules, "AppKit", _FakeAppKit())
+    monkeypatch.delitem(sys.modules, "ApplicationServices", raising=False)
     monkeypatch.setitem(sys.modules, "Quartz", _FakeQuartz())
 
     client = build_default_desktop_client()

@@ -32,12 +32,17 @@ def build_default_desktop_client() -> DesktopClient:
             return FakeDesktopClient(runtime_state=runtime_state)
 
     try:
-        import Quartz  # type: ignore
+        import ApplicationServices  # type: ignore
 
-        quartz_module = Quartz
+        quartz_module = ApplicationServices
     except Exception:
-        if mode == "pyobjc":
-            return FakeDesktopClient(runtime_state=runtime_state)
+        try:
+            import Quartz  # type: ignore
+
+            quartz_module = Quartz
+        except Exception:
+            if mode == "pyobjc":
+                return FakeDesktopClient(runtime_state=runtime_state)
 
     return PyObjCDesktopClient(
         appkit_module=appkit_module,
