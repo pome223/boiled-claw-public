@@ -156,11 +156,13 @@ python -m src.main host-bridge --host 127.0.0.1 --port 8766
 boiled-claw-host-bridge --sse --host 127.0.0.1 --port 8766
 ```
 
-`.env` には次を設定します。
+`.env` に置くか、`docker compose up` のシェル環境変数として渡します。
+現行の `docker-compose.yml` は `HOST_BRIDGE_*` / `DESKTOP_BRIDGE_*` を
+gateway / cli / dev コンテナへ明示的に渡すので、どちらの方法でも有効です。
 
 ```bash
 HOST_BRIDGE_ENABLED=true
-HOST_BRIDGE_URL=http://127.0.0.1:8766/sse
+HOST_BRIDGE_URL=http://host.docker.internal:8766/sse
 ```
 
 Playwright を Host Bridge 側で使う場合は、host 側 Python 環境に browser extras を入れておきます。
