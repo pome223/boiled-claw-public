@@ -253,6 +253,35 @@ async def test_guarded_desktop_view_windows_allows_policy_approved(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_guarded_desktop_view_windows_allows_launch_app_plan(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [
+                    {"name": "desktop.control.launch_app"}
+                ]
+            },
+        }
+    )
+
+    async def _fake_windows(*, include_minimized=False):
+        assert include_minimized is False
+        return {"windows": [{"window_id": "w1", "app_name": "Google Chrome"}]}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_view_windows",
+        _fake_windows,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_view_windows(
+        tool_context=tool_context,
+    )
+
+    assert result["windows"][0]["app_name"] == "Google Chrome"
+
+
+@pytest.mark.asyncio
 async def test_guarded_desktop_ax_find_allows_policy_approved(monkeypatch):
     tool_context = SimpleNamespace(
         state={
@@ -270,6 +299,33 @@ async def test_guarded_desktop_ax_find_allows_policy_approved(monkeypatch):
     monkeypatch.setattr("src.tools.desktop.desktop_ax_find", _fake_find)
 
     result = await guarded_tools_module.guarded_desktop_ax_find(
+        app_name="Safari",
+        window_id="w1",
+        identifier="open-button",
+        tool_context=tool_context,
+    )
+
+    assert result["matched"] is True
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_wait_element_allows_click_plan(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.click"}]
+            },
+        }
+    )
+
+    async def _fake_wait(**kwargs):
+        assert kwargs["identifier"] == "open-button"
+        return {"matched": True, "target": {"identifier": "open-button"}}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_wait_element", _fake_wait)
+
+    result = await guarded_tools_module.guarded_desktop_wait_element(
         app_name="Safari",
         window_id="w1",
         identifier="open-button",

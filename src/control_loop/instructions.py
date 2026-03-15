@@ -77,6 +77,12 @@ Risk level guide:
 - high: write/delete or sensitive desktop capture (file.write, memory.delete, desktop.view.screenshot, desktop.ax.snapshot)
 - critical: shell execution or agent spawn
 
+When a desktop automation step needs to inspect or verify UI state, include the
+necessary low-risk observation capabilities in required_capabilities as well.
+Typical pairings:
+- desktop.control.launch_app / desktop.control.focus_window -> desktop.view.windows, desktop.wait.window
+- desktop.control.click / desktop.control.type -> desktop.ax.find, desktop.wait.element
+
 Do NOT include anything outside the JSON object.
 """.strip()
 

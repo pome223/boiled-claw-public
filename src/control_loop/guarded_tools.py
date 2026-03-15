@@ -16,6 +16,32 @@ from google.adk.tools import ToolContext
 from src.runtime.state_keys import StateKeys
 
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
+_IMPLICIT_PLAN_CAPABILITIES = {
+    "desktop.view.windows": {
+        "desktop.control.launch_app",
+        "desktop.control.focus_window",
+        "desktop.wait.window",
+    },
+    "desktop.view.frontmost_app": {
+        "desktop.control.launch_app",
+        "desktop.control.focus_window",
+        "desktop.wait.window",
+    },
+    "desktop.wait.window": {
+        "desktop.control.launch_app",
+        "desktop.control.focus_window",
+    },
+    "desktop.ax.find": {
+        "desktop.control.click",
+        "desktop.control.type",
+        "desktop.wait.element",
+    },
+    "desktop.wait.element": {
+        "desktop.control.click",
+        "desktop.control.type",
+        "desktop.ax.find",
+    },
+}
 
 
 def _check_approval(tool_context: ToolContext, capability: str) -> None:
@@ -49,7 +75,8 @@ def _check_capability_in_plan(
     required = {
         cap.get("name", "") for cap in plan.get("required_capabilities", [])
     }
-    if capability_name not in required:
+    implied_by = _IMPLICIT_PLAN_CAPABILITIES.get(capability_name, set())
+    if capability_name not in required and not (required & implied_by):
         raise PermissionError(
             f"Capability '{capability_name}' is not in the approved plan."
         )
