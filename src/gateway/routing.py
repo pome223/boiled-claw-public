@@ -106,6 +106,16 @@ _BROWSER_INTERACTION_KEYWORDS = {
     "話して",
 }
 
+_SPREADSHEET_KEYWORDS = {
+    "スプレッドシート",
+    "googleスプレッドシート",
+    "google sheets",
+    "spreadsheet",
+    "sheet",
+    "シート",
+    "表計算",
+}
+
 _DESKTOP_VIEW_KEYWORDS = {
     "画面",
     "スクリーン",
@@ -300,6 +310,7 @@ def heuristic_decision(message: str) -> RoutingDecision:
     has_desktop_view = _contains_any(normalized, _DESKTOP_VIEW_KEYWORDS)
     has_desktop_control = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS)
     has_desktop_runtime = _contains_any(normalized, _DESKTOP_RUNTIME_KEYWORDS)
+    has_spreadsheet = _contains_any(normalized, _SPREADSHEET_KEYWORDS)
     has_file = _contains_any(normalized, _FILE_KEYWORDS)
     has_system = _contains_any(normalized, _SYSTEM_KEYWORDS)
     has_memory = _contains_any(normalized, _MEMORY_KEYWORDS)
@@ -310,6 +321,13 @@ def heuristic_decision(message: str) -> RoutingDecision:
         return RoutingDecision(
             target="dynamic_agent",
             reason="request explicitly asks for a custom or MCP-backed agent",
+            confidence=0.9,
+        )
+
+    if has_browser and has_spreadsheet:
+        return RoutingDecision(
+            target="control_loop",
+            reason="browser spreadsheet request requires multi-step automation instead of research/file fallback",
             confidence=0.9,
         )
 

@@ -34,6 +34,15 @@ def test_heuristic_decision_routes_multistep_desktop_task_to_control_loop():
     assert decision.specialist is None
 
 
+def test_heuristic_decision_routes_browser_spreadsheet_task_to_control_loop():
+    decision = heuristic_decision(
+        "ブラウザを開いて GTCの予想を調べてスプレッドシートにまとめて"
+    )
+
+    assert decision.target == "control_loop"
+    assert decision.specialist is None
+
+
 def test_decision_from_payload_keeps_browser_only_flow_on_specialist():
     decision = decision_from_payload(
         {

@@ -83,6 +83,11 @@ Typical pairings:
 - desktop.control.launch_app / desktop.control.focus_window -> desktop.view.windows, desktop.wait.window
 - desktop.control.click / desktop.control.type -> desktop.ax.find, desktop.wait.element
 
+If the user explicitly asks to populate a spreadsheet in the browser, do NOT
+substitute a local CSV file or file.write step unless the user explicitly asked
+for a local file. Prefer a browser/desktop plan that interacts with the visible
+spreadsheet instead.
+
 Do NOT include anything outside the JSON object.
 """.strip()
 
