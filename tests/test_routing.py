@@ -51,8 +51,28 @@ def test_targets_user_browser_detects_current_browser_language():
         "今開いているタブの Google スプレッドシートに入力して"
     ) is True
     assert targets_user_browser(
+        "このブラウザを使って GTC の予想を調べて"
+    ) is True
+    assert targets_user_browser(
         "ブラウザを開いて GTCの予想を調べてスプレッドシートにまとめて"
     ) is False
+
+
+def test_decision_from_payload_forces_control_loop_for_current_browser_spreadsheet_request():
+    decision = decision_from_payload(
+        {
+            "target": "specialist",
+            "specialist": "web_researcher",
+            "handoff_mode": "preflight_then_root",
+            "reason": "research request",
+            "confidence": 0.91,
+            "dynamic_agent": {},
+        },
+        fallback_message="このブラウザを使ってNvidiaのGTCで紹介される可能性のある技術を調べてスプレッドsーとにまとめて",
+    )
+
+    assert decision.target == "control_loop"
+    assert decision.specialist is None
 
 
 def test_decision_from_payload_keeps_browser_only_flow_on_specialist():
