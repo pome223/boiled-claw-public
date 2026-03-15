@@ -77,9 +77,16 @@ def _chain_after_callbacks(
     *cbs: Callable[[CallbackContext], None],
 ) -> Callable[[CallbackContext], None]:
     """複数の after_agent_callback を順番に呼ぶ合成関数を返す。"""
-    def chained(ctx: CallbackContext) -> None:
+    def chained(
+        ctx: CallbackContext | None = None,
+        *,
+        callback_context: CallbackContext | None = None,
+    ) -> None:
+        resolved_ctx = callback_context or ctx
+        if resolved_ctx is None:
+            raise TypeError("callback_context is required")
         for cb in cbs:
-            cb(ctx)
+            cb(resolved_ctx)
         return
     return chained
 

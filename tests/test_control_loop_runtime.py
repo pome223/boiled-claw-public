@@ -17,7 +17,7 @@ from src.control_loop.instructions import (
     build_planner_instruction,
     build_verifier_instruction,
 )
-from src.control_loop.root_workflow import ControlLoop, planner_with_policy
+from src.control_loop.root_workflow import ControlLoop, planner_with_policy, verifier_with_hooks
 import src.memory_lifecycle.candidate_store as candidate_store_module
 from src.memory_lifecycle.adk_memory_service import PromotedMemoryService
 from src.memory_lifecycle.candidate_store import CandidateStore
@@ -559,6 +559,23 @@ def test_planner_after_agent_callback_accepts_callback_context_only():
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "policy_approved"
     assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-simple-1"
+
+
+def test_verifier_after_agent_callback_accepts_callback_context_only():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.VERIFY_LAST_REPORT: {
+                "report_id": "report-1",
+                "plan_id": "plan-1",
+                "status": "pass",
+            }
+        }
+    )
+
+    verifier_with_hooks.after_agent_callback(callback_context=callback_context)
+
+    assert callback_context.state[StateKeys.REPAIR_COUNT] == 0
+    assert callback_context.state[StateKeys.TEMP_REPAIR_PATCH] is None
 
 
 @pytest.mark.asyncio
