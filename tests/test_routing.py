@@ -48,7 +48,7 @@ def test_decision_from_payload_keeps_browser_only_flow_on_specialist():
     )
 
     assert decision.target == "specialist"
-    assert decision.specialist == "browser_automator"
+    assert decision.specialist == "control_ui_chat_operator"
     assert decision.handoff_mode == "direct"
 
 
@@ -66,5 +66,5 @@ def test_decision_from_payload_keeps_control_ui_chat_flow_on_specialist():
     )
 
     assert decision.target == "specialist"
-    assert decision.specialist == "browser_automator"
+    assert decision.specialist == "control_ui_chat_operator"
     assert decision.handoff_mode == "direct"

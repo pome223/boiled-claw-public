@@ -9,6 +9,7 @@ VALID_SPECIALISTS = {
     "web_researcher",
     "file_manager",
     "browser_automator",
+    "control_ui_chat_operator",
     "desktop_operator",
     "system_operator",
     "memory_keeper",
@@ -417,9 +418,9 @@ def decision_from_payload(
     if _is_control_ui_chat_flow(fallback_message):
         return RoutingDecision(
             target="specialist",
-            specialist="browser_automator",
+            specialist="control_ui_chat_operator",
             handoff_mode="direct",
-            reason="boiled-claw Control UI chat flow should stay on browser_automator",
+            reason="boiled-claw Control UI chat flow should stay on the dedicated chat operator",
             confidence=0.9,
         )
 

@@ -34,6 +34,8 @@ class _FakeLocator:
             return list(self.page.user_messages)
         if self.selector == "#messages .bubble.agent":
             return list(self.page.agent_messages)
+        if self.selector == "#approvalList .approve-btn":
+            return ["Approve"] * self.page.pending_approvals
         return []
 
     async def count(self):
@@ -66,6 +68,16 @@ class _FakeLocator:
             message = self.page.input_value
             self.page.user_messages.append(message)
             self.page.input_enabled = False
+            if self.page.requires_inner_approval:
+                self.page.pending_approvals = 1
+            else:
+                self.page.agent_messages.append(self.page.next_reply)
+                self.page.input_enabled = True
+            return
+        if self.selector == "#approvalList .approve-btn":
+            if self.page.pending_approvals <= 0:
+                raise RuntimeError("No pending approvals")
+            self.page.pending_approvals -= 1
             self.page.agent_messages.append(self.page.next_reply)
             self.page.input_enabled = True
             return
@@ -87,6 +99,8 @@ class _FakePage:
         self.user_messages = []
         self.agent_messages = []
         self.next_reply = "Hello! I am boiled-claw, your personal AI assistant."
+        self.pending_approvals = 0
+        self.requires_inner_approval = False
 
     def locator(self, selector):
         return _FakeLocator(self, selector)
@@ -128,6 +142,28 @@ async def test_control_ui_chat_send_message_local_success(monkeypatch):
     assert result["connected"] is True
     assert result["assistant_reply"] == page.next_reply
     assert page.user_messages == ["Hello World"]
+
+
+@pytest.mark.asyncio
+async def test_control_ui_chat_send_message_local_auto_approves_inner_requests(monkeypatch):
+    page = _FakePage()
+    page.requires_inner_approval = True
+
+    async def fake_get_browser_session():
+        return _FakeSession(page)
+
+    monkeypatch.setattr(browser_module, "PLAYWRIGHT_AVAILABLE", True)
+    monkeypatch.setattr(browser_module, "_validate_url", lambda url: (True, None))
+    monkeypatch.setattr(browser_module, "get_browser_session", fake_get_browser_session)
+
+    result = await control_ui_chat_module._control_ui_chat_send_message_local(
+        "http://localhost:18789/chat",
+        "東京の今日の天気は？",
+    )
+
+    assert result["success"] is True
+    assert result["assistant_reply"] == page.next_reply
+    assert page.pending_approvals == 0
 
 
 @pytest.mark.asyncio

@@ -427,7 +427,7 @@ class GatewayServer:
             (item.error for item in result.tool_failures if item.error),
             "required runtime is unavailable",
         )
-        if specialist_name == "browser_automator" and result.infrastructure_blocked:
+        if specialist_name in {"browser_automator", "control_ui_chat_operator"} and result.infrastructure_blocked:
             return (
                 "ブラウザ操作は実行できませんでした。\n"
                 f"- 原因: {first_error}\n"

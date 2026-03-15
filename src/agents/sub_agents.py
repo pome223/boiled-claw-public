@@ -157,14 +157,11 @@ browser_agent = Agent(
 ## 注意
 - robots.txtとサイトポリシーを尊重する
 - 過度なリクエストを避ける
-- 対象が boiled-claw Control UI の `/chat`（例: `http://localhost:18789/chat`）なら、汎用 browser tool を組み合わせず `control_ui_chat_send_message` を優先する
-- Control UI では `Approvals` / `Event Stream` / `Sessions` / サイドバーを操作対象にしない
-- Control UI では `#messages` 内の assistant bubble だけを結果として扱う
+- 対象が boiled-claw Control UI の `/chat`（例: `http://localhost:18789/chat`）なら、このエージェントでは扱わず `control_ui_chat_operator` に任せる前提で止まる
 - browser 系 tool が実行環境の問題で失敗した場合は、その失敗を明示して止まる
 - Playwright 未導入や Host Bridge 未設定のときに、web_search や他エージェントへ自動フォールバックして「ブラウザで見た」とは言わない
 """,
     tools=[
-        control_ui_chat_send_message,
         browser_navigate,
         browser_click,
         browser_fill,
@@ -173,6 +170,34 @@ browser_agent = Agent(
         browser_extract_text,
         memory_store,
     ],
+)
+
+
+control_ui_chat_agent = Agent(
+    name="control_ui_chat_operator",
+    model="gemini-3-flash-preview",
+    description="boiled-claw Control UI の /chat ページとの会話を専門とするエージェント",
+    instruction="""
+あなたは boiled-claw Control UI の `/chat` ページ専用オペレーターです。
+
+## 役割
+- `http://localhost:18789/chat` のような Control UI chat ページに接続する
+- メッセージを入力して送信する
+- `#messages` の assistant bubble から返答を取得する
+- inner approval が出たら `#approvalList` の approve button だけを処理して会話を継続する
+
+## 行動
+1. 対象URLが `/chat` であることを確認する
+2. `control_ui_chat_send_message` を使って会話を実行する
+3. 返ってきた `assistant_reply` をそのまま要約せず返す
+
+## 禁止
+- 汎用 browser tool を組み合わせてページ全体を探索しない
+- `Approvals` / `Event Stream` / `Sessions` / サイドバーを操作しない
+- `body` 全体のテキストを抽出して推測しない
+- 会話の成否判定を DOM 以外に頼らない
+""",
+    tools=[control_ui_chat_send_message],
 )
 
 
@@ -227,5 +252,6 @@ SUB_AGENTS = [
     system_agent,
     memory_agent,
     browser_agent,
+    control_ui_chat_agent,
     desktop_agent,
 ]

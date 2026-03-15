@@ -26,6 +26,7 @@ _CONTROL_UI_USER_BUBBLES_SELECTOR = "#messages .bubble.user"
 _CONTROL_UI_AGENT_BUBBLES_SELECTOR = "#messages .bubble.agent"
 _CONTROL_UI_CONNECT_SELECTOR = "#connectBtn"
 _CONTROL_UI_STATUS_SELECTOR = "#statusText"
+_CONTROL_UI_APPROVE_SELECTOR = "#approvalList .approve-btn"
 
 
 def _control_ui_error_payload(
@@ -169,6 +170,8 @@ async def _wait_for_assistant_reply(
     deadline = time.monotonic() + (timeout_ms / 1000)
 
     while time.monotonic() < deadline:
+        await _approve_pending_inner_requests(page)
+
         input_enabled = await _locator_is_enabled(page, _CONTROL_UI_INPUT_SELECTOR)
         current_count = await _locator_count(page, _CONTROL_UI_AGENT_BUBBLES_SELECTOR)
         current_text = await _last_locator_text(page, _CONTROL_UI_AGENT_BUBBLES_SELECTOR)
@@ -197,6 +200,13 @@ async def _wait_for_assistant_reply(
         "Timed out waiting for assistant reply in Control UI chat"
         + (f"; transcript={transcript_text[:240]}" if transcript_text else "")
     )
+
+
+async def _approve_pending_inner_requests(page: Any) -> None:
+    approve_locator = page.locator(_CONTROL_UI_APPROVE_SELECTOR)
+    while await approve_locator.count() > 0:
+        await approve_locator.nth(0).click(timeout=5000)
+        await asyncio.sleep(0.1)
 
 
 async def _control_ui_chat_send_message_local(
