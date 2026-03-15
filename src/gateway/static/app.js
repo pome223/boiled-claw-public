@@ -411,6 +411,7 @@ function handleChatHistory(payload) {
   messageHistory.length = 0;
   inlineApprovals.clear();
   entries.forEach((e) => {
+    if (shouldSkipHistoryEntry(e)) return;
     if (e.role === "user") {
       messageHistory.push({ kind: "user", text: e.content });
     } else if (e.role === "assistant") {
@@ -429,6 +430,16 @@ function handleChatHistory(payload) {
     return;
   }
   logEvent("chat.history.loaded", { count: entries.length });
+}
+
+function shouldSkipHistoryEntry(entry) {
+  if (!entry || entry.role !== "system") return false;
+  const source = entry.metadata?.source || "";
+  const content = String(entry.content || "");
+  if (source === "tools.approval") return true;
+  if (/^Approval\s+[a-z0-9]+:\s+(approved|denied)$/i.test(content)) return true;
+  if (/^\[approval\]/i.test(content)) return true;
+  return false;
 }
 
 // -----------------------------------------------------------------------

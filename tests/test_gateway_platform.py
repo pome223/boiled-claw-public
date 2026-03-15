@@ -770,6 +770,14 @@ def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
             assert gateway.tool_policy.get_pending_approval("req-123") is None
+            history = gateway.transcript.get_history(session_id, limit=20)
+            assert all(
+                not (
+                    entry.role == "system"
+                    and entry.metadata.get("source") == "tools.approval"
+                )
+                for entry in history
+            )
 
 
 def test_websocket_tool_approval_falls_back_to_control_loop(monkeypatch, tmp_path):

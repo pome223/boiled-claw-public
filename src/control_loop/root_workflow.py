@@ -66,6 +66,7 @@ logger = logging.getLogger(__name__)
 _APP_NAME = "boiled_claw_v2"
 _MAX_REPAIR_ATTEMPTS = DEFAULT_MAX_REPAIR_ATTEMPTS
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
+_TERMINAL_VERIFY_STATUSES = {"pass", "fail", "partial_pass", "error"}
 _CONTROL_LOOP_AUTHOR = "control_loop"
 
 
@@ -423,10 +424,20 @@ class ControlLoop:
 
         current_goal = session.state.get(StateKeys.TASK_GOAL)
         if current_goal and current_goal != goal:
-            raise ValueError(
-                "Session already has a different task goal. "
-                "Use a new session_id for a new workflow."
+            if not _workflow_is_terminal(session.state):
+                raise ValueError(
+                    "Session already has a different task goal. "
+                    "Use a new session_id for a new workflow."
+                )
+            await self._append_state_delta(
+                session=session,
+                author=_CONTROL_LOOP_AUTHOR,
+                invocation_prefix="reset",
+                state_delta=_build_next_goal_state(init_state),
             )
+            session = await self._get_session(user_id, session_id)
+            assert session is not None
+            return session, False
 
         missing_state = {
             key: value
@@ -547,6 +558,41 @@ def _build_final_text(state: dict, report: dict) -> str:
         f"Score: {score:.2f}\n"
         f"{summary}"
     ).strip()
+
+
+def _workflow_is_terminal(state: dict[str, Any]) -> bool:
+    approval = state.get(StateKeys.APPROVAL_STATUS, "")
+    if approval == "needs_human" and state.get(StateKeys.APPROVAL_REQUEST):
+        return False
+    if approval == "denied":
+        return True
+    report = _parse_json(state.get(StateKeys.VERIFY_LAST_REPORT)) or {}
+    return report.get("status") in _TERMINAL_VERIFY_STATUSES
+
+
+def _build_next_goal_state(init_state: dict[str, Any]) -> dict[str, Any]:
+    state_delta: dict[str, Any] = {
+        StateKeys.TASK_GOAL: None,
+        StateKeys.TASK_CONSTRAINTS: None,
+        StateKeys.TASK_SUCCESS_CRITERIA: None,
+        StateKeys.PLAN_CURRENT: None,
+        StateKeys.PLAN_APPROVED: None,
+        StateKeys.PLAN_RISK_LEVEL: None,
+        StateKeys.APPROVAL_STATUS: None,
+        StateKeys.APPROVAL_REQUEST: None,
+        StateKeys.VERIFY_LAST_REPORT: None,
+        StateKeys.REPAIR_COUNT: 0,
+        StateKeys.MEMORY_LAST_CANDIDATE_IDS: None,
+        StateKeys.MEMORY_LAST_PROMOTED_IDS: None,
+        StateKeys.TEMP_RETRIEVAL_BUNDLE: None,
+        StateKeys.TEMP_PLANNER_DRAFT: None,
+        StateKeys.TEMP_EXECUTOR_OUTPUTS: None,
+        StateKeys.TEMP_ARTIFACT_REFS: None,
+        StateKeys.TEMP_VERIFICATION_INPUTS: None,
+        StateKeys.TEMP_REPAIR_PATCH: None,
+    }
+    state_delta.update(init_state)
+    return state_delta
 
 
 # ── Default singleton ──────────────────────────────────────────────────────

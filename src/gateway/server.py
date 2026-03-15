@@ -2501,7 +2501,11 @@ class GatewayServer:
         )
         session = self.transcript.get_session(session_id)
         resolved_user = user_id or (session.user_id if session else None)
-        if session is not None and resolved_user:
+        if (
+            session is not None
+            and resolved_user
+            and source != "tools.approval"
+        ):
             self.transcript.append(
                 session_id,
                 "system",

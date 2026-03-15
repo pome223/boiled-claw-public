@@ -646,3 +646,42 @@ async def test_control_loop_rejects_goal_change_for_existing_session():
             user_id="user-1",
             session_id="sess-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_control_loop_allows_goal_change_after_terminal_report():
+    session_service = InMemorySessionService()
+    existing = await session_service.create_session(
+        app_name="boiled_claw_v2",
+        user_id="user-1",
+        session_id="sess-1",
+        state={
+            StateKeys.TASK_GOAL: "Old goal",
+            StateKeys.TASK_CONSTRAINTS: ["legacy"],
+            StateKeys.PLAN_APPROVED: {"plan_id": "plan-old"},
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.VERIFY_LAST_REPORT: {"status": "pass", "summary": "done"},
+            StateKeys.TEMP_REPAIR_PATCH: {"note": "stale"},
+        },
+    )
+
+    loop = ControlLoop(session_service=session_service)
+    session, created = await loop._get_or_create_session(
+        user_id="user-1",
+        session_id="sess-1",
+        goal="New goal",
+        init_state={
+            StateKeys.TASK_GOAL: "New goal",
+            StateKeys.TASK_CONSTRAINTS: ["fresh"],
+            StateKeys.REPAIR_COUNT: 0,
+        },
+    )
+
+    assert created is False
+    assert session.id == existing.id
+    assert session.state[StateKeys.TASK_GOAL] == "New goal"
+    assert session.state[StateKeys.TASK_CONSTRAINTS] == ["fresh"]
+    assert session.state.get(StateKeys.PLAN_APPROVED) is None
+    assert session.state.get(StateKeys.APPROVAL_STATUS) is None
+    assert session.state.get(StateKeys.VERIFY_LAST_REPORT) is None
+    assert session.state.get(StateKeys.TEMP_REPAIR_PATCH) is None
