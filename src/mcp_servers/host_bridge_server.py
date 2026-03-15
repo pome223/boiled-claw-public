@@ -23,10 +23,16 @@ from src.bridges.host_bridge_schema import (
     BridgePingResult,
     CapabilityDescriptor,
     CapabilityListResult,
+    HostBrowserClickRequest,
+    HostBrowserClickResult,
     HostBrowserExtractTextRequest,
     HostBrowserExtractTextResult,
+    HostBrowserFillRequest,
+    HostBrowserFillResult,
     HostBrowserNavigateRequest,
     HostBrowserNavigateResult,
+    HostBrowserPressRequest,
+    HostBrowserPressResult,
     HostBrowserScreenshotRequest,
     HostBrowserScreenshotResult,
     HostFileListRequest,
@@ -173,6 +179,27 @@ def _capabilities() -> CapabilityListResult:
                 implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
             ),
             CapabilityDescriptor(
+                name="host.browser.click",
+                risk="medium",
+                requires_approval=True,
+                description="Click an element in the current host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
+                name="host.browser.fill",
+                risk="medium",
+                requires_approval=True,
+                description="Fill a form field in the current host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
+                name="host.browser.press",
+                risk="medium",
+                requires_approval=True,
+                description="Send a key press to the current host browser page.",
+                implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
+            ),
+            CapabilityDescriptor(
                 name="host.browser.screenshot",
                 risk="medium",
                 requires_approval=True,
@@ -282,7 +309,11 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
 
     @mcp.tool(name="ping", description="Host Bridge health probe.")
     def ping() -> dict:
-        return BridgePingResult(transport=transport_hint).model_dump()
+        return BridgePingResult(
+            service="host-bridge",
+            version="v1",
+            transport=transport_hint,
+        ).model_dump()
 
     @mcp.tool(name="capabilities.list", description="List implemented host capabilities.")
     def list_capabilities() -> dict:
@@ -427,6 +458,105 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
         )
         return HostBrowserExtractTextResult.model_validate(
             _normalize_browser_payload(payload, default_selector=request.selector or "body")
+        ).model_dump()
+
+    @mcp.tool(
+        name="host.browser.click",
+        description="Click an element in the current host browser page.",
+    )
+    async def host_browser_click(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: str,
+        timeout: int = 30000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserClickRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+            timeout=timeout,
+        )
+        payload = await browser_tools._browser_click_local(
+            request.selector,
+            timeout=request.timeout,
+            tool_context=None,
+        )
+        return HostBrowserClickResult.model_validate(
+            _normalize_browser_payload(payload, default_selector=request.selector)
+        ).model_dump()
+
+    @mcp.tool(
+        name="host.browser.fill",
+        description="Fill a form field in the current host browser page.",
+    )
+    async def host_browser_fill(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: str,
+        text: str,
+        timeout: int = 30000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserFillRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+            text=text,
+            timeout=timeout,
+        )
+        payload = await browser_tools._browser_fill_local(
+            request.selector,
+            request.text,
+            timeout=request.timeout,
+            tool_context=None,
+        )
+        return HostBrowserFillResult.model_validate(
+            _normalize_browser_payload(payload, default_selector=request.selector)
+        ).model_dump()
+
+    @mcp.tool(
+        name="host.browser.press",
+        description="Send a key press to the current host browser page.",
+    )
+    async def host_browser_press(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        key: str,
+        selector: Optional[str] = None,
+        timeout: int = 30000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostBrowserPressRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            key=key,
+            selector=selector,
+            timeout=timeout,
+        )
+        payload = await browser_tools._browser_press_local(
+            request.key,
+            selector=request.selector,
+            timeout=request.timeout,
+            tool_context=None,
+        )
+        return HostBrowserPressResult.model_validate(
+            _normalize_browser_payload(payload, default_selector=request.selector)
         ).model_dump()
 
     @mcp.tool(

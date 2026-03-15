@@ -166,6 +166,66 @@ async def test_guarded_memory_read_prefers_adk_memory():
 
 
 @pytest.mark.asyncio
+async def test_guarded_browser_fill_uses_browser_navigate_capability(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "browser.navigate"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_fill(selector, text, timeout=30000, tool_context=None):
+        seen["selector"] = selector
+        seen["text"] = text
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.browser.browser_fill", _fake_fill)
+
+    result = await guarded_tools_module.guarded_browser_fill(
+        "textarea",
+        "Hello World",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["selector"] == "textarea"
+    assert seen["text"] == "Hello World"
+
+
+@pytest.mark.asyncio
+async def test_guarded_browser_press_passes_selector(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "browser.navigate"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_press(key, selector=None, timeout=30000, tool_context=None):
+        seen["key"] = key
+        seen["selector"] = selector
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.browser.browser_press", _fake_press)
+
+    result = await guarded_tools_module.guarded_browser_press(
+        "Enter",
+        selector="textarea",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["key"] == "Enter"
+    assert seen["selector"] == "textarea"
+
+
+@pytest.mark.asyncio
 async def test_guarded_desktop_view_windows_allows_policy_approved(monkeypatch):
     tool_context = SimpleNamespace(
         state={

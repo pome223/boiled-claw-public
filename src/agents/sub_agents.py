@@ -7,7 +7,14 @@ from google.adk.agents import Agent
 from src.tools.web_search import web_search
 from src.tools.shell import run_shell
 from src.tools.file_manager import read_file, write_file
-from src.tools.browser import browser_navigate, browser_screenshot, browser_extract_text
+from src.tools.browser import (
+    browser_click,
+    browser_extract_text,
+    browser_fill,
+    browser_navigate,
+    browser_press,
+    browser_screenshot,
+)
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
@@ -49,7 +56,7 @@ web_agent = Agent(
 3. 結果を分析して要約する
 4. 必要に応じて追加検索を行う
 """,
-    tools=[web_search, browser_navigate, browser_extract_text],
+    tools=[web_search, browser_navigate, browser_click, browser_fill, browser_press, browser_extract_text],
 )
 
 
@@ -137,13 +144,14 @@ browser_agent = Agent(
 ## 役割
 - Webページのナビゲーションとスクレイピング
 - スクリーンショットの取得
-- フォーム入力や自動操作
+- フォーム入力やキー送信を含む自動操作
 
 ## 行動
 1. 対象URLと目的を明確にする
 2. ページの構造を理解する
-3. 必要な情報を抽出する
-4. 結果を構造化して返す
+3. 必要なら `browser_click` / `browser_fill` / `browser_press` を使ってフォーム操作する
+4. 必要な情報を抽出する
+5. 結果を構造化して返す
 
 ## 注意
 - robots.txtとサイトポリシーを尊重する
@@ -151,7 +159,15 @@ browser_agent = Agent(
 - browser 系 tool が実行環境の問題で失敗した場合は、その失敗を明示して止まる
 - Playwright 未導入や Host Bridge 未設定のときに、web_search や他エージェントへ自動フォールバックして「ブラウザで見た」とは言わない
 """,
-    tools=[browser_navigate, browser_screenshot, browser_extract_text, memory_store],
+    tools=[
+        browser_navigate,
+        browser_click,
+        browser_fill,
+        browser_press,
+        browser_screenshot,
+        browser_extract_text,
+        memory_store,
+    ],
 )
 
 

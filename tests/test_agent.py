@@ -85,11 +85,20 @@ async def test_shell_tool_blocked():
 
 
 @pytest.mark.asyncio
-async def test_file_manager():
+async def test_file_manager(monkeypatch):
     """ファイル操作ツールの基本テスト"""
-    from src.tools.file_manager import write_file, read_file
+    from src.tools import file_manager as file_module
     import tempfile
     import os
+
+    monkeypatch.setattr(
+        file_module,
+        "get_settings",
+        lambda: type("Settings", (), {"host_bridge_enabled": False})(),
+    )
+
+    write_file = file_module.write_file
+    read_file = file_module.read_file
 
     # 一時ファイル
     with tempfile.NamedTemporaryFile(mode='w', delete=False) as f:

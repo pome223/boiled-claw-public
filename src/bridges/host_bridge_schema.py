@@ -108,6 +108,58 @@ class HostBrowserNavigateResult(BaseModel):
     error: Optional[str] = None
 
 
+class HostBrowserClickRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    selector: str = Field(min_length=1)
+    timeout: int = Field(default=30000, ge=1, le=300000)
+
+
+class HostBrowserClickResult(BaseModel):
+    ok: bool
+    selector: Optional[str] = None
+    error: Optional[str] = None
+
+
+class HostBrowserFillRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    selector: str = Field(min_length=1)
+    text: str = ""
+    timeout: int = Field(default=30000, ge=1, le=300000)
+
+
+class HostBrowserFillResult(BaseModel):
+    ok: bool
+    selector: Optional[str] = None
+    text_length: int = 0
+    error: Optional[str] = None
+
+
+class HostBrowserPressRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    key: str = Field(min_length=1)
+    selector: Optional[str] = None
+    timeout: int = Field(default=30000, ge=1, le=300000)
+
+
+class HostBrowserPressResult(BaseModel):
+    ok: bool
+    key: str = ""
+    selector: Optional[str] = None
+    error: Optional[str] = None
+
+
 class HostBrowserScreenshotRequest(BaseModel):
     request_id: str = Field(min_length=1)
     session_id: str = Field(min_length=1)

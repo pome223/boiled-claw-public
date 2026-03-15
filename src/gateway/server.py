@@ -68,9 +68,15 @@ _FRESHNESS_KEYWORDS = {
 
 _BROWSER_TOOL_NAMES = {
     "browser_navigate",
+    "browser_click",
+    "browser_fill",
+    "browser_press",
     "browser_extract_text",
     "browser_screenshot",
     "host.browser.navigate",
+    "host.browser.click",
+    "host.browser.fill",
+    "host.browser.press",
     "host.browser.extract_text",
     "host.browser.screenshot",
 }

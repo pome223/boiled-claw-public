@@ -163,9 +163,13 @@ gateway / cli / dev コンテナへ明示的に渡すので、どちらの方法
 ```bash
 HOST_BRIDGE_ENABLED=true
 HOST_BRIDGE_URL=http://host.docker.internal:8766/sse
+BROWSER_ALLOW_LOOPBACK=true
 ```
 
 Playwright を Host Bridge 側で使う場合は、host 側 Python 環境に browser extras を入れておきます。
+
+`http://localhost:18789/chat` のような loopback URL を browser automation で開きたい場合は、
+Host Bridge / gateway の両方で `BROWSER_ALLOW_LOOPBACK=true` を有効にします。
 
 ```bash
 pip install -e '.[browser]'
@@ -384,6 +388,9 @@ reverse proxy や API gateway で認証済みユーザー ID を `GATEWAY_AUTH_U
 
 - **web_search** - DuckDuckGo API で Web 検索
 - **browser_navigate** - URL に移動
+- **browser_click** - 要素をクリック
+- **browser_fill** - フォーム入力
+- **browser_press** - Enter などのキー送信
 - **browser_screenshot** - スクリーンショット取得
 - **browser_extract_text** - テキスト抽出
 - **run_shell** - シェルコマンド実行

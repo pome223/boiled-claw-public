@@ -82,6 +82,20 @@ _BROWSER_KEYWORDS = {
     "browse",
 }
 
+_BROWSER_INTERACTION_KEYWORDS = {
+    "click",
+    "fill",
+    "form",
+    "input",
+    "press",
+    "submit",
+    "type",
+    "入力",
+    "打って",
+    "押して",
+    "送信",
+}
+
 _DESKTOP_VIEW_KEYWORDS = {
     "画面",
     "スクリーン",
@@ -392,6 +406,14 @@ def decision_from_payload(
     fallback_message: str,
 ) -> RoutingDecision:
     decision = coerce_decision(payload)
+    if decision.target == "control_loop" and _is_browser_only_flow(fallback_message):
+        return RoutingDecision(
+            target="specialist",
+            specialist="browser_automator",
+            handoff_mode="direct",
+            reason="browser-only multi-step request should stay on browser_automator",
+            confidence=max(decision.confidence, 0.82),
+        )
     if decision.confidence > 0.0 or decision.reason:
         return decision
     return heuristic_decision(fallback_message)
@@ -399,6 +421,34 @@ def decision_from_payload(
 
 def _contains_any(text: str, keywords: set[str]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+def _is_browser_only_flow(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+
+    has_browser = _contains_any(normalized, _BROWSER_KEYWORDS)
+    has_browser_interaction = _contains_any(normalized, _BROWSER_INTERACTION_KEYWORDS)
+    has_research = _contains_any(normalized, _RESEARCH_KEYWORDS)
+    has_longform = _contains_any(normalized, _LONGFORM_KEYWORDS)
+    has_file = _contains_any(normalized, _FILE_KEYWORDS)
+    has_system = _contains_any(normalized, _SYSTEM_KEYWORDS)
+    has_memory = _contains_any(normalized, _MEMORY_KEYWORDS)
+    has_dynamic = _contains_any(normalized, _DYNAMIC_AGENT_KEYWORDS)
+    has_skill = _contains_any(normalized, _SKILL_KEYWORDS)
+
+    return (
+        has_browser
+        and has_browser_interaction
+        and not has_research
+        and not has_longform
+        and not has_file
+        and not has_system
+        and not has_memory
+        and not has_dynamic
+        and not has_skill
+    )
 
 
 def _coerce_confidence(value: Any) -> float:
