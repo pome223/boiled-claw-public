@@ -104,6 +104,8 @@ For current-browser tasks, do NOT include desktop.control.launch_app unless the
 user explicitly asked to open a new browser application. If the frontmost or
 existing browser window cannot be identified, fail with explicit evidence
 instead of falling back to launching a separate browser.
+Do not open a new tab or window for these tasks unless the user explicitly
+asked for that behavior.
 
 If the user wants to populate or edit a spreadsheet or any visible text field,
 also include:
@@ -117,7 +119,8 @@ spreadsheet instead.
 For current-browser research or search tasks, do NOT treat typed text alone as
 success. Include the submit action (for example, Enter or clicking a search
 button) and at least one follow-up read or verification step that confirms the
-page content after submission.
+page content after submission. Opening the address bar and typing a query is
+not sufficient.
 
 Do NOT include anything outside the JSON object.
 """.strip()

@@ -43,6 +43,22 @@ _IMPLICIT_PLAN_CAPABILITIES = {
         "desktop.ax.find",
     },
 }
+_CURRENT_BROWSER_ALLOWED_HOTKEYS = {
+    ("control", "l"),
+    ("enter",),
+    ("meta", "l"),
+}
+_HOTKEY_ALIASES = {
+    "arrowdown": "down",
+    "arrowleft": "left",
+    "arrowright": "right",
+    "arrowup": "up",
+    "cmd": "meta",
+    "command": "meta",
+    "control": "control",
+    "ctrl": "control",
+    "return": "enter",
+}
 
 
 def _check_approval(tool_context: ToolContext, capability: str) -> None:
@@ -101,6 +117,14 @@ def _is_current_browser_task(tool_context: ToolContext | None) -> bool:
         return False
     goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
     return isinstance(goal, str) and targets_user_browser(goal)
+
+
+def _normalize_hotkeys(keys: list[str]) -> tuple[str, ...]:
+    normalized = []
+    for key in keys:
+        value = _HOTKEY_ALIASES.get(key.strip().lower(), key.strip().lower())
+        normalized.append(value)
+    return tuple(sorted(item for item in normalized if item))
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -515,6 +539,13 @@ async def guarded_desktop_control_hotkey(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            normalized_keys = _normalize_hotkeys(keys)
+            if normalized_keys not in _CURRENT_BROWSER_ALLOWED_HOTKEYS:
+                raise PermissionError(
+                    "Only focus-address-bar or submit hotkeys are allowed for "
+                    "current-browser tasks."
+                )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(

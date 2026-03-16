@@ -623,6 +623,25 @@ async def test_guarded_desktop_control_launch_app_rejects_current_browser_task()
 
 
 @pytest.mark.asyncio
+async def test_guarded_desktop_control_hotkey_rejects_new_tab_for_current_browser():
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って明日の天気を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.hotkey"}]
+            },
+        }
+    )
+
+    with pytest.raises(PermissionError, match="focus-address-bar or submit hotkeys"):
+        await guarded_tools_module.guarded_desktop_control_hotkey(
+            keys=["cmd", "t"],
+            tool_context=tool_context,
+        )
+
+
+@pytest.mark.asyncio
 async def test_control_loop_resumes_after_human_approval(monkeypatch, tmp_path):
     session_service = InMemorySessionService()
     candidate_store = CandidateStore(

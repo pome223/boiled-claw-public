@@ -106,6 +106,7 @@ _USER_BROWSER_REQUIRED_CAPABILITIES = {
 _CURRENT_BROWSER_CONTROL_CONSTRAINTS = [
     "Operate only on the currently visible browser/tab/window.",
     "Do not launch a new browser application or open a managed browser for this task.",
+    "Do not open a new browser tab or window unless the user explicitly asked for it.",
     "Start by identifying the frontmost app and matching it to the existing browser window.",
     "If the current browser window cannot be identified or focused, stop and report an explicit error.",
     "Do not mark the task complete after typing alone; submit the action and verify the resulting page content.",
