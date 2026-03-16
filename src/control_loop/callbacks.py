@@ -142,6 +142,13 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
         for cap in plan.get("required_capabilities", [])
     ]
     normalized_goal = (goal or plan.get("goal") or "").strip().lower()
+
+    if _targets_current_browser(normalized_goal):
+        required_caps = [
+            cap
+            for cap in required_caps
+            if str(cap.get("name", "")) != "desktop.control.launch_app"
+        ]
     cap_names = {str(cap.get("name", "")) for cap in required_caps}
 
     if _targets_current_browser(normalized_goal):
@@ -160,7 +167,7 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
         )
         if has_desktop_browser_plan or "browser.navigate" in cap_names:
             _ensure_capability(required_caps, "desktop.view.windows")
-            _ensure_capability(required_caps, "desktop.control.launch_app")
+            _ensure_capability(required_caps, "desktop.view.frontmost_app")
             _ensure_capability(required_caps, "desktop.control.focus_window")
             _ensure_capability(required_caps, "desktop.control.click")
             _ensure_capability(required_caps, "desktop.control.hotkey")

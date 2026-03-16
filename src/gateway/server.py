@@ -96,12 +96,20 @@ _BROWSER_INFRA_ERROR_FRAGMENTS = (
     "host bridge returned non-json tool content",
 )
 _USER_BROWSER_REQUIRED_CAPABILITIES = {
+    "desktop.view.frontmost_app",
     "desktop.view.windows",
     "desktop.control.focus_window",
     "desktop.ax.find",
     "desktop.control.click",
     "desktop.control.type",
 }
+_CURRENT_BROWSER_CONTROL_CONSTRAINTS = [
+    "Operate only on the currently visible browser/tab/window.",
+    "Do not launch a new browser application or open a managed browser for this task.",
+    "Start by identifying the frontmost app and matching it to the existing browser window.",
+    "If the current browser window cannot be identified or focused, stop and report an explicit error.",
+    "Do not mark the task complete after typing alone; submit the action and verify the resulting page content.",
+]
 
 
 @dataclass
@@ -2487,10 +2495,15 @@ class GatewayServer:
                 success=False,
                 metadata={"error": "desktop_bridge_unavailable"},
             )
+        effective_constraints = list(constraints)
+        if targets_user_browser(goal):
+            for item in _CURRENT_BROWSER_CONTROL_CONSTRAINTS:
+                if item not in effective_constraints:
+                    effective_constraints.append(item)
         return await self.control_loop.run(
             goal=goal,
             user_id=user_id,
-            constraints=constraints,
+            constraints=effective_constraints,
             session_id=session_id,
         )
 

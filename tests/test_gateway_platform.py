@@ -379,6 +379,46 @@ async def test_run_control_loop_http_rejects_current_browser_request_without_des
     assert "Desktop Bridge が無効です" in result.final_text
 
 
+@pytest.mark.asyncio
+async def test_run_control_loop_http_adds_current_browser_constraints(
+    monkeypatch,
+    tmp_path,
+):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    async def _fake_current_browser_runtime_error(_goal: str):
+        return None
+
+    async def _fake_control_loop_run(*, goal, user_id, constraints, session_id):
+        captured["goal"] = goal
+        captured["user_id"] = user_id
+        captured["constraints"] = constraints
+        captured["session_id"] = session_id
+        return ExecutionResult(
+            request_id="req-1",
+            session_id=session_id,
+            user_id=user_id,
+            final_text="ok",
+            success=True,
+        )
+
+    monkeypatch.setattr(gateway, "_current_browser_runtime_error", _fake_current_browser_runtime_error)
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_loop_run)
+
+    result = await gateway._run_control_loop_http(
+        user_id="alice",
+        session_id="sess-browser",
+        goal="このブラウザを使って明日の天気を調べて",
+        constraints=[],
+    )
+
+    assert result.success is True
+    constraints = captured["constraints"]
+    assert "Operate only on the currently visible browser/tab/window." in constraints
+    assert "Do not launch a new browser application or open a managed browser for this task." in constraints
+
+
 def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 

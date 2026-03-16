@@ -496,7 +496,7 @@ def test_policy_judge_expands_current_browser_capabilities():
     )
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
-    assert "desktop.control.launch_app" in required
+    assert "desktop.view.frontmost_app" in required
     assert "desktop.control.click" in required
     assert "desktop.control.hotkey" in required
     assert "desktop.control.scroll" in required
@@ -504,7 +504,8 @@ def test_policy_judge_expands_current_browser_capabilities():
     assert "desktop.wait.element" in required
     assert "desktop.view.screenshot" in required
     assert "desktop.ax.snapshot" in required
-    assert "desktop.control.launch_app" in approval_required
+    assert "desktop.control.launch_app" not in required
+    assert "desktop.view.frontmost_app" in approval_required
     assert "desktop.control.click" in approval_required
 
 
@@ -532,7 +533,7 @@ def test_policy_judge_expands_type_for_current_browser_spreadsheet_goal():
     approved = callback_context.state[StateKeys.PLAN_APPROVED]
     required = {cap["name"] for cap in approved["required_capabilities"]}
 
-    assert "desktop.control.launch_app" in required
+    assert "desktop.view.frontmost_app" in required
     assert "desktop.control.click" in required
     assert "desktop.control.type" in required
     assert "desktop.control.hotkey" in required
@@ -541,6 +542,7 @@ def test_policy_judge_expands_type_for_current_browser_spreadsheet_goal():
     assert "desktop.wait.element" in required
     assert "desktop.view.screenshot" in required
     assert "desktop.ax.snapshot" in required
+    assert "desktop.control.launch_app" not in required
 
 
 def test_planner_after_agent_callback_accepts_callback_context_only():
@@ -590,7 +592,7 @@ async def test_planner_instruction_mentions_current_browser_desktop_capabilities
 
     planner = await build_planner_instruction(ctx)
 
-    assert "desktop.control.launch_app" in planner
+    assert "desktop.view.frontmost_app" in planner
     assert "desktop.control.click" in planner
     assert "desktop.control.type" in planner
     assert "desktop.control.hotkey" in planner
@@ -598,6 +600,26 @@ async def test_planner_instruction_mentions_current_browser_desktop_capabilities
     assert "desktop.view.screenshot" in planner
     assert "desktop.ax.snapshot" in planner
     assert "desktop-backed browser task" in planner
+    assert "do not include desktop.control.launch_app" in planner.lower()
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_launch_app_rejects_current_browser_task():
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って明日の天気を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.launch_app"}]
+            },
+        }
+    )
+
+    with pytest.raises(PermissionError, match="not allowed for current-browser tasks"):
+        await guarded_tools_module.guarded_desktop_control_launch_app(
+            app_name="Google Chrome",
+            tool_context=tool_context,
+        )
 
 
 @pytest.mark.asyncio

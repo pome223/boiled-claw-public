@@ -13,6 +13,7 @@ from typing import Any
 
 from google.adk.tools import ToolContext
 
+from src.gateway.routing import targets_user_browser
 from src.runtime.state_keys import StateKeys
 
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
@@ -93,6 +94,13 @@ def _memory_entry_to_result(entry: Any) -> dict[str, Any]:
         "author": getattr(entry, "author", None),
         "timestamp": getattr(entry, "timestamp", None),
     }
+
+
+def _is_current_browser_task(tool_context: ToolContext | None) -> bool:
+    if tool_context is None:
+        return False
+    goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
+    return isinstance(goal, str) and targets_user_browser(goal)
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -458,6 +466,11 @@ async def guarded_desktop_control_launch_app(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            raise PermissionError(
+                "desktop.control.launch_app is not allowed for current-browser tasks. "
+                "Use the existing frontmost browser window instead."
+            )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(

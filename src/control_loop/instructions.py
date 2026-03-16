@@ -87,9 +87,10 @@ When the user explicitly refers to the current browser/tab/page/window
 ("this browser", "current tab", "このブラウザ", "このタブ"), treat it as a
 desktop-backed browser task, not a managed browser task. Include the desktop
 capabilities needed to actually interact with the visible browser window.
+Use the frontmost existing browser window as the source of truth.
 Minimum browser-operation capability set:
+- desktop.view.frontmost_app
 - desktop.view.windows
-- desktop.control.launch_app
 - desktop.control.focus_window
 - desktop.control.click
 - desktop.control.hotkey
@@ -99,6 +100,11 @@ Minimum browser-operation capability set:
 - desktop.view.screenshot
 - desktop.ax.snapshot
 
+For current-browser tasks, do NOT include desktop.control.launch_app unless the
+user explicitly asked to open a new browser application. If the frontmost or
+existing browser window cannot be identified, fail with explicit evidence
+instead of falling back to launching a separate browser.
+
 If the user wants to populate or edit a spreadsheet or any visible text field,
 also include:
 - desktop.control.type
@@ -107,6 +113,11 @@ If the user explicitly asks to populate a spreadsheet in the browser, do NOT
 substitute a local CSV file or file.write step unless the user explicitly asked
 for a local file. Prefer a browser/desktop plan that interacts with the visible
 spreadsheet instead.
+
+For current-browser research or search tasks, do NOT treat typed text alone as
+success. Include the submit action (for example, Enter or clicking a search
+button) and at least one follow-up read or verification step that confirms the
+page content after submission.
 
 Do NOT include anything outside the JSON object.
 """.strip()
