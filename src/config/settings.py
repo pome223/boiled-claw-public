@@ -94,6 +94,20 @@ class Settings(BaseSettings):
         description="SSE read timeout for Host Bridge MCP connection",
     )
 
+    # Current Tab extension bridge settings
+    current_tab_bridge_enabled: bool = Field(
+        default=False,
+        description="Enable the Chrome extension relay for current-tab control",
+    )
+    current_tab_bridge_host: str = Field(
+        default="127.0.0.1",
+        description="Bind host for the current-tab extension relay WebSocket server",
+    )
+    current_tab_bridge_port: int = Field(
+        default=8768,
+        description="Bind port for the current-tab extension relay WebSocket server",
+    )
+
     # Desktop Bridge settings
     desktop_bridge_enabled: bool = Field(
         default=False,

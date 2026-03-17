@@ -31,6 +31,16 @@ from src.bridges.host_bridge_schema import (
     HostFileReadResult,
     HostFileWriteRequest,
     HostFileWriteResult,
+    HostCurrentTabClickRequest,
+    HostCurrentTabClickResult,
+    HostCurrentTabExtractTextRequest,
+    HostCurrentTabExtractTextResult,
+    HostCurrentTabFillRequest,
+    HostCurrentTabFillResult,
+    HostCurrentTabInfoRequest,
+    HostCurrentTabInfoResult,
+    HostCurrentTabNavigateRequest,
+    HostCurrentTabNavigateResult,
     HostShellRunRequest,
     HostShellRunResult,
 )
@@ -148,6 +158,32 @@ class HostBridgeClient:
     ) -> HostControlUiChatSendMessageResult:
         payload = await self._call_tool("host.control_ui_chat.send_message", request.model_dump())
         return HostControlUiChatSendMessageResult.model_validate(payload)
+
+    async def current_tab_info(self, request: HostCurrentTabInfoRequest) -> HostCurrentTabInfoResult:
+        payload = await self._call_tool("host.current_tab.info", request.model_dump())
+        return HostCurrentTabInfoResult.model_validate(payload)
+
+    async def current_tab_navigate(
+        self,
+        request: HostCurrentTabNavigateRequest,
+    ) -> HostCurrentTabNavigateResult:
+        payload = await self._call_tool("host.current_tab.navigate", request.model_dump())
+        return HostCurrentTabNavigateResult.model_validate(payload)
+
+    async def current_tab_click(self, request: HostCurrentTabClickRequest) -> HostCurrentTabClickResult:
+        payload = await self._call_tool("host.current_tab.click", request.model_dump())
+        return HostCurrentTabClickResult.model_validate(payload)
+
+    async def current_tab_fill(self, request: HostCurrentTabFillRequest) -> HostCurrentTabFillResult:
+        payload = await self._call_tool("host.current_tab.fill", request.model_dump())
+        return HostCurrentTabFillResult.model_validate(payload)
+
+    async def current_tab_extract_text(
+        self,
+        request: HostCurrentTabExtractTextRequest,
+    ) -> HostCurrentTabExtractTextResult:
+        payload = await self._call_tool("host.current_tab.extract_text", request.model_dump())
+        return HostCurrentTabExtractTextResult.model_validate(payload)
 
 
 def get_host_bridge_client() -> Optional[HostBridgeClient]:

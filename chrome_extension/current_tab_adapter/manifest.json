@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "boiled-claw Current Tab Adapter",
+  "version": "0.1.0",
+  "description": "Relays the active Chrome tab to boiled-claw over a local WebSocket.",
+  "permissions": [
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "minimum_chrome_version": "116"
+}

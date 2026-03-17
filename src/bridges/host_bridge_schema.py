@@ -218,3 +218,88 @@ class HostControlUiChatSendMessageResult(BaseModel):
     connected: bool = False
     agent_bubble_count: int = 0
     error: Optional[str] = None
+
+
+class HostCurrentTabInfoRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+
+
+class HostCurrentTabInfoResult(BaseModel):
+    ok: bool
+    tab_id: Optional[int] = None
+    window_id: Optional[int] = None
+    url: str = ""
+    title: str = ""
+    error: Optional[str] = None
+
+
+class HostCurrentTabNavigateRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    url: str = Field(min_length=1)
+    timeout_ms: int = Field(default=15000, ge=1000, le=120000)
+
+
+class HostCurrentTabNavigateResult(BaseModel):
+    ok: bool
+    tab_id: Optional[int] = None
+    window_id: Optional[int] = None
+    url: str = ""
+    title: str = ""
+    error: Optional[str] = None
+
+
+class HostCurrentTabClickRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    selector: str = Field(min_length=1)
+
+
+class HostCurrentTabClickResult(BaseModel):
+    ok: bool
+    selector: Optional[str] = None
+    error: Optional[str] = None
+
+
+class HostCurrentTabFillRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    selector: str = Field(min_length=1)
+    text: str = ""
+
+
+class HostCurrentTabFillResult(BaseModel):
+    ok: bool
+    selector: Optional[str] = None
+    text_length: int = 0
+    error: Optional[str] = None
+
+
+class HostCurrentTabExtractTextRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    selector: Optional[str] = None
+
+
+class HostCurrentTabExtractTextResult(BaseModel):
+    ok: bool
+    selector: str = "body"
+    text: str = ""
+    length: int = 0
+    error: Optional[str] = None
