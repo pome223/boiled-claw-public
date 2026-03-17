@@ -103,14 +103,21 @@ _USER_BROWSER_REQUIRED_CAPABILITIES = {
     "desktop.control.click",
     "desktop.control.type",
 }
-_CURRENT_BROWSER_CONTROL_CONSTRAINTS = [
+_CURRENT_BROWSER_CONTROL_BASE_CONSTRAINTS = [
     "Operate only on the currently visible browser/tab/window.",
     "Do not launch a new browser application or open a managed browser for this task.",
-    "Do not open a new browser tab or window unless the user explicitly asked for it.",
     "Start by identifying the frontmost app and matching it to the existing browser window.",
     "If the current browser window cannot be identified or focused, stop and report an explicit error.",
     "Do not mark the task complete after typing alone; submit the action and verify the resulting page content.",
 ]
+_CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT = (
+    "Do not open a new browser tab or window unless the user explicitly asked for it."
+)
+_CURRENT_BROWSER_PRESERVE_CONTROL_UI_TAB_CONSTRAINT = (
+    "If the current tab is the boiled-claw Control UI chat, preserve that tab and "
+    "open a new tab in the same browser window for browsing or search. Otherwise "
+    "stay on the current tab."
+)
 
 
 @dataclass
@@ -2170,10 +2177,15 @@ class GatewayServer:
                 )
                 return
 
+            effective_constraints = self._merge_control_constraints(
+                goal=goal,
+                constraints=constraints,
+                preserve_control_ui_tab=True,
+            )
             result = await self.control_loop.run(
                 goal=goal,
                 user_id=user_id,
-                constraints=constraints,
+                constraints=effective_constraints,
                 session_id=session_id,
             )
             self.transcript.append(
@@ -2220,6 +2232,43 @@ class GatewayServer:
             )
         finally:
             self.manager.clear_task(session_id)
+
+    def _merge_control_constraints(
+        self,
+        *,
+        goal: str,
+        constraints: list[str],
+        preserve_control_ui_tab: bool,
+    ) -> list[str]:
+        effective_constraints = list(constraints)
+        if not targets_user_browser(goal):
+            return effective_constraints
+        for item in _CURRENT_BROWSER_CONTROL_BASE_CONSTRAINTS:
+            if item not in effective_constraints:
+                effective_constraints.append(item)
+        if preserve_control_ui_tab:
+            if (
+                _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+                in effective_constraints
+            ):
+                effective_constraints.remove(
+                    _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+                )
+            if (
+                _CURRENT_BROWSER_PRESERVE_CONTROL_UI_TAB_CONSTRAINT
+                not in effective_constraints
+            ):
+                effective_constraints.append(
+                    _CURRENT_BROWSER_PRESERVE_CONTROL_UI_TAB_CONSTRAINT
+                )
+        elif (
+            _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+            not in effective_constraints
+        ):
+            effective_constraints.append(
+                _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+            )
+        return effective_constraints
 
     # HTTP agent execution (no abort support)
     async def _run_agent_http(self, user_id: str, session_id: str, message: str) -> dict:
@@ -2496,11 +2545,11 @@ class GatewayServer:
                 success=False,
                 metadata={"error": "desktop_bridge_unavailable"},
             )
-        effective_constraints = list(constraints)
-        if targets_user_browser(goal):
-            for item in _CURRENT_BROWSER_CONTROL_CONSTRAINTS:
-                if item not in effective_constraints:
-                    effective_constraints.append(item)
+        effective_constraints = self._merge_control_constraints(
+            goal=goal,
+            constraints=constraints,
+            preserve_control_ui_tab=False,
+        )
         return await self.control_loop.run(
             goal=goal,
             user_id=user_id,

@@ -105,7 +105,10 @@ user explicitly asked to open a new browser application. If the frontmost or
 existing browser window cannot be identified, fail with explicit evidence
 instead of falling back to launching a separate browser.
 Do not open a new tab or window for these tasks unless the user explicitly
-asked for that behavior.
+asked for that behavior, or the constraints explicitly require preserving the
+boiled-claw Control UI chat tab. When constraints say to preserve the Control
+UI tab, open a new tab in the same browser window before navigation so the
+chat session stays connected.
 
 If the user wants to populate or edit a spreadsheet or any visible text field,
 also include:
@@ -124,6 +127,9 @@ not sufficient.
 For current-browser tasks, prefer Cmd/Ctrl+L to focus the address bar. Do NOT
 use Cmd/Ctrl+K or Cmd/Ctrl+E because browser extensions or side panels may
 intercept those shortcuts.
+If constraints require preserving the boiled-claw Control UI chat tab, prefer
+Cmd/Ctrl+T to open a new tab in the same browser window before using
+Cmd/Ctrl+L or typing the destination/query.
 
 Do NOT include anything outside the JSON object.
 """.strip()
@@ -148,6 +154,9 @@ For each step, call the appropriate tool and collect its output.
 When the task refers to the current browser/tab/page/window, never launch a
 new browser application. If you need to bring the browser to the foreground,
 focus the existing browser window instead.
+If the constraints require preserving the boiled-claw Control UI chat tab,
+open a new tab in that same browser window before navigation so the original
+chat tab remains connected.
 
 Return ONLY a JSON object:
 {{

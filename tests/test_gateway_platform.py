@@ -417,6 +417,56 @@ async def test_run_control_loop_http_adds_current_browser_constraints(
     constraints = captured["constraints"]
     assert "Operate only on the currently visible browser/tab/window." in constraints
     assert "Do not launch a new browser application or open a managed browser for this task." in constraints
+    assert "Do not open a new browser tab or window unless the user explicitly asked for it." in constraints
+
+
+@pytest.mark.asyncio
+async def test_control_loop_task_preserves_control_ui_tab_for_current_browser(
+    monkeypatch,
+    tmp_path,
+):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    async def _fake_current_browser_runtime_error(_goal: str):
+        return None
+
+    async def _fake_control_loop_run(*, goal, user_id, constraints, session_id):
+        captured["goal"] = goal
+        captured["user_id"] = user_id
+        captured["constraints"] = constraints
+        captured["session_id"] = session_id
+        return ExecutionResult(
+            request_id="req-1",
+            session_id=session_id,
+            user_id=user_id,
+            final_text="ok",
+            success=True,
+        )
+
+    monkeypatch.setattr(
+        gateway, "_current_browser_runtime_error", _fake_current_browser_runtime_error
+    )
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_loop_run)
+
+    await gateway._control_loop_task(
+        session_id="sess-browser",
+        user_id="alice",
+        goal="このブラウザを使って午後の東京の花粉を調べて",
+        constraints=[],
+    )
+
+    constraints = captured["constraints"]
+    assert "Operate only on the currently visible browser/tab/window." in constraints
+    assert (
+        "If the current tab is the boiled-claw Control UI chat, preserve that tab and "
+        "open a new tab in the same browser window for browsing or search. Otherwise "
+        "stay on the current tab."
+    ) in constraints
+    assert (
+        "Do not open a new browser tab or window unless the user explicitly asked for it."
+        not in constraints
+    )
 
 
 def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):

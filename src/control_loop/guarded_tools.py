@@ -48,6 +48,10 @@ _CURRENT_BROWSER_ALLOWED_HOTKEYS = {
     ("enter",),
     ("l", "meta"),
 }
+_CURRENT_BROWSER_NEW_TAB_HOTKEYS = {
+    ("control", "t"),
+    ("meta", "t"),
+}
 _HOTKEY_ALIASES = {
     "arrowdown": "down",
     "arrowleft": "left",
@@ -74,6 +78,7 @@ _KNOWN_BROWSER_APPS = {
     "Brave Browser",
     "Microsoft Edge",
 }
+_PRESERVE_CONTROL_UI_MARKER = "preserve that tab and open a new tab in the same browser window"
 
 
 def _check_approval(tool_context: ToolContext, capability: str) -> None:
@@ -145,6 +150,18 @@ def _normalize_hotkeys(keys: list[str]) -> tuple[str, ...]:
 def _rewrite_current_browser_hotkeys(keys: list[str]) -> list[str]:
     normalized = _normalize_hotkeys(keys)
     return list(_CURRENT_BROWSER_HOTKEY_REWRITES.get(normalized, keys))
+
+
+def _allows_current_browser_new_tab(tool_context: ToolContext | None) -> bool:
+    if tool_context is None:
+        return False
+    constraints = tool_context.state.get(StateKeys.TASK_CONSTRAINTS, [])
+    if not isinstance(constraints, list):
+        return False
+    return any(
+        _PRESERVE_CONTROL_UI_MARKER in str(item).lower()
+        for item in constraints
+    )
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -586,7 +603,14 @@ async def guarded_desktop_control_hotkey(
         if _is_current_browser_task(tool_context):
             effective_keys = _rewrite_current_browser_hotkeys(keys)
             normalized_keys = _normalize_hotkeys(effective_keys)
-            if normalized_keys not in _CURRENT_BROWSER_ALLOWED_HOTKEYS:
+            allow_new_tab = _allows_current_browser_new_tab(tool_context)
+            if (
+                normalized_keys not in _CURRENT_BROWSER_ALLOWED_HOTKEYS
+                and not (
+                    allow_new_tab
+                    and normalized_keys in _CURRENT_BROWSER_NEW_TAB_HOTKEYS
+                )
+            ):
                 raise PermissionError(
                     "Only focus-address-bar or submit hotkeys are allowed for "
                     f"current-browser tasks. attempted={normalized_keys}"

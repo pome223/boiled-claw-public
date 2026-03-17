@@ -601,6 +601,7 @@ async def test_planner_instruction_mentions_current_browser_desktop_capabilities
     assert "desktop.ax.snapshot" in planner
     assert "desktop-backed browser task" in planner
     assert "do not include desktop.control.launch_app" in planner.lower()
+    assert "preserving the boiled-claw Control UI chat tab" in planner
 
 
 @pytest.mark.asyncio
@@ -705,6 +706,43 @@ async def test_guarded_desktop_control_hotkey_allows_browser_search_shortcuts_fo
     )
 
     assert result == {"ok": True, "keys": ["meta", "l"]}
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_hotkey_allows_new_tab_when_preserving_control_ui(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って午後の東京の花粉を調べて",
+            StateKeys.TASK_CONSTRAINTS: [
+                (
+                    "If the current tab is the boiled-claw Control UI chat, preserve "
+                    "that tab and open a new tab in the same browser window for "
+                    "browsing or search. Otherwise stay on the current tab."
+                )
+            ],
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.hotkey"}]
+            },
+        }
+    )
+
+    async def fake_hotkey(keys: list[str]) -> dict:
+        return {"ok": True, "keys": keys}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_hotkey",
+        fake_hotkey,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_hotkey(
+        keys=["cmd", "t"],
+        tool_context=tool_context,
+    )
+
+    assert result == {"ok": True, "keys": ["cmd", "t"]}
 
 
 @pytest.mark.asyncio
