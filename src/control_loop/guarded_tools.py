@@ -81,6 +81,10 @@ _KNOWN_BROWSER_APPS = {
 }
 _PRESERVE_CONTROL_UI_MARKER = "preserve that tab and open a new tab in the same browser window"
 _CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY = "temp:current_browser_address_bar_focused"
+_CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS = (
+    "boiled-claw Control UI",
+    "boiled-claw",
+)
 _CURRENT_BROWSER_SEARCH_KEYWORDS = {
     "search",
     "weather",
@@ -205,12 +209,33 @@ def _rewrite_current_browser_address_bar_text(
         return text
     focused = bool(tool_context.state.get(_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY))
     tool_context.state[_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY] = False
-    if not focused or not _is_current_browser_search_task(tool_context):
+    if not _is_current_browser_search_task(tool_context):
         return text
     stripped = text.strip()
     if not stripped or _looks_like_url(stripped):
         return text
+    # ToolContext.state mutations are not guaranteed to survive every model/tool
+    # boundary, so treat selector-less text entry in current-browser search tasks
+    # as an address-bar query even if the transient "focused" flag was dropped.
+    if not focused and len(stripped) > 120:
+        return text
     return f"https://www.google.com/search?q={quote_plus(stripped)}"
+
+
+async def _focus_control_ui_browser_window(
+    *,
+    app_name: str,
+) -> dict[str, Any] | None:
+    from src.tools.desktop import desktop_control_focus_window
+
+    for title_hint in _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS:
+        result = await desktop_control_focus_window(
+            app_name=app_name,
+            title=title_hint,
+        )
+        if result.get("success") or result.get("ok"):
+            return result
+    return None
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -548,7 +573,10 @@ async def guarded_desktop_control_type(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
-        if _is_current_browser_task(tool_context):
+        if (
+            _is_current_browser_task(tool_context)
+            and not any((app_name, window_id, role, title, identifier, value_contains))
+        ):
             text = _rewrite_current_browser_address_bar_text(text, tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
@@ -600,6 +628,12 @@ async def guarded_desktop_control_launch_app(
                         break
 
             if candidate_app:
+                if _allows_current_browser_new_tab(tool_context):
+                    focused_control_ui = await _focus_control_ui_browser_window(
+                        app_name=candidate_app
+                    )
+                    if focused_control_ui is not None:
+                        return focused_control_ui
                 return await desktop_control_focus_window(app_name=candidate_app)
 
             raise PermissionError(
@@ -636,6 +670,19 @@ async def guarded_desktop_control_focus_window(
                 f"Current status: '{status}'"
             )
         _check_capability_in_plan(tool_context, "desktop.control.focus_window")
+        if (
+            _is_current_browser_task(tool_context)
+            and _allows_current_browser_new_tab(tool_context)
+            and not window_id
+            and not title
+            and isinstance(app_name, str)
+            and app_name.strip() in _KNOWN_BROWSER_APPS
+        ):
+            focused_control_ui = await _focus_control_ui_browser_window(
+                app_name=app_name.strip()
+            )
+            if focused_control_ui is not None:
+                return focused_control_ui
 
     from src.tools.desktop import desktop_control_focus_window
     return await desktop_control_focus_window(

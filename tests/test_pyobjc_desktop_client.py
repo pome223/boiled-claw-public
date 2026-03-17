@@ -555,6 +555,32 @@ async def test_pyobjc_client_focus_window_raises_and_activates():
 
 
 @pytest.mark.asyncio
+async def test_pyobjc_client_focus_window_matches_partial_title():
+    _FakeQuartz.actions = []
+    _FakeWorkspace.last_activated_pid = None
+    client = PyObjCDesktopClient(
+        appkit_module=_FakeAppKit(),
+        quartz_module=_FakeQuartz(),
+    )
+
+    result = await client.focus_window(
+        DesktopFocusWindowRequest(
+            request_id="req-focus",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Safari",
+            title="Exam",
+        )
+    )
+
+    assert result.ok is True
+    assert result.target is not None
+    assert result.target.title == "Example"
+    assert (_FakeQuartz.kAXRaiseAction, "window-7") in _FakeQuartz.actions
+
+
+@pytest.mark.asyncio
 async def test_pyobjc_client_hotkey_posts_keyboard_events_with_flags():
     _FakeQuartz.posted = []
     client = PyObjCDesktopClient(quartz_module=_FakeQuartz())

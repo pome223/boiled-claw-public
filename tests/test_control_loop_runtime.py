@@ -472,7 +472,6 @@ async def test_guarded_desktop_control_type_rewrites_current_browser_search_to_u
 
     result = await guarded_tools_module.guarded_desktop_control_type(
         text="午後の東京の花粉",
-        window_id="w1",
         tool_context=tool_context,
     )
 
@@ -482,6 +481,37 @@ async def test_guarded_desktop_control_type_rewrites_current_browser_search_to_u
         == "https://www.google.com/search?q=%E5%8D%88%E5%BE%8C%E3%81%AE%E6%9D%B1%E4%BA%AC%E3%81%AE%E8%8A%B1%E7%B2%89"
     )
     assert tool_context.state["temp:current_browser_address_bar_focused"] is False
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_type_rewrites_current_browser_search_without_focus_flag(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザをつかって明日の東京の花粉を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.type"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_type(**kwargs):
+        seen.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_control_type", _fake_type)
+
+    result = await guarded_tools_module.guarded_desktop_control_type(
+        text="明日の東京の花粉",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["text"].startswith("https://www.google.com/search?q=")
+    assert "%E6%98%8E%E6%97%A5" in seen["text"]
 
 
 def test_policy_judge_requires_human_for_desktop_control():
@@ -693,6 +723,65 @@ async def test_guarded_desktop_control_launch_app_redirects_to_focus_for_current
 
     assert result["success"] is True
     assert result["target"]["app_name"] == "Google Chrome"
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_focus_window_prefers_control_ui_title_when_preserving_tab(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザをつかって明日の東京の花粉を調べて",
+            StateKeys.TASK_CONSTRAINTS: [
+                (
+                    "If the current tab is the boiled-claw Control UI chat, preserve "
+                    "that tab and open a new tab in the same browser window for "
+                    "browsing or search. Otherwise stay on the current tab."
+                )
+            ],
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.focus_window"}]
+            },
+        }
+    )
+    calls: list[dict[str, str | None]] = []
+
+    async def fake_focus_window(
+        app_name: str | None = None,
+        window_id: str | None = None,
+        title: str | None = None,
+        tool_context=None,
+    ) -> dict:
+        calls.append(
+            {
+                "app_name": app_name,
+                "window_id": window_id,
+                "title": title,
+            }
+        )
+        return {
+            "success": True,
+            "target": {
+                "app_name": app_name,
+                "window_id": window_id,
+                "title": title,
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_focus_window",
+        fake_focus_window,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_focus_window(
+        app_name="Google Chrome",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert calls[0]["app_name"] == "Google Chrome"
+    assert calls[0]["title"] == "boiled-claw Control UI"
 
 
 @pytest.mark.asyncio

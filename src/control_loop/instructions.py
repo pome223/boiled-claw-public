@@ -109,6 +109,8 @@ asked for that behavior, or the constraints explicitly require preserving the
 boiled-claw Control UI chat tab. When constraints say to preserve the Control
 UI tab, open a new tab in the same browser window before navigation so the
 chat session stays connected.
+When preserving the Control UI tab, target the browser window whose title
+contains "boiled-claw Control UI" before sending any browser hotkeys.
 
 If the user wants to populate or edit a spreadsheet or any visible text field,
 also include:
@@ -160,6 +162,9 @@ focus the existing browser window instead.
 If the constraints require preserving the boiled-claw Control UI chat tab,
 open a new tab in that same browser window before navigation so the original
 chat tab remains connected.
+When preserving that tab, focus the browser window whose title contains
+"boiled-claw Control UI" instead of focusing an arbitrary browser window by
+app name alone.
 
 Return ONLY a JSON object:
 {{

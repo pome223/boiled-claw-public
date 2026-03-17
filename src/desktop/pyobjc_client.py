@@ -718,9 +718,9 @@ class PyObjCDesktopClient(DesktopClient):
             window_title = _ax_value(self._quartz, window, self._quartz.kAXTitleAttribute)
             if window_id:
                 target_title = self._window_title_for_id(window_id)
-                if target_title and str(window_title or "") == target_title:
+                if target_title and _title_matches(window_title, target_title):
                     return window
-            if title and str(window_title or "") == str(title):
+            if title and _title_matches(window_title, title):
                 return window
         return None
 
@@ -748,7 +748,7 @@ class PyObjCDesktopClient(DesktopClient):
         for item in raw_windows or []:
             candidate_title = item.get("kCGWindowName", item.get("CGWindowName", ""))
             candidate_app = item.get("kCGWindowOwnerName", item.get("CGWindowOwnerName", ""))
-            if str(candidate_title or "") != str(title):
+            if not _title_matches(candidate_title, title):
                 continue
             if app_name and str(candidate_app or "") != str(app_name):
                 continue
@@ -772,7 +772,7 @@ class PyObjCDesktopClient(DesktopClient):
             candidate_title = item.get("kCGWindowName", item.get("CGWindowName", ""))
             if window_id is not None and str(candidate_id) != str(window_id):
                 continue
-            if title is not None and str(candidate_title or "") != str(title):
+            if title is not None and not _title_matches(candidate_title, title):
                 continue
             candidate_app = item.get("kCGWindowOwnerName", item.get("CGWindowOwnerName", ""))
             return str(candidate_app or ""), str(candidate_id) if candidate_id is not None else None
@@ -903,6 +903,20 @@ def _display_size(quartz_module: Any | None) -> tuple[int, int]:
         return (width, height)
     except Exception:
         return (0, 0)
+
+
+def _title_matches(candidate: Any, requested: Any) -> bool:
+    candidate_text = str(candidate or "").strip()
+    requested_text = str(requested or "").strip()
+    if not candidate_text or not requested_text:
+        return False
+    candidate_folded = candidate_text.casefold()
+    requested_folded = requested_text.casefold()
+    return (
+        candidate_folded == requested_folded
+        or requested_folded in candidate_folded
+        or candidate_folded in requested_folded
+    )
 
 
 def _supports_ax_snapshot(quartz_module: Any | None, appkit_module: Any | None) -> bool:
