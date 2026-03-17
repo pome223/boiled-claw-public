@@ -668,7 +668,7 @@ async def test_guarded_desktop_control_hotkey_allows_browser_search_shortcuts_fo
         tool_context=tool_context,
     )
 
-    assert result == {"ok": True, "keys": ["cmd", "k"]}
+    assert result == {"ok": True, "keys": ["meta", "l"]}
 
 
 @pytest.mark.asyncio

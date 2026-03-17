@@ -44,18 +44,9 @@ _IMPLICIT_PLAN_CAPABILITIES = {
     },
 }
 _CURRENT_BROWSER_ALLOWED_HOTKEYS = {
-    ("control", "e"),
-    ("control", "k"),
     ("control", "l"),
-    ("down",),
     ("enter",),
-    ("left",),
-    ("e", "meta"),
-    ("k", "meta"),
     ("l", "meta"),
-    ("right",),
-    ("tab",),
-    ("up",),
 }
 _HOTKEY_ALIASES = {
     "arrowdown": "down",
@@ -67,6 +58,12 @@ _HOTKEY_ALIASES = {
     "control": "control",
     "ctrl": "control",
     "return": "enter",
+}
+_CURRENT_BROWSER_HOTKEY_REWRITES = {
+    ("control", "e"): ["control", "l"],
+    ("control", "k"): ["control", "l"],
+    ("e", "meta"): ["meta", "l"],
+    ("k", "meta"): ["meta", "l"],
 }
 
 
@@ -134,6 +131,11 @@ def _normalize_hotkeys(keys: list[str]) -> tuple[str, ...]:
         value = _HOTKEY_ALIASES.get(key.strip().lower(), key.strip().lower())
         normalized.append(value)
     return tuple(sorted(item for item in normalized if item))
+
+
+def _rewrite_current_browser_hotkeys(keys: list[str]) -> list[str]:
+    normalized = _normalize_hotkeys(keys)
+    return list(_CURRENT_BROWSER_HOTKEY_REWRITES.get(normalized, keys))
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -547,9 +549,11 @@ async def guarded_desktop_control_hotkey(
     keys: list[str],
     tool_context: ToolContext | None = None,
 ) -> dict:
+    effective_keys = keys
     if tool_context is not None:
         if _is_current_browser_task(tool_context):
-            normalized_keys = _normalize_hotkeys(keys)
+            effective_keys = _rewrite_current_browser_hotkeys(keys)
+            normalized_keys = _normalize_hotkeys(effective_keys)
             if normalized_keys not in _CURRENT_BROWSER_ALLOWED_HOTKEYS:
                 raise PermissionError(
                     "Only focus-address-bar or submit hotkeys are allowed for "
@@ -564,7 +568,7 @@ async def guarded_desktop_control_hotkey(
         _check_capability_in_plan(tool_context, "desktop.control.hotkey")
 
     from src.tools.desktop import desktop_control_hotkey
-    return await desktop_control_hotkey(keys=keys)
+    return await desktop_control_hotkey(keys=effective_keys)
 
 
 async def guarded_desktop_control_scroll(
