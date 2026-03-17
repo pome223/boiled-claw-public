@@ -501,7 +501,7 @@ curl http://127.0.0.1:18789/subagents/{session_id}
 ```bash
 # SSE モード（docker-compose.yml に定義済み）
 docker compose up -d boiled-claw-mcp-sample
-# → http://localhost:8765/sse でアクセス可能
+# → Docker ネットワーク内で http://boiled-claw-mcp-sample:8765/sse として利用
 ```
 
 Docker ネットワーク内からは `http://boiled-claw-mcp-sample:8765/sse` で接続できます。

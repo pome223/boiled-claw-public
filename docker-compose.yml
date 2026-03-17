@@ -39,8 +39,8 @@ services:
     container_name: boiled-claw-mcp-sample
     env_file:
       - .env
-    ports:
-      - "8765:8765"
+    expose:
+      - "8765"
     entrypoint: ["python", "-m", "src.mcp_servers.sample_server", "--sse", "--host", "0.0.0.0", "--port", "8765"]
     restart: unless-stopped
     healthcheck:
