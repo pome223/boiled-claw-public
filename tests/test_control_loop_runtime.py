@@ -448,6 +448,42 @@ async def test_guarded_desktop_control_type_passes_selector(monkeypatch):
     assert seen["identifier"] == "search-field"
 
 
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_type_rewrites_current_browser_search_to_url(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザをつかって午後の東京の花粉を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.type"}]
+            },
+            "temp:current_browser_address_bar_focused": True,
+        }
+    )
+    seen = {}
+
+    async def _fake_type(**kwargs):
+        seen.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_control_type", _fake_type)
+
+    result = await guarded_tools_module.guarded_desktop_control_type(
+        text="午後の東京の花粉",
+        window_id="w1",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert (
+        seen["text"]
+        == "https://www.google.com/search?q=%E5%8D%88%E5%BE%8C%E3%81%AE%E6%9D%B1%E4%BA%AC%E3%81%AE%E8%8A%B1%E7%B2%89"
+    )
+    assert tool_context.state["temp:current_browser_address_bar_focused"] is False
+
+
 def test_policy_judge_requires_human_for_desktop_control():
     callback_context = SimpleNamespace(
         state={

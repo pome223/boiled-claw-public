@@ -10,6 +10,7 @@ Executor agent にアタッチし、approved plan の範囲外の実行を防ぐ
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote_plus
 
 from google.adk.tools import ToolContext
 
@@ -79,6 +80,21 @@ _KNOWN_BROWSER_APPS = {
     "Microsoft Edge",
 }
 _PRESERVE_CONTROL_UI_MARKER = "preserve that tab and open a new tab in the same browser window"
+_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY = "temp:current_browser_address_bar_focused"
+_CURRENT_BROWSER_SEARCH_KEYWORDS = {
+    "search",
+    "weather",
+    "pollen",
+    "latest",
+    "latest news",
+    "forecast",
+    "research",
+    "調べ",
+    "検索",
+    "花粉",
+    "天気",
+    "最新",
+}
 
 
 def _check_approval(tool_context: ToolContext, capability: str) -> None:
@@ -162,6 +178,39 @@ def _allows_current_browser_new_tab(tool_context: ToolContext | None) -> bool:
         _PRESERVE_CONTROL_UI_MARKER in str(item).lower()
         for item in constraints
     )
+
+
+def _current_browser_goal_text(tool_context: ToolContext | None) -> str:
+    if tool_context is None:
+        return ""
+    goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
+    return goal if isinstance(goal, str) else ""
+
+
+def _is_current_browser_search_task(tool_context: ToolContext | None) -> bool:
+    goal = _current_browser_goal_text(tool_context).lower()
+    return any(keyword in goal for keyword in _CURRENT_BROWSER_SEARCH_KEYWORDS)
+
+
+def _looks_like_url(text: str) -> bool:
+    lowered = text.lower()
+    return lowered.startswith(("http://", "https://")) or "://" in lowered
+
+
+def _rewrite_current_browser_address_bar_text(
+    text: str,
+    tool_context: ToolContext | None,
+) -> str:
+    if tool_context is None:
+        return text
+    focused = bool(tool_context.state.get(_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY))
+    tool_context.state[_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY] = False
+    if not focused or not _is_current_browser_search_task(tool_context):
+        return text
+    stripped = text.strip()
+    if not stripped or _looks_like_url(stripped):
+        return text
+    return f"https://www.google.com/search?q={quote_plus(stripped)}"
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -499,6 +548,8 @@ async def guarded_desktop_control_type(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            text = _rewrite_current_browser_address_bar_text(text, tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -614,6 +665,13 @@ async def guarded_desktop_control_hotkey(
                 raise PermissionError(
                     "Only focus-address-bar or submit hotkeys are allowed for "
                     f"current-browser tasks. attempted={normalized_keys}"
+                )
+            if (
+                normalized_keys in _CURRENT_BROWSER_ALLOWED_HOTKEYS
+                or normalized_keys in _CURRENT_BROWSER_NEW_TAB_HOTKEYS
+            ):
+                tool_context.state[_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY] = (
+                    normalized_keys != ("enter",)
                 )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":

@@ -124,6 +124,9 @@ success. Include the submit action (for example, Enter or clicking a search
 button) and at least one follow-up read or verification step that confirms the
 page content after submission. Opening the address bar and typing a query is
 not sufficient.
+When entering a search into the browser address bar, prefer a fully formed
+search URL over raw non-ASCII text so the query is submitted reliably even
+with IME or browser suggestions active.
 For current-browser tasks, prefer Cmd/Ctrl+L to focus the address bar. Do NOT
 use Cmd/Ctrl+K or Cmd/Ctrl+E because browser extensions or side panels may
 intercept those shortcuts.
