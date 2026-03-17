@@ -617,9 +617,45 @@ async def test_guarded_desktop_control_launch_app_rejects_current_browser_task()
 
     with pytest.raises(PermissionError, match="not allowed for current-browser tasks"):
         await guarded_tools_module.guarded_desktop_control_launch_app(
-            app_name="Google Chrome",
+            app_name="TextEdit",
             tool_context=tool_context,
         )
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_launch_app_redirects_to_focus_for_current_browser(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って明日の天気を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.launch_app"}]
+            },
+        }
+    )
+
+    async def fake_focus_window(
+        app_name: str | None = None,
+        window_id: str | None = None,
+        title: str | None = None,
+        tool_context=None,
+    ) -> dict:
+        return {"success": True, "target": {"app_name": app_name, "window_id": window_id, "title": title}}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_focus_window",
+        fake_focus_window,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_launch_app(
+        app_name="Google Chrome",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["target"]["app_name"] == "Google Chrome"
 
 
 @pytest.mark.asyncio

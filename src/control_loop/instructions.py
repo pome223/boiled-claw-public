@@ -145,6 +145,9 @@ do NOT call any tools. Return a JSON error immediately.
 
 Execute each step in the plan's "steps" array in dependency order.
 For each step, call the appropriate tool and collect its output.
+When the task refers to the current browser/tab/page/window, never launch a
+new browser application. If you need to bring the browser to the foreground,
+focus the existing browser window instead.
 
 Return ONLY a JSON object:
 {{

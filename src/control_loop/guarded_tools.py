@@ -65,6 +65,15 @@ _CURRENT_BROWSER_HOTKEY_REWRITES = {
     ("e", "meta"): ["meta", "l"],
     ("k", "meta"): ["meta", "l"],
 }
+_KNOWN_BROWSER_APPS = {
+    "Google Chrome",
+    "Chromium",
+    "Safari",
+    "Arc",
+    "Firefox",
+    "Brave Browser",
+    "Microsoft Edge",
+}
 
 
 def _check_approval(tool_context: ToolContext, capability: str) -> None:
@@ -502,9 +511,32 @@ async def guarded_desktop_control_launch_app(
 ) -> dict:
     if tool_context is not None:
         if _is_current_browser_task(tool_context):
+            from src.tools.desktop import (
+                desktop_control_focus_window,
+                desktop_view_windows,
+            )
+
+            candidate_app = app_name.strip() if isinstance(app_name, str) else ""
+            if candidate_app and candidate_app not in _KNOWN_BROWSER_APPS:
+                raise PermissionError(
+                    "desktop.control.launch_app is not allowed for current-browser tasks. "
+                    "Use the existing frontmost browser window instead."
+                )
+
+            if not candidate_app:
+                windows = await desktop_view_windows(include_minimized=False)
+                for window in windows.get("windows", []):
+                    window_app = str(window.get("app_name", "")).strip()
+                    if window_app in _KNOWN_BROWSER_APPS:
+                        candidate_app = window_app
+                        break
+
+            if candidate_app:
+                return await desktop_control_focus_window(app_name=candidate_app)
+
             raise PermissionError(
                 "desktop.control.launch_app is not allowed for current-browser tasks. "
-                "Use the existing frontmost browser window instead."
+                "No existing browser window could be identified."
             )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
