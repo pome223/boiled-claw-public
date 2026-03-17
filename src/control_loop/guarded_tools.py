@@ -44,9 +44,18 @@ _IMPLICIT_PLAN_CAPABILITIES = {
     },
 }
 _CURRENT_BROWSER_ALLOWED_HOTKEYS = {
+    ("control", "e"),
+    ("control", "k"),
     ("control", "l"),
+    ("down",),
     ("enter",),
-    ("meta", "l"),
+    ("left",),
+    ("e", "meta"),
+    ("k", "meta"),
+    ("l", "meta"),
+    ("right",),
+    ("tab",),
+    ("up",),
 }
 _HOTKEY_ALIASES = {
     "arrowdown": "down",
@@ -544,7 +553,7 @@ async def guarded_desktop_control_hotkey(
             if normalized_keys not in _CURRENT_BROWSER_ALLOWED_HOTKEYS:
                 raise PermissionError(
                     "Only focus-address-bar or submit hotkeys are allowed for "
-                    "current-browser tasks."
+                    f"current-browser tasks. attempted={normalized_keys}"
                 )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":

@@ -642,6 +642,36 @@ async def test_guarded_desktop_control_hotkey_rejects_new_tab_for_current_browse
 
 
 @pytest.mark.asyncio
+async def test_guarded_desktop_control_hotkey_allows_browser_search_shortcuts_for_current_browser(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って午後の東京の花粉を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.hotkey"}]
+            },
+        }
+    )
+
+    async def fake_hotkey(keys: list[str]) -> dict:
+        return {"ok": True, "keys": keys}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_hotkey",
+        fake_hotkey,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_hotkey(
+        keys=["cmd", "k"],
+        tool_context=tool_context,
+    )
+
+    assert result == {"ok": True, "keys": ["cmd", "k"]}
+
+
+@pytest.mark.asyncio
 async def test_control_loop_resumes_after_human_approval(monkeypatch, tmp_path):
     session_service = InMemorySessionService()
     candidate_store = CandidateStore(
