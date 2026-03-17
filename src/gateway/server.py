@@ -73,6 +73,11 @@ _FRESHNESS_KEYWORDS = {
 
 _BROWSER_TOOL_NAMES = {
     "control_ui_chat_send_message",
+    "current_tab_info",
+    "current_tab_navigate",
+    "current_tab_click",
+    "current_tab_fill",
+    "current_tab_extract_text",
     "browser_navigate",
     "browser_click",
     "browser_fill",
@@ -86,14 +91,23 @@ _BROWSER_TOOL_NAMES = {
     "host.browser.extract_text",
     "host.browser.screenshot",
     "host.control_ui_chat.send_message",
+    "host.current_tab.info",
+    "host.current_tab.navigate",
+    "host.current_tab.click",
+    "host.current_tab.fill",
+    "host.current_tab.extract_text",
 }
 _BROWSER_INFRA_ERROR_FRAGMENTS = (
     "playwright is not installed",
     "host bridge is not enabled",
+    "requires host bridge",
     "host_bridge_enabled is true but host_bridge_url is not set",
     "host bridge tool call failed",
     "host bridge returned empty tool content",
     "host bridge returned non-json tool content",
+    "current tab extension bridge",
+    "current tab extension relay",
+    "current tab extension is not connected",
 )
 _USER_BROWSER_REQUIRED_CAPABILITIES = {
     "desktop.view.frontmost_app",
@@ -465,7 +479,14 @@ class GatewayServer:
             (item.error for item in result.tool_failures if item.error),
             "required runtime is unavailable",
         )
-        if specialist_name in {"browser_automator", "control_ui_chat_operator"} and result.infrastructure_blocked:
+        if specialist_name in {"browser_automator", "control_ui_chat_operator", "current_tab_operator"} and result.infrastructure_blocked:
+            if specialist_name == "current_tab_operator":
+                return (
+                    "現在のブラウザ/タブ操作は実行できませんでした。\n"
+                    f"- 原因: {first_error}\n"
+                    "- 現在のリクエストでは、desktop 制御や managed browser へ自動フォールバックしません。\n"
+                    "- 対応: Host Bridge を起動し、Chrome に Current Tab Adapter extension を読み込んでください。"
+                )
             return (
                 "ブラウザ操作は実行できませんでした。\n"
                 f"- 原因: {first_error}\n"

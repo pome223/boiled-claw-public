@@ -520,9 +520,13 @@ def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
 
             ws.send_json({"event": "chat.send", "text": "NVIDIA を検索"})
 
-            tool_start = ws.receive_json()
-            tool_result = ws.receive_json()
-            done = ws.receive_json()
+            seen_events = []
+            while len(seen_events) < 3:
+                event = ws.receive_json()
+                if event["event"] in {"tool.start", "tool.result", "chat.done"}:
+                    seen_events.append(event)
+
+            tool_start, tool_result, done = seen_events
 
             assert tool_start["event"] == "tool.start"
             assert tool_start["tool_name"] == "web_search"

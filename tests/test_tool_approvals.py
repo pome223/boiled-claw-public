@@ -15,6 +15,7 @@ from src.desktop import (
 from src.security.policy import SecurityPolicy
 from src.security.tool_policy import ToolPolicyEngine
 from src.tools import browser as browser_module
+from src.tools import current_tab as current_tab_module
 from src.tools import desktop as desktop_module
 from src.tools import file_manager as file_module
 from src.tools import shell as shell_module
@@ -685,6 +686,106 @@ async def test_browser_press_uses_host_bridge_when_enabled(monkeypatch):
     assert seen["press_approval_token"]
     assert emitted[0][1]["tool_name"] == "host.browser.press"
     assert emitted[1][1]["tool_name"] == "host.browser.press"
+
+
+@pytest.mark.asyncio
+async def test_current_tab_info_uses_host_bridge_when_enabled(monkeypatch):
+    emitted = []
+
+    class FakeClient:
+        async def current_tab_info(self, request):
+            from src.bridges.host_bridge_schema import HostCurrentTabInfoResult
+
+            return HostCurrentTabInfoResult(
+                ok=True,
+                tab_id=21,
+                window_id=4,
+                url="https://example.com",
+                title="Example",
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    monkeypatch.setattr(
+        current_tab_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(current_tab_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await current_tab_module.current_tab_info(tool_context=tool_context)
+
+    assert result["success"] is True
+    assert result["tab_id"] == 21
+    assert emitted[0][1]["tool_name"] == "host.current_tab.info"
+    assert emitted[1][1]["tool_name"] == "host.current_tab.info"
+
+
+@pytest.mark.asyncio
+async def test_current_tab_navigate_uses_host_bridge_when_enabled(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+    emitted = []
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def current_tab_navigate(self, request):
+            seen["approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostCurrentTabNavigateResult
+
+            return HostCurrentTabNavigateResult(
+                ok=True,
+                tab_id=21,
+                window_id=4,
+                url=request.url,
+                title="Search",
+            )
+
+    async def _emit_start(**payload):
+        emitted.append(("start", payload))
+
+    async def _emit_result(**payload):
+        emitted.append(("result", payload))
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(current_tab_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        current_tab_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(current_tab_module, "get_host_bridge_client", lambda: FakeClient())
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_start", _emit_start)
+    monkeypatch.setattr(bridge_exec_module, "emit_tool_result", _emit_result)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await current_tab_module.current_tab_navigate(
+        "https://www.google.com/search?q=tokyo+pollen",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["title"] == "Search"
+    assert seen["approval_token"]
+    assert emitted[0][1]["tool_name"] == "host.current_tab.navigate"
+    assert emitted[1][1]["tool_name"] == "host.current_tab.navigate"
 
 
 @pytest.mark.asyncio

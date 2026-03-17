@@ -75,6 +75,24 @@ def test_decision_from_payload_forces_control_loop_for_current_browser_spreadshe
     assert decision.specialist is None
 
 
+def test_decision_from_payload_routes_current_browser_research_to_current_tab_operator():
+    decision = decision_from_payload(
+        {
+            "target": "control_loop",
+            "specialist": None,
+            "handoff_mode": "direct",
+            "reason": "multi-step browser task",
+            "confidence": 0.9,
+            "dynamic_agent": {},
+        },
+        fallback_message="このブラウザをつかって午後の東京の花粉を調べて",
+    )
+
+    assert decision.target == "specialist"
+    assert decision.specialist == "current_tab_operator"
+    assert decision.handoff_mode == "direct"
+
+
 def test_decision_from_payload_keeps_browser_only_flow_on_specialist():
     decision = decision_from_payload(
         {

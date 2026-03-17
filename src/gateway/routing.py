@@ -9,6 +9,7 @@ VALID_SPECIALISTS = {
     "web_researcher",
     "file_manager",
     "browser_automator",
+    "current_tab_operator",
     "control_ui_chat_operator",
     "desktop_operator",
     "system_operator",
@@ -36,6 +37,8 @@ _RESEARCH_KEYWORDS = {
     "gtc",
     "report",
     "research",
+    "検索",
+    "search",
 }
 
 _LONGFORM_KEYWORDS = {
@@ -460,6 +463,15 @@ def decision_from_payload(
     *,
     fallback_message: str,
 ) -> RoutingDecision:
+    if _is_current_tab_web_flow(fallback_message):
+        return RoutingDecision(
+            target="specialist",
+            specialist="current_tab_operator",
+            handoff_mode="direct",
+            reason="current browser web request should stay on the current-tab operator",
+            confidence=0.93,
+        )
+
     if _requires_current_browser_control_loop(fallback_message):
         return RoutingDecision(
             target="control_loop",
@@ -513,6 +525,21 @@ def _requires_current_browser_control_loop(text: str) -> bool:
     has_longform = _contains_any(normalized, _LONGFORM_KEYWORDS)
 
     return has_spreadsheet or has_browser or has_desktop or has_research or has_longform
+
+
+def _is_current_tab_web_flow(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized or not targets_user_browser(normalized):
+        return False
+
+    if _is_control_ui_chat_flow(normalized):
+        return False
+
+    has_spreadsheet = _contains_any(normalized, _SPREADSHEET_KEYWORDS)
+    has_desktop = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
+    has_research = _contains_any(normalized, _RESEARCH_KEYWORDS | _LONGFORM_KEYWORDS)
+    has_browser = _contains_any(normalized, _BROWSER_KEYWORDS | _BROWSER_INTERACTION_KEYWORDS)
+    return not has_spreadsheet and not has_desktop and (has_research or has_browser)
 
 
 def _is_browser_only_flow(text: str) -> bool:

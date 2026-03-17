@@ -21,6 +21,7 @@ Available specialists:
 - web_researcher
 - file_manager
 - browser_automator
+- current_tab_operator
 - control_ui_chat_operator
 - desktop_operator
 - system_operator
@@ -37,6 +38,7 @@ Special cases:
 - shell / terminal / docker / git tasks should prefer specialist=system_operator unless they clearly require control_loop.
 - web research / latest news / current events should prefer specialist=web_researcher with handoff_mode="preflight_then_root".
 - browser extraction / page navigation / scraping should prefer specialist=browser_automator with handoff_mode="preflight_then_root".
+- requests that explicitly say "this browser / this tab / current browser" and stay within ordinary web navigation or reading should prefer specialist=current_tab_operator with handoff_mode="direct".
 - browser form input / click / submit tasks that stay within the browser should still prefer specialist=browser_automator rather than control_loop.
 - requests targeting the boiled-claw Control UI chat page (for example localhost:18789/chat) should prefer specialist=control_ui_chat_operator with handoff_mode="direct".
 - desktop state inspection should prefer specialist=desktop_operator with handoff_mode="preflight_then_root".
@@ -48,7 +50,7 @@ Special cases:
 Return ONLY this JSON shape:
 {
   "target": "root_agent | control_loop | specialist | dynamic_agent",
-  "specialist": "web_researcher | file_manager | browser_automator | control_ui_chat_operator | desktop_operator | system_operator | memory_keeper | null",
+  "specialist": "web_researcher | file_manager | browser_automator | current_tab_operator | control_ui_chat_operator | desktop_operator | system_operator | memory_keeper | null",
   "handoff_mode": "direct | preflight_then_root",
   "reason": "short explanation",
   "confidence": 0.0,
