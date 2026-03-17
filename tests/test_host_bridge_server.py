@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import src.config.settings as settings_module
 from src.mcp_servers import host_bridge_server as server_module
 
 
@@ -76,6 +77,23 @@ class TestHostBridgeTools:
         assert "host.current_tab.click" in text
         assert "host.current_tab.fill" in text
         assert "host.current_tab.extract_text" in text
+
+    def test_create_server_blocks_remote_bind_by_default(self, monkeypatch):
+        from src.mcp_servers.host_bridge_server import create_server
+
+        monkeypatch.delenv("BRIDGE_ALLOW_REMOTE_BIND", raising=False)
+        settings_module.reset_settings()
+        with pytest.raises(ValueError):
+            create_server(host="0.0.0.0")
+
+    def test_create_server_allows_remote_bind_when_enabled(self, monkeypatch):
+        from src.mcp_servers.host_bridge_server import create_server
+
+        monkeypatch.setenv("BRIDGE_ALLOW_REMOTE_BIND", "true")
+        settings_module.reset_settings()
+        mcp = create_server(host="0.0.0.0")
+        assert mcp.settings.host == "0.0.0.0"
+        assert mcp.settings.transport_security.enable_dns_rebinding_protection is False
 
     @pytest.mark.asyncio
     async def test_host_shell_run_success(self, mcp):

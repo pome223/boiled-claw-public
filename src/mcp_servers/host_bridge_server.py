@@ -25,6 +25,7 @@ from src.browser.current_tab_bridge import (
     current_tab_bridge_enabled,
     get_current_tab_extension_bridge,
 )
+from src.config.settings import get_settings
 from src.bridges.host_bridge_schema import (
     BridgePingResult,
     CapabilityDescriptor,
@@ -63,6 +64,7 @@ from src.bridges.host_bridge_schema import (
     HostShellRunResult,
 )
 from src.security.policy import get_security_policy
+from src.security.network import enforce_loopback_bind, is_loopback_host
 from src.tools import browser as browser_tools
 from src.tools import control_ui_chat as control_ui_chat_tools
 
@@ -433,13 +435,29 @@ def _list_host_files(request: HostFileListRequest) -> HostFileListResult:
 def create_server(host: str = "127.0.0.1", port: int = 8766):
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
+    settings = get_settings()
+
+    enforce_loopback_bind(
+        host,
+        service_name="Host Bridge",
+        allow_remote_bind=settings.bridge_allow_remote_bind,
+    )
+
+    if is_loopback_host(host):
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+        )
+    else:
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
 
     mcp = FastMCP("host-bridge")
     mcp.settings.host = host
     mcp.settings.port = port
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
-    )
+    mcp.settings.transport_security = transport_security
 
     transport_hint = "sse" if host != "stdio" else "stdio"
 

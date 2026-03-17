@@ -3,7 +3,6 @@ import socket
 import subprocess
 import sys
 import time
-import urllib.request
 from pathlib import Path
 
 import pytest
@@ -60,10 +59,9 @@ def host_bridge_server(tmp_path):
             last_error = proc.stderr.read() if proc.stderr else ""
             break
         try:
-            with urllib.request.urlopen(url, timeout=1) as response:
-                if response.status == 200:
-                    ready = True
-                    break
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                ready = True
+                break
         except Exception as exc:
             last_error = str(exc)
         time.sleep(0.2)

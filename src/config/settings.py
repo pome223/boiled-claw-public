@@ -79,6 +79,12 @@ class Settings(BaseSettings):
         description="Allow browser automation to access localhost / loopback URLs",
     )
 
+    # Host / Desktop Bridge settings
+    bridge_allow_remote_bind: bool = Field(
+        default=False,
+        description="Allow bridge services to bind to non-loopback addresses",
+    )
+
     # Host Bridge settings
     host_bridge_enabled: bool = Field(default=False, description="Enable Host Bridge execution")
     host_bridge_url: Optional[str] = Field(
@@ -106,6 +112,10 @@ class Settings(BaseSettings):
     current_tab_bridge_port: int = Field(
         default=8768,
         description="Bind port for the current-tab extension relay WebSocket server",
+    )
+    current_tab_bridge_token: Optional[str] = Field(
+        default=None,
+        description="Optional shared token required by the Chrome Current Tab relay",
     )
 
     # Desktop Bridge settings

@@ -6,22 +6,63 @@ import asyncio
 import json
 import uuid
 from typing import Any, Optional
+from urllib.parse import parse_qs, urlparse
 
 import websockets
 
 from src.config.settings import get_settings
+from src.security.network import enforce_loopback_bind
 
 
 class CurrentTabBridgeError(RuntimeError):
     """Raised when the current-tab extension bridge is unavailable or fails."""
 
 
+HELLO_TIMEOUT_SECONDS = 5.0
+ALLOWED_EXTENSION_ORIGIN_PREFIX = "chrome-extension://"
+
+
+def _origin_is_allowed(origin: str | None) -> bool:
+    normalized = str(origin or "").strip().lower()
+    return normalized.startswith(ALLOWED_EXTENSION_ORIGIN_PREFIX)
+
+
+def _extract_origin(websocket: Any) -> str:
+    request = getattr(websocket, "request", None)
+    headers = getattr(request, "headers", None)
+    if headers is not None:
+        return str(headers.get("Origin") or "")
+    request_headers = getattr(websocket, "request_headers", None)
+    if request_headers is not None:
+        return str(request_headers.get("Origin") or "")
+    return ""
+
+
+def _extract_request_token(websocket: Any) -> str:
+    request = getattr(websocket, "request", None)
+    path = str(getattr(request, "path", "") or getattr(websocket, "path", "") or "")
+    if not path:
+        return ""
+    query = urlparse(path).query
+    values = parse_qs(query).get("token") or []
+    return str(values[0]).strip() if values else ""
+
+
 class CurrentTabExtensionBridge:
     """WebSocket relay that accepts a single Chrome extension connection."""
 
-    def __init__(self, *, host: str, port: int) -> None:
+    def __init__(
+        self,
+        *,
+        host: str,
+        port: int,
+        shared_token: str | None = None,
+        allow_remote_bind: bool = False,
+    ) -> None:
         self.host = host
         self.port = port
+        self.shared_token = str(shared_token or "").strip()
+        self.allow_remote_bind = allow_remote_bind
         self._server: Any = None
         self._server_lock = asyncio.Lock()
         self._client_lock = asyncio.Lock()
@@ -41,6 +82,11 @@ class CurrentTabExtensionBridge:
         async with self._server_lock:
             if self._server is not None:
                 return
+            enforce_loopback_bind(
+                self.host,
+                service_name="Current Tab relay",
+                allow_remote_bind=self.allow_remote_bind,
+            )
             self._server = await websockets.serve(
                 self._handle_connection,
                 self.host,
@@ -50,6 +96,12 @@ class CurrentTabExtensionBridge:
             )
 
     async def _handle_connection(self, websocket: Any) -> None:
+        try:
+            await self._authenticate_connection(websocket)
+        except CurrentTabBridgeError as exc:
+            await websocket.close(code=1008, reason=str(exc))
+            return
+
         async with self._client_lock:
             previous = self._client
             self._client = websocket
@@ -69,6 +121,28 @@ class CurrentTabExtensionBridge:
                 if self._client is websocket:
                     self._client = None
             self._fail_pending("Current Tab extension disconnected")
+
+    async def _authenticate_connection(self, websocket: Any) -> None:
+        origin = _extract_origin(websocket)
+        if not _origin_is_allowed(origin):
+            raise CurrentTabBridgeError("Current Tab connection rejected: origin not allowed")
+
+        try:
+            raw_hello = await asyncio.wait_for(websocket.recv(), timeout=HELLO_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError as exc:
+            raise CurrentTabBridgeError("Current Tab connection rejected: hello timed out") from exc
+
+        try:
+            hello = json.loads(raw_hello)
+        except json.JSONDecodeError as exc:
+            raise CurrentTabBridgeError("Current Tab connection rejected: invalid hello payload") from exc
+
+        if str(hello.get("type") or "").strip().lower() != "hello":
+            raise CurrentTabBridgeError("Current Tab connection rejected: hello message required")
+
+        provided_token = str(hello.get("token") or _extract_request_token(websocket) or "").strip()
+        if self.shared_token and provided_token != self.shared_token:
+            raise CurrentTabBridgeError("Current Tab connection rejected: invalid relay token")
 
     async def _handle_message(self, message: dict[str, Any]) -> None:
         message_type = str(message.get("type") or "").strip().lower()
@@ -151,5 +225,7 @@ def get_current_tab_extension_bridge() -> CurrentTabExtensionBridge:
         _current_tab_bridge = CurrentTabExtensionBridge(
             host=settings.current_tab_bridge_host,
             port=settings.current_tab_bridge_port,
+            shared_token=settings.current_tab_bridge_token,
+            allow_remote_bind=settings.bridge_allow_remote_bind,
         )
     return _current_tab_bridge
