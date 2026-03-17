@@ -199,6 +199,7 @@ Chrome の active tab / `chrome.scripting` をつなぐ最小 adapter です。
 CURRENT_TAB_BRIDGE_ENABLED=true
 CURRENT_TAB_BRIDGE_HOST=127.0.0.1
 CURRENT_TAB_BRIDGE_PORT=8768
+CURRENT_TAB_BRIDGE_TOKEN=change-me
 ```
 
 Chrome extension の読み込み:
@@ -206,6 +207,7 @@ Chrome extension の読み込み:
 1. Chrome で `chrome://extensions` を開く
 2. `Developer mode` を有効化
 3. `Load unpacked` で `chrome_extension/current_tab_adapter` を選ぶ
+4. 拡張機能の `Options` で relay URL と token を設定する
 
 この extension は relay に再接続し続けるので、Host Bridge を先に起動しておくのが簡単です。
 現在の vertical slice では次の操作をサポートしています。
@@ -218,6 +220,8 @@ Chrome extension の読み込み:
 
 まずは `このブラウザを使って ... を調べて` のような current-tab research flow を、
 desktop control loop ではなく browser-native に通すための最小実装です。
+bridge は既定で loopback bind しか許可しません。Host/Desktop Bridge では DNS rebinding protection も有効です。
+`0.0.0.0` などの bind を許す必要がある場合だけ `BRIDGE_ALLOW_REMOTE_BIND=true` を明示してください。
 
 ### 6. Desktop Bridge
 

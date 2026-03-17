@@ -5,7 +5,8 @@
   "description": "Relays the active Chrome tab to boiled-claw over a local WebSocket.",
   "permissions": [
     "tabs",
-    "scripting"
+    "scripting",
+    "storage"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -13,5 +14,6 @@
   "background": {
     "service_worker": "background.js"
   },
+  "options_page": "options.html",
   "minimum_chrome_version": "116"
 }

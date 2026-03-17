@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <title>boiled-claw Current Tab Adapter</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 24px;
+        max-width: 720px;
+        color: #0f172a;
+      }
+
+      h1 {
+        font-size: 20px;
+        margin-bottom: 16px;
+      }
+
+      label {
+        display: block;
+        font-weight: 600;
+        margin-top: 16px;
+      }
+
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 10px 12px;
+        margin-top: 8px;
+        border: 1px solid #cbd5e1;
+        border-radius: 8px;
+        font-size: 14px;
+      }
+
+      button {
+        margin-top: 20px;
+        padding: 10px 16px;
+        border: 0;
+        border-radius: 999px;
+        background: #0f172a;
+        color: #fff;
+        cursor: pointer;
+      }
+
+      p {
+        color: #475569;
+        line-height: 1.5;
+      }
+
+      #status {
+        margin-top: 16px;
+        font-weight: 600;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>boiled-claw Current Tab Adapter</h1>
+    <p>Use a loopback relay URL and an optional shared token. Leave the token blank only if you intentionally want origin-only protection during local development.</p>
+
+    <label for="relay-url">Relay URL</label>
+    <input id="relay-url" type="url" spellcheck="false" placeholder="ws://127.0.0.1:8768">
+
+    <label for="relay-token">Relay Token</label>
+    <input id="relay-token" type="password" spellcheck="false" placeholder="Optional shared secret">
+
+    <button id="save" type="button">Save</button>
+    <div id="status" aria-live="polite"></div>
+
+    <script src="options.js"></script>
+  </body>
+</html>

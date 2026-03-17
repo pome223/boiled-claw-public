@@ -1,8 +1,25 @@
-const RELAY_URL = "ws://127.0.0.1:8768";
+const DEFAULT_RELAY_URL = "ws://127.0.0.1:8768";
+const DEFAULT_RELAY_TOKEN = "";
 const RECONNECT_DELAY_MS = 2000;
 
 let socket = null;
 let reconnectTimer = null;
+let relayConfig = {
+  relayUrl: DEFAULT_RELAY_URL,
+  relayToken: DEFAULT_RELAY_TOKEN
+};
+
+async function loadRelayConfig() {
+  const stored = await chrome.storage.local.get({
+    relayUrl: DEFAULT_RELAY_URL,
+    relayToken: DEFAULT_RELAY_TOKEN
+  });
+  relayConfig = {
+    relayUrl: String(stored.relayUrl || DEFAULT_RELAY_URL),
+    relayToken: String(stored.relayToken || DEFAULT_RELAY_TOKEN)
+  };
+  return relayConfig;
+}
 
 function scheduleReconnect() {
   if (reconnectTimer !== null) {
@@ -168,18 +185,20 @@ function sendMessage(payload) {
   }
 }
 
-function connectRelay() {
+async function connectRelay() {
   if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
     return;
   }
 
-  socket = new WebSocket(RELAY_URL);
+  const config = await loadRelayConfig();
+  socket = new WebSocket(config.relayUrl);
 
   socket.addEventListener("open", () => {
     sendMessage({
       type: "hello",
       extension: "boiled-claw-current-tab-adapter",
-      version: "0.1.0"
+      version: "0.1.0",
+      token: config.relayToken || ""
     });
   });
 
@@ -230,6 +249,20 @@ chrome.runtime.onStartup.addListener(() => {
 
 chrome.runtime.onInstalled.addListener(() => {
   connectRelay();
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== "local") {
+    return;
+  }
+  if (!changes.relayUrl && !changes.relayToken) {
+    return;
+  }
+  if (socket) {
+    socket.close();
+  } else {
+    connectRelay();
+  }
 });
 
 connectRelay();
