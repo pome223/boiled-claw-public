@@ -209,6 +209,11 @@ Chrome extension の読み込み:
 3. `Load unpacked` で `chrome_extension/current_tab_adapter` を選ぶ
 4. 拡張機能の `Options` で relay URL と token を設定する
 
+この extension は active tab に対して `chrome.scripting` を実行するため
+`<all_urls>` の host permission を持ちます。これは「どのサイトでも user が今見ているタブ」
+を対象に selector click / fill / text extraction を行うために必要です。通信先自体は
+local relay のみで、loopback bind・origin check・optional token によって絞っています。
+
 この extension は relay に再接続し続けるので、Host Bridge を先に起動しておくのが簡単です。
 現在の vertical slice では次の操作をサポートしています。
 
@@ -244,6 +249,11 @@ desktop request の routing は次のように分かれます。
 ```bash
 pip install -e '.[desktop]'
 ```
+
+desktop extra は `pyobjc-framework-Cocoa` を使います。PyObjC の現行構成では
+AppKit / Foundation をこの umbrella package 経由で解決する前提です。
+既存環境で個別の `pyobjc-framework-AppKit` を pin している場合は、
+desktop extra の再インストールを推奨します。
 
 ```bash
 python -m src.main desktop-bridge --host 127.0.0.1 --port 8767

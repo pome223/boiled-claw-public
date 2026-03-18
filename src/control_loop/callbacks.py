@@ -16,11 +16,15 @@ import json
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import AbstractSet, Optional
 
 from google.adk.agents.callback_context import CallbackContext
 from src.control_loop.constants import DEFAULT_MAX_REPAIR_ATTEMPTS
 from src.runtime.state_keys import StateKeys
+from src.runtime.task_keywords import (
+    CURRENT_BROWSER_KEYWORDS,
+    SPREADSHEET_KEYWORDS,
+)
 from src.tools.context import resolve_callback_context
 
 logger = logging.getLogger(__name__)
@@ -46,33 +50,6 @@ _HUMAN_REQUIRED_CAPS: set[str] = {
 
 # 常に拒否する capability
 _ALWAYS_DENIED_CAPS: set[str] = {"admin"}
-
-_CURRENT_BROWSER_KEYWORDS: set[str] = {
-    "このブラウザ",
-    "今のブラウザ",
-    "いまのブラウザ",
-    "current browser",
-    "existing browser",
-    "このタブ",
-    "今のタブ",
-    "このページ",
-    "今のページ",
-    "このウィンドウ",
-}
-
-_SPREADSHEET_KEYWORDS: set[str] = {
-    "spreadsheet",
-    "spread sheet",
-    "sheet",
-    "google sheet",
-    "google sheets",
-    "スプレッド",
-    "すぷれっど",
-    "スプシ",
-    "スプレッドシート",
-    "スプレッドsーと",
-    "スプレッドシーート",
-}
 
 _TEXT_ENTRY_KEYWORDS: set[str] = {
     "入力",
@@ -110,16 +87,16 @@ _DESKTOP_MODE_BY_CAPABILITY: dict[str, str] = {
 }
 
 
-def _contains_any(text: str, keywords: set[str]) -> bool:
+def _contains_any(text: str, keywords: AbstractSet[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
 def _targets_current_browser(goal: str) -> bool:
-    return _contains_any(goal, _CURRENT_BROWSER_KEYWORDS)
+    return _contains_any(goal, CURRENT_BROWSER_KEYWORDS)
 
 
 def _needs_text_entry(goal: str) -> bool:
-    return _contains_any(goal, _SPREADSHEET_KEYWORDS | _TEXT_ENTRY_KEYWORDS)
+    return _contains_any(goal, SPREADSHEET_KEYWORDS | _TEXT_ENTRY_KEYWORDS)
 
 
 def _ensure_capability(
@@ -142,8 +119,9 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
         for cap in plan.get("required_capabilities", [])
     ]
     normalized_goal = (goal or plan.get("goal") or "").strip().lower()
+    is_current_browser_goal = _targets_current_browser(normalized_goal)
 
-    if _targets_current_browser(normalized_goal):
+    if is_current_browser_goal:
         required_caps = [
             cap
             for cap in required_caps
@@ -151,7 +129,10 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
         ]
     cap_names = {str(cap.get("name", "")) for cap in required_caps}
 
-    if _targets_current_browser(normalized_goal):
+    if is_current_browser_goal:
+        # Current-browser tasks should reuse the browser the user already has
+        # open, so we remove launch-app and expand the read/focus capabilities
+        # needed to verify and steer that existing window safely.
         has_desktop_browser_plan = bool(
             cap_names
             & {

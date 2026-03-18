@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import AbstractSet, Any
 
+from src.runtime.task_keywords import (
+    CURRENT_BROWSER_KEYWORDS,
+    SPREADSHEET_KEYWORDS,
+)
 
 VALID_TARGETS = {"root_agent", "control_loop", "specialist", "dynamic_agent"}
 VALID_SPECIALISTS = {
@@ -107,43 +111,6 @@ _BROWSER_INTERACTION_KEYWORDS = {
     "質問",
     "会話",
     "話して",
-}
-
-_SPREADSHEET_KEYWORDS = {
-    "スプレッド",
-    "スプレッドシート",
-    "すぷれっど",
-    "googleスプレッドシート",
-    "google sheets",
-    "google sheet",
-    "spreadsheet",
-    "sheet",
-    "シート",
-    "表計算",
-}
-
-_CURRENT_BROWSER_KEYWORDS = {
-    "このブラウザ",
-    "このタブ",
-    "このページ",
-    "このウィンドウ",
-    "私が開いているブラウザ",
-    "今開いているブラウザ",
-    "開いているブラウザ",
-    "今のブラウザ",
-    "現在のブラウザ",
-    "既存のブラウザ",
-    "私のブラウザ",
-    "今開いているタブ",
-    "開いているタブ",
-    "今のタブ",
-    "現在のタブ",
-    "既存のタブ",
-    "今開いているスプレッドシート",
-    "開いているスプレッドシート",
-    "今のスプレッドシート",
-    "現在のスプレッドシート",
-    "既存のスプレッドシート",
 }
 
 _DESKTOP_VIEW_KEYWORDS = {
@@ -340,7 +307,7 @@ def heuristic_decision(message: str) -> RoutingDecision:
     has_desktop_view = _contains_any(normalized, _DESKTOP_VIEW_KEYWORDS)
     has_desktop_control = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS)
     has_desktop_runtime = _contains_any(normalized, _DESKTOP_RUNTIME_KEYWORDS)
-    has_spreadsheet = _contains_any(normalized, _SPREADSHEET_KEYWORDS)
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
     has_file = _contains_any(normalized, _FILE_KEYWORDS)
     has_system = _contains_any(normalized, _SYSTEM_KEYWORDS)
     has_memory = _contains_any(normalized, _MEMORY_KEYWORDS)
@@ -502,7 +469,7 @@ def decision_from_payload(
     return heuristic_decision(fallback_message)
 
 
-def _contains_any(text: str, keywords: set[str]) -> bool:
+def _contains_any(text: str, keywords: AbstractSet[str]) -> bool:
     return any(keyword in text for keyword in keywords)
 
 
@@ -510,7 +477,7 @@ def targets_user_browser(text: str) -> bool:
     normalized = (text or "").strip().lower()
     if not normalized:
         return False
-    return _contains_any(normalized, _CURRENT_BROWSER_KEYWORDS)
+    return _contains_any(normalized, CURRENT_BROWSER_KEYWORDS)
 
 
 def _requires_current_browser_control_loop(text: str) -> bool:
@@ -518,7 +485,7 @@ def _requires_current_browser_control_loop(text: str) -> bool:
     if not normalized or not targets_user_browser(normalized):
         return False
 
-    has_spreadsheet = _contains_any(normalized, _SPREADSHEET_KEYWORDS)
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
     has_browser = _contains_any(normalized, _BROWSER_KEYWORDS)
     has_desktop = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
     has_research = _contains_any(normalized, _RESEARCH_KEYWORDS)
@@ -535,7 +502,7 @@ def _is_current_tab_web_flow(text: str) -> bool:
     if _is_control_ui_chat_flow(normalized):
         return False
 
-    has_spreadsheet = _contains_any(normalized, _SPREADSHEET_KEYWORDS)
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
     has_desktop = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
     has_research = _contains_any(normalized, _RESEARCH_KEYWORDS | _LONGFORM_KEYWORDS)
     has_browser = _contains_any(normalized, _BROWSER_KEYWORDS | _BROWSER_INTERACTION_KEYWORDS)

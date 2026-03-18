@@ -42,8 +42,13 @@ async function getActiveTab() {
 function waitForTabComplete(tabId, timeoutMs) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
+    let timer = null;
 
     const cleanup = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
       chrome.tabs.onUpdated.removeListener(listener);
     };
 
@@ -65,9 +70,8 @@ function waitForTabComplete(tabId, timeoutMs) {
         return;
       }
 
-      const timer = setInterval(() => {
+      timer = setInterval(() => {
         if (Date.now() > deadline) {
-          clearInterval(timer);
           cleanup();
           reject(new Error("Tab navigation timed out"));
         }

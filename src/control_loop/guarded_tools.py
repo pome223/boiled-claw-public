@@ -85,6 +85,7 @@ _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS = (
     "boiled-claw Control UI",
     "boiled-claw",
 )
+_ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS = 120
 _CURRENT_BROWSER_SEARCH_KEYWORDS = {
     "search",
     "weather",
@@ -217,7 +218,9 @@ def _rewrite_current_browser_address_bar_text(
     # ToolContext.state mutations are not guaranteed to survive every model/tool
     # boundary, so treat selector-less text entry in current-browser search tasks
     # as an address-bar query even if the transient "focused" flag was dropped.
-    if not focused and len(stripped) > 120:
+    # Cap the fallback so long arbitrary text does not get rewritten into a
+    # search URL when the address-bar focus signal was likely lost.
+    if not focused and len(stripped) > _ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS:
         return text
     return f"https://www.google.com/search?q={quote_plus(stripped)}"
 
