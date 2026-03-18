@@ -1,9 +1,11 @@
 const DEFAULT_RELAY_URL = "ws://127.0.0.1:8768";
 const DEFAULT_RELAY_TOKEN = "";
 const RECONNECT_DELAY_MS = 2000;
+const KEEPALIVE_INTERVAL_MS = 20000;
 
 let socket = null;
 let reconnectTimer = null;
+let keepaliveTimer = null;
 let relayConfig = {
   relayUrl: DEFAULT_RELAY_URL,
   relayToken: DEFAULT_RELAY_TOKEN
@@ -19,6 +21,22 @@ async function loadRelayConfig() {
     relayToken: String(stored.relayToken || DEFAULT_RELAY_TOKEN)
   };
   return relayConfig;
+}
+
+function startKeepalive() {
+  stopKeepalive();
+  keepaliveTimer = setInterval(() => {
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ type: "ping" }));
+    }
+  }, KEEPALIVE_INTERVAL_MS);
+}
+
+function stopKeepalive() {
+  if (keepaliveTimer !== null) {
+    clearInterval(keepaliveTimer);
+    keepaliveTimer = null;
+  }
 }
 
 function scheduleReconnect() {
@@ -204,6 +222,7 @@ async function connectRelay() {
       version: "0.1.0",
       token: config.relayToken || ""
     });
+    startKeepalive();
   });
 
   socket.addEventListener("message", async (event) => {
@@ -211,6 +230,13 @@ async function connectRelay() {
     try {
       message = JSON.parse(event.data);
     } catch (_error) {
+      return;
+    }
+    if (message.type === "hello_ack") {
+      console.log("[relay] connection established, server acknowledged hello");
+      return;
+    }
+    if (message.type === "pong") {
       return;
     }
     if (message.type !== "request" || !message.request_id) {
@@ -235,12 +261,15 @@ async function connectRelay() {
     }
   });
 
-  socket.addEventListener("close", () => {
+  socket.addEventListener("close", (event) => {
+    console.log(`[relay] closed: code=${event.code} reason=${event.reason || "(none)"}`);
+    stopKeepalive();
     socket = null;
     scheduleReconnect();
   });
 
-  socket.addEventListener("error", () => {
+  socket.addEventListener("error", (event) => {
+    console.warn("[relay] error:", event);
     if (socket) {
       socket.close();
     }
