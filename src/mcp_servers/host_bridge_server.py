@@ -14,11 +14,18 @@ v1 tools:
 """
 
 import argparse
+import asyncio
 from pathlib import Path
 import shlex
 import subprocess
 from typing import Optional
 
+from src.browser.current_tab_bridge import (
+    CurrentTabBridgeError,
+    current_tab_bridge_enabled,
+    get_current_tab_extension_bridge,
+)
+from src.config.settings import get_settings
 from src.bridges.host_bridge_schema import (
     BridgePingResult,
     CapabilityDescriptor,
@@ -43,10 +50,21 @@ from src.bridges.host_bridge_schema import (
     HostFileReadResult,
     HostFileWriteRequest,
     HostFileWriteResult,
+    HostCurrentTabClickRequest,
+    HostCurrentTabClickResult,
+    HostCurrentTabExtractTextRequest,
+    HostCurrentTabExtractTextResult,
+    HostCurrentTabFillRequest,
+    HostCurrentTabFillResult,
+    HostCurrentTabInfoRequest,
+    HostCurrentTabInfoResult,
+    HostCurrentTabNavigateRequest,
+    HostCurrentTabNavigateResult,
     HostShellRunRequest,
     HostShellRunResult,
 )
 from src.security.policy import get_security_policy
+from src.security.network import enforce_loopback_bind, is_loopback_host
 from src.tools import browser as browser_tools
 from src.tools import control_ui_chat as control_ui_chat_tools
 
@@ -66,6 +84,81 @@ def _normalize_browser_payload(payload: dict, *, default_selector: str | None = 
     if default_selector is not None and "selector" not in normalized:
         normalized["selector"] = default_selector
     return normalized
+
+
+def _current_tab_error_payload(error: str) -> dict[str, object]:
+    return {"ok": False, "error": error}
+
+
+async def _ensure_current_tab_bridge_ready() -> None:
+    if not current_tab_bridge_enabled():
+        raise CurrentTabBridgeError(
+            "Current Tab extension bridge is disabled. Set CURRENT_TAB_BRIDGE_ENABLED=true."
+        )
+    bridge = get_current_tab_extension_bridge()
+    await bridge.ensure_started()
+
+
+async def _current_tab_info_payload() -> dict[str, object]:
+    await _ensure_current_tab_bridge_ready()
+    bridge = get_current_tab_extension_bridge()
+    payload = await bridge.call("get_active_tab")
+    return {
+        "ok": True,
+        "tab_id": payload.get("tab_id"),
+        "window_id": payload.get("window_id"),
+        "url": payload.get("url", ""),
+        "title": payload.get("title", ""),
+    }
+
+
+async def _current_tab_navigate_payload(request: HostCurrentTabNavigateRequest) -> dict[str, object]:
+    await _ensure_current_tab_bridge_ready()
+    bridge = get_current_tab_extension_bridge()
+    payload = await bridge.call(
+        "navigate",
+        {"url": request.url, "timeout_ms": request.timeout_ms},
+        timeout_seconds=max(5.0, request.timeout_ms / 1000 + 2.0),
+    )
+    return {
+        "ok": True,
+        "tab_id": payload.get("tab_id"),
+        "window_id": payload.get("window_id"),
+        "url": payload.get("url", ""),
+        "title": payload.get("title", ""),
+    }
+
+
+async def _current_tab_click_payload(request: HostCurrentTabClickRequest) -> dict[str, object]:
+    await _ensure_current_tab_bridge_ready()
+    bridge = get_current_tab_extension_bridge()
+    payload = await bridge.call("click", {"selector": request.selector})
+    return {"ok": True, "selector": payload.get("selector", request.selector)}
+
+
+async def _current_tab_fill_payload(request: HostCurrentTabFillRequest) -> dict[str, object]:
+    await _ensure_current_tab_bridge_ready()
+    bridge = get_current_tab_extension_bridge()
+    payload = await bridge.call("fill", {"selector": request.selector, "text": request.text})
+    return {
+        "ok": True,
+        "selector": payload.get("selector", request.selector),
+        "text_length": int(payload.get("text_length", len(request.text))),
+    }
+
+
+async def _current_tab_extract_text_payload(
+    request: HostCurrentTabExtractTextRequest,
+) -> dict[str, object]:
+    await _ensure_current_tab_bridge_ready()
+    bridge = get_current_tab_extension_bridge()
+    payload = await bridge.call("extract_text", {"selector": request.selector})
+    return {
+        "ok": True,
+        "selector": payload.get("selector", request.selector or "body"),
+        "text": payload.get("text", ""),
+        "length": int(payload.get("length", len(str(payload.get("text", ""))))),
+    }
 
 
 def _run_host_shell(request: HostShellRunRequest) -> HostShellRunResult:
@@ -216,6 +309,41 @@ def _capabilities() -> CapabilityListResult:
                 description="Use the boiled-claw Control UI chat with deterministic selectors, optionally in a visible window.",
                 implemented=browser_tools.PLAYWRIGHT_AVAILABLE,
             ),
+            CapabilityDescriptor(
+                name="host.current_tab.info",
+                risk="low",
+                requires_approval=False,
+                description="Inspect the active Chrome tab through the current-tab extension relay.",
+                implemented=current_tab_bridge_enabled(),
+            ),
+            CapabilityDescriptor(
+                name="host.current_tab.navigate",
+                risk="medium",
+                requires_approval=True,
+                description="Navigate the active Chrome tab through the current-tab extension relay.",
+                implemented=current_tab_bridge_enabled(),
+            ),
+            CapabilityDescriptor(
+                name="host.current_tab.click",
+                risk="medium",
+                requires_approval=True,
+                description="Click a selector inside the active Chrome tab through the current-tab extension relay.",
+                implemented=current_tab_bridge_enabled(),
+            ),
+            CapabilityDescriptor(
+                name="host.current_tab.fill",
+                risk="medium",
+                requires_approval=True,
+                description="Fill a selector inside the active Chrome tab through the current-tab extension relay.",
+                implemented=current_tab_bridge_enabled(),
+            ),
+            CapabilityDescriptor(
+                name="host.current_tab.extract_text",
+                risk="medium",
+                requires_approval=True,
+                description="Extract text from the active Chrome tab through the current-tab extension relay.",
+                implemented=current_tab_bridge_enabled(),
+            ),
         ]
     )
 
@@ -307,13 +435,29 @@ def _list_host_files(request: HostFileListRequest) -> HostFileListResult:
 def create_server(host: str = "127.0.0.1", port: int = 8766):
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
+    settings = get_settings()
+
+    enforce_loopback_bind(
+        host,
+        service_name="Host Bridge",
+        allow_remote_bind=settings.bridge_allow_remote_bind,
+    )
+
+    if is_loopback_host(host):
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+        )
+    else:
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
 
     mcp = FastMCP("host-bridge")
     mcp.settings.host = host
     mcp.settings.port = port
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
-    )
+    mcp.settings.transport_security = transport_security
 
     transport_hint = "sse" if host != "stdio" else "stdio"
 
@@ -654,6 +798,138 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
                 "error": payload.get("error"),
             }
         ).model_dump()
+
+    @mcp.tool(
+        name="host.current_tab.info",
+        description="Inspect the active Chrome tab through the current-tab extension relay.",
+    )
+    async def host_current_tab_info(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostCurrentTabInfoRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+        )
+        try:
+            payload = await _current_tab_info_payload()
+        except CurrentTabBridgeError as exc:
+            payload = _current_tab_error_payload(str(exc))
+        return HostCurrentTabInfoResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.current_tab.navigate",
+        description="Navigate the active Chrome tab through the current-tab extension relay.",
+    )
+    async def host_current_tab_navigate(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        url: str,
+        timeout_ms: int = 15000,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostCurrentTabNavigateRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            url=url,
+            timeout_ms=timeout_ms,
+        )
+        try:
+            payload = await _current_tab_navigate_payload(request)
+        except CurrentTabBridgeError as exc:
+            payload = _current_tab_error_payload(str(exc))
+        return HostCurrentTabNavigateResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.current_tab.click",
+        description="Click a selector inside the active Chrome tab through the current-tab extension relay.",
+    )
+    async def host_current_tab_click(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: str,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostCurrentTabClickRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+        )
+        try:
+            payload = await _current_tab_click_payload(request)
+        except CurrentTabBridgeError as exc:
+            payload = _current_tab_error_payload(str(exc))
+        return HostCurrentTabClickResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.current_tab.fill",
+        description="Fill a selector inside the active Chrome tab through the current-tab extension relay.",
+    )
+    async def host_current_tab_fill(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: str,
+        text: str,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostCurrentTabFillRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+            text=text,
+        )
+        try:
+            payload = await _current_tab_fill_payload(request)
+        except CurrentTabBridgeError as exc:
+            payload = _current_tab_error_payload(str(exc))
+        return HostCurrentTabFillResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.current_tab.extract_text",
+        description="Extract text from the active Chrome tab through the current-tab extension relay.",
+    )
+    async def host_current_tab_extract_text(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        selector: Optional[str] = None,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostCurrentTabExtractTextRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            selector=selector,
+        )
+        try:
+            payload = await _current_tab_extract_text_payload(request)
+        except CurrentTabBridgeError as exc:
+            payload = _current_tab_error_payload(str(exc))
+        return HostCurrentTabExtractTextResult.model_validate(payload).model_dump()
 
     return mcp
 

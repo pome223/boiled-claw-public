@@ -1,10 +1,12 @@
 """
 モデル設定管理
-Gemini 3.0 Flash をデフォルトとする
+Gemini の既定モデル設定を管理する
 """
 
 from typing import Optional, Dict, Any
 from dataclasses import dataclass
+
+from src.config.settings import get_settings
 
 
 @dataclass
@@ -32,21 +34,23 @@ class GeminiModelConfig:
 
 
 # デフォルトモデル設定
+_DEFAULT_MODEL_NAME = get_settings().agent_model
+
 DEFAULT_MODEL = GeminiModelConfig(
-    name="gemini-3-flash-preview",
+    name=_DEFAULT_MODEL_NAME,
     temperature=0.7,
 )
 
 # 高精度モデル設定
 PRECISE_MODEL = GeminiModelConfig(
-    name="gemini-3-flash-preview",
+    name=_DEFAULT_MODEL_NAME,
     temperature=0.2,
     top_k=20,
 )
 
 # 創造的モデル設定
 CREATIVE_MODEL = GeminiModelConfig(
-    name="gemini-3-flash-preview",
+    name=_DEFAULT_MODEL_NAME,
     temperature=1.2,
 )
 

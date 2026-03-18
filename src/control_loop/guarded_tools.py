@@ -10,12 +10,96 @@ Executor agent にアタッチし、approved plan の範囲外の実行を防ぐ
 from __future__ import annotations
 
 from typing import Any
+from urllib.parse import quote_plus
 
 from google.adk.tools import ToolContext
 
+from src.gateway.routing import targets_user_browser
 from src.runtime.state_keys import StateKeys
 
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
+_IMPLICIT_PLAN_CAPABILITIES = {
+    "desktop.view.windows": {
+        "desktop.control.launch_app",
+        "desktop.control.focus_window",
+        "desktop.wait.window",
+    },
+    "desktop.view.frontmost_app": {
+        "desktop.control.launch_app",
+        "desktop.control.focus_window",
+        "desktop.wait.window",
+    },
+    "desktop.wait.window": {
+        "desktop.control.launch_app",
+        "desktop.control.focus_window",
+    },
+    "desktop.ax.find": {
+        "desktop.control.click",
+        "desktop.control.type",
+        "desktop.wait.element",
+    },
+    "desktop.wait.element": {
+        "desktop.control.click",
+        "desktop.control.type",
+        "desktop.ax.find",
+    },
+}
+_CURRENT_BROWSER_ALLOWED_HOTKEYS = {
+    ("control", "l"),
+    ("enter",),
+    ("l", "meta"),
+}
+_CURRENT_BROWSER_NEW_TAB_HOTKEYS = {
+    ("control", "t"),
+    ("meta", "t"),
+}
+_HOTKEY_ALIASES = {
+    "arrowdown": "down",
+    "arrowleft": "left",
+    "arrowright": "right",
+    "arrowup": "up",
+    "cmd": "meta",
+    "command": "meta",
+    "control": "control",
+    "ctrl": "control",
+    "return": "enter",
+}
+_CURRENT_BROWSER_HOTKEY_REWRITES = {
+    ("control", "e"): ["control", "l"],
+    ("control", "k"): ["control", "l"],
+    ("e", "meta"): ["meta", "l"],
+    ("k", "meta"): ["meta", "l"],
+}
+_KNOWN_BROWSER_APPS = {
+    "Google Chrome",
+    "Chromium",
+    "Safari",
+    "Arc",
+    "Firefox",
+    "Brave Browser",
+    "Microsoft Edge",
+}
+_PRESERVE_CONTROL_UI_MARKER = "preserve that tab and open a new tab in the same browser window"
+_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY = "temp:current_browser_address_bar_focused"
+_CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS = (
+    "boiled-claw Control UI",
+    "boiled-claw",
+)
+_ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS = 120
+_CURRENT_BROWSER_SEARCH_KEYWORDS = {
+    "search",
+    "weather",
+    "pollen",
+    "latest",
+    "latest news",
+    "forecast",
+    "research",
+    "調べ",
+    "検索",
+    "花粉",
+    "天気",
+    "最新",
+}
 
 
 def _check_approval(tool_context: ToolContext, capability: str) -> None:
@@ -49,7 +133,8 @@ def _check_capability_in_plan(
     required = {
         cap.get("name", "") for cap in plan.get("required_capabilities", [])
     }
-    if capability_name not in required:
+    implied_by = _IMPLICIT_PLAN_CAPABILITIES.get(capability_name, set())
+    if capability_name not in required and not (required & implied_by):
         raise PermissionError(
             f"Capability '{capability_name}' is not in the approved plan."
         )
@@ -66,6 +151,94 @@ def _memory_entry_to_result(entry: Any) -> dict[str, Any]:
         "author": getattr(entry, "author", None),
         "timestamp": getattr(entry, "timestamp", None),
     }
+
+
+def _is_current_browser_task(tool_context: ToolContext | None) -> bool:
+    if tool_context is None:
+        return False
+    goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
+    return isinstance(goal, str) and targets_user_browser(goal)
+
+
+def _normalize_hotkeys(keys: list[str]) -> tuple[str, ...]:
+    normalized = []
+    for key in keys:
+        value = _HOTKEY_ALIASES.get(key.strip().lower(), key.strip().lower())
+        normalized.append(value)
+    return tuple(sorted(item for item in normalized if item))
+
+
+def _rewrite_current_browser_hotkeys(keys: list[str]) -> list[str]:
+    normalized = _normalize_hotkeys(keys)
+    return list(_CURRENT_BROWSER_HOTKEY_REWRITES.get(normalized, keys))
+
+
+def _allows_current_browser_new_tab(tool_context: ToolContext | None) -> bool:
+    if tool_context is None:
+        return False
+    constraints = tool_context.state.get(StateKeys.TASK_CONSTRAINTS, [])
+    if not isinstance(constraints, list):
+        return False
+    return any(
+        _PRESERVE_CONTROL_UI_MARKER in str(item).lower()
+        for item in constraints
+    )
+
+
+def _current_browser_goal_text(tool_context: ToolContext | None) -> str:
+    if tool_context is None:
+        return ""
+    goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
+    return goal if isinstance(goal, str) else ""
+
+
+def _is_current_browser_search_task(tool_context: ToolContext | None) -> bool:
+    goal = _current_browser_goal_text(tool_context).lower()
+    return any(keyword in goal for keyword in _CURRENT_BROWSER_SEARCH_KEYWORDS)
+
+
+def _looks_like_url(text: str) -> bool:
+    lowered = text.lower()
+    return lowered.startswith(("http://", "https://")) or "://" in lowered
+
+
+def _rewrite_current_browser_address_bar_text(
+    text: str,
+    tool_context: ToolContext | None,
+) -> str:
+    if tool_context is None:
+        return text
+    focused = bool(tool_context.state.get(_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY))
+    tool_context.state[_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY] = False
+    if not _is_current_browser_search_task(tool_context):
+        return text
+    stripped = text.strip()
+    if not stripped or _looks_like_url(stripped):
+        return text
+    # ToolContext.state mutations are not guaranteed to survive every model/tool
+    # boundary, so treat selector-less text entry in current-browser search tasks
+    # as an address-bar query even if the transient "focused" flag was dropped.
+    # Cap the fallback so long arbitrary text does not get rewritten into a
+    # search URL when the address-bar focus signal was likely lost.
+    if not focused and len(stripped) > _ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS:
+        return text
+    return f"https://www.google.com/search?q={quote_plus(stripped)}"
+
+
+async def _focus_control_ui_browser_window(
+    *,
+    app_name: str,
+) -> dict[str, Any] | None:
+    from src.tools.desktop import desktop_control_focus_window
+
+    for title_hint in _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS:
+        result = await desktop_control_focus_window(
+            app_name=app_name,
+            title=title_hint,
+        )
+        if result.get("success") or result.get("ok"):
+            return result
+    return None
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -403,6 +576,11 @@ async def guarded_desktop_control_type(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if (
+            _is_current_browser_task(tool_context)
+            and not any((app_name, window_id, role, title, identifier, value_contains))
+        ):
+            text = _rewrite_current_browser_address_bar_text(text, tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -431,6 +609,40 @@ async def guarded_desktop_control_launch_app(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            from src.tools.desktop import (
+                desktop_control_focus_window,
+                desktop_view_windows,
+            )
+
+            candidate_app = app_name.strip() if isinstance(app_name, str) else ""
+            if candidate_app and candidate_app not in _KNOWN_BROWSER_APPS:
+                raise PermissionError(
+                    "desktop.control.launch_app is not allowed for current-browser tasks. "
+                    "Use the existing frontmost browser window instead."
+                )
+
+            if not candidate_app:
+                windows = await desktop_view_windows(include_minimized=False)
+                for window in windows.get("windows", []):
+                    window_app = str(window.get("app_name", "")).strip()
+                    if window_app in _KNOWN_BROWSER_APPS:
+                        candidate_app = window_app
+                        break
+
+            if candidate_app:
+                if _allows_current_browser_new_tab(tool_context):
+                    focused_control_ui = await _focus_control_ui_browser_window(
+                        app_name=candidate_app
+                    )
+                    if focused_control_ui is not None:
+                        return focused_control_ui
+                return await desktop_control_focus_window(app_name=candidate_app)
+
+            raise PermissionError(
+                "desktop.control.launch_app is not allowed for current-browser tasks. "
+                "No existing browser window could be identified."
+            )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -461,6 +673,19 @@ async def guarded_desktop_control_focus_window(
                 f"Current status: '{status}'"
             )
         _check_capability_in_plan(tool_context, "desktop.control.focus_window")
+        if (
+            _is_current_browser_task(tool_context)
+            and _allows_current_browser_new_tab(tool_context)
+            and not window_id
+            and not title
+            and isinstance(app_name, str)
+            and app_name.strip() in _KNOWN_BROWSER_APPS
+        ):
+            focused_control_ui = await _focus_control_ui_browser_window(
+                app_name=app_name.strip()
+            )
+            if focused_control_ui is not None:
+                return focused_control_ui
 
     from src.tools.desktop import desktop_control_focus_window
     return await desktop_control_focus_window(
@@ -474,7 +699,30 @@ async def guarded_desktop_control_hotkey(
     keys: list[str],
     tool_context: ToolContext | None = None,
 ) -> dict:
+    effective_keys = keys
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            effective_keys = _rewrite_current_browser_hotkeys(keys)
+            normalized_keys = _normalize_hotkeys(effective_keys)
+            allow_new_tab = _allows_current_browser_new_tab(tool_context)
+            if (
+                normalized_keys not in _CURRENT_BROWSER_ALLOWED_HOTKEYS
+                and not (
+                    allow_new_tab
+                    and normalized_keys in _CURRENT_BROWSER_NEW_TAB_HOTKEYS
+                )
+            ):
+                raise PermissionError(
+                    "Only focus-address-bar or submit hotkeys are allowed for "
+                    f"current-browser tasks. attempted={normalized_keys}"
+                )
+            if (
+                normalized_keys in _CURRENT_BROWSER_ALLOWED_HOTKEYS
+                or normalized_keys in _CURRENT_BROWSER_NEW_TAB_HOTKEYS
+            ):
+                tool_context.state[_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY] = (
+                    normalized_keys != ("enter",)
+                )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -484,7 +732,7 @@ async def guarded_desktop_control_hotkey(
         _check_capability_in_plan(tool_context, "desktop.control.hotkey")
 
     from src.tools.desktop import desktop_control_hotkey
-    return await desktop_control_hotkey(keys=keys)
+    return await desktop_control_hotkey(keys=effective_keys)
 
 
 async def guarded_desktop_control_scroll(

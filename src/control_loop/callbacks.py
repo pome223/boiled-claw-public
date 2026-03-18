@@ -16,11 +16,15 @@ import json
 import uuid
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import AbstractSet, Optional
 
 from google.adk.agents.callback_context import CallbackContext
 from src.control_loop.constants import DEFAULT_MAX_REPAIR_ATTEMPTS
 from src.runtime.state_keys import StateKeys
+from src.runtime.task_keywords import (
+    CURRENT_BROWSER_KEYWORDS,
+    SPREADSHEET_KEYWORDS,
+)
 from src.tools.context import resolve_callback_context
 
 logger = logging.getLogger(__name__)
@@ -46,6 +50,119 @@ _HUMAN_REQUIRED_CAPS: set[str] = {
 
 # 常に拒否する capability
 _ALWAYS_DENIED_CAPS: set[str] = {"admin"}
+
+_TEXT_ENTRY_KEYWORDS: set[str] = {
+    "入力",
+    "記入",
+    "書いて",
+    "書き込",
+    "貼り付",
+    "ペースト",
+    "まとめて",
+    "まとめる",
+    "追加",
+    "更新",
+    "fill",
+    "enter",
+    "paste",
+    "type",
+    "write",
+}
+
+_DESKTOP_MODE_BY_CAPABILITY: dict[str, str] = {
+    "desktop.view.windows": "read",
+    "desktop.view.frontmost_app": "read",
+    "desktop.view.screenshot": "read",
+    "desktop.wait.window": "read",
+    "desktop.ax.find": "read",
+    "desktop.wait.element": "read",
+    "desktop.ax.snapshot": "read",
+    "desktop.control.click": "execute",
+    "desktop.control.type": "execute",
+    "desktop.control.launch_app": "execute",
+    "desktop.control.focus_window": "execute",
+    "desktop.control.hotkey": "execute",
+    "desktop.control.scroll": "execute",
+    "desktop.control.drag": "execute",
+}
+
+
+def _contains_any(text: str, keywords: AbstractSet[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _targets_current_browser(goal: str) -> bool:
+    return _contains_any(goal, CURRENT_BROWSER_KEYWORDS)
+
+
+def _needs_text_entry(goal: str) -> bool:
+    return _contains_any(goal, SPREADSHEET_KEYWORDS | _TEXT_ENTRY_KEYWORDS)
+
+
+def _ensure_capability(
+    required_caps: list[dict[str, object]],
+    capability_name: str,
+) -> None:
+    if any(cap.get("name") == capability_name for cap in required_caps):
+        return
+    required_caps.append(
+        {
+            "name": capability_name,
+            "mode": _DESKTOP_MODE_BY_CAPABILITY.get(capability_name, "execute"),
+        }
+    )
+
+
+def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
+    required_caps = [
+        cap if isinstance(cap, dict) else {"name": str(cap)}
+        for cap in plan.get("required_capabilities", [])
+    ]
+    normalized_goal = (goal or plan.get("goal") or "").strip().lower()
+    is_current_browser_goal = _targets_current_browser(normalized_goal)
+
+    if is_current_browser_goal:
+        required_caps = [
+            cap
+            for cap in required_caps
+            if str(cap.get("name", "")) != "desktop.control.launch_app"
+        ]
+    cap_names = {str(cap.get("name", "")) for cap in required_caps}
+
+    if is_current_browser_goal:
+        # Current-browser tasks should reuse the browser the user already has
+        # open, so we remove launch-app and expand the read/focus capabilities
+        # needed to verify and steer that existing window safely.
+        has_desktop_browser_plan = bool(
+            cap_names
+            & {
+                "desktop.view.windows",
+                "desktop.view.frontmost_app",
+                "desktop.ax.snapshot",
+                "desktop.control.focus_window",
+                "desktop.ax.find",
+                "desktop.wait.element",
+                "desktop.control.click",
+                "desktop.control.type",
+            }
+        )
+        if has_desktop_browser_plan or "browser.navigate" in cap_names:
+            _ensure_capability(required_caps, "desktop.view.windows")
+            _ensure_capability(required_caps, "desktop.view.frontmost_app")
+            _ensure_capability(required_caps, "desktop.control.focus_window")
+            _ensure_capability(required_caps, "desktop.control.click")
+            _ensure_capability(required_caps, "desktop.control.hotkey")
+            _ensure_capability(required_caps, "desktop.control.scroll")
+            _ensure_capability(required_caps, "desktop.ax.find")
+            _ensure_capability(required_caps, "desktop.wait.element")
+            _ensure_capability(required_caps, "desktop.view.screenshot")
+            _ensure_capability(required_caps, "desktop.ax.snapshot")
+
+            if _needs_text_entry(normalized_goal):
+                _ensure_capability(required_caps, "desktop.control.type")
+
+    plan["required_capabilities"] = required_caps
+    return plan
 
 def policy_judge_callback(
     callback_context: CallbackContext,
@@ -75,6 +192,8 @@ def policy_judge_callback(
         logger.error("policy_judge_callback: JSON parse error: %s", e)
         return
 
+    original_goal = callback_context.state.get(StateKeys.TASK_GOAL) or plan.get("goal", "")
+    plan = _normalize_required_capabilities(plan, original_goal)
     required_caps: list[dict] = plan.get("required_capabilities", [])
     cap_names = {c.get("name", "") for c in required_caps}
     risk_level: str = plan.get("risk_level", "low")
@@ -94,7 +213,7 @@ def policy_judge_callback(
         approval_request = {
             "request_id": f"plan_{uuid.uuid4().hex[:12]}",
             "plan_id": plan.get("plan_id", ""),
-            "goal": plan.get("goal", ""),
+            "goal": original_goal,
             "risk_level": risk_level,
             "required_capabilities": sorted(cap_names),
             "reason": (

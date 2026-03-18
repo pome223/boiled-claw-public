@@ -32,7 +32,7 @@ from pathlib import Path
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
 from src.agents.sub_agents import SUB_AGENTS
-from src.control_loop.root_workflow import ControlLoop
+from src.control_loop.root_workflow import ControlLoop, ExecutionResult
 from src.gateway.routing_agent import routing_agent
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.security.audit import get_audit_logger, AuditEventType
@@ -51,7 +51,12 @@ from src.gateway.protocol import (
     ev_tool_start, ev_tool_result,
     normalize_client_event, validate_client_event,
 )
-from src.gateway.routing import RoutingDecision, decision_from_payload, heuristic_decision
+from src.gateway.routing import (
+    RoutingDecision,
+    decision_from_payload,
+    heuristic_decision,
+    targets_user_browser,
+)
 from src.runtime.tool_events import set_tool_event_notifier
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
@@ -68,6 +73,11 @@ _FRESHNESS_KEYWORDS = {
 
 _BROWSER_TOOL_NAMES = {
     "control_ui_chat_send_message",
+    "current_tab_info",
+    "current_tab_navigate",
+    "current_tab_click",
+    "current_tab_fill",
+    "current_tab_extract_text",
     "browser_navigate",
     "browser_click",
     "browser_fill",
@@ -81,14 +91,46 @@ _BROWSER_TOOL_NAMES = {
     "host.browser.extract_text",
     "host.browser.screenshot",
     "host.control_ui_chat.send_message",
+    "host.current_tab.info",
+    "host.current_tab.navigate",
+    "host.current_tab.click",
+    "host.current_tab.fill",
+    "host.current_tab.extract_text",
 }
 _BROWSER_INFRA_ERROR_FRAGMENTS = (
     "playwright is not installed",
     "host bridge is not enabled",
+    "requires host bridge",
     "host_bridge_enabled is true but host_bridge_url is not set",
     "host bridge tool call failed",
     "host bridge returned empty tool content",
     "host bridge returned non-json tool content",
+    "current tab extension bridge",
+    "current tab extension relay",
+    "current tab extension is not connected",
+)
+_USER_BROWSER_REQUIRED_CAPABILITIES = {
+    "desktop.view.frontmost_app",
+    "desktop.view.windows",
+    "desktop.control.focus_window",
+    "desktop.ax.find",
+    "desktop.control.click",
+    "desktop.control.type",
+}
+_CURRENT_BROWSER_CONTROL_BASE_CONSTRAINTS = [
+    "Operate only on the currently visible browser/tab/window.",
+    "Do not launch a new browser application or open a managed browser for this task.",
+    "Start by identifying the frontmost app and matching it to the existing browser window.",
+    "If the current browser window cannot be identified or focused, stop and report an explicit error.",
+    "Do not mark the task complete after typing alone; submit the action and verify the resulting page content.",
+]
+_CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT = (
+    "Do not open a new browser tab or window unless the user explicitly asked for it."
+)
+_CURRENT_BROWSER_PRESERVE_CONTROL_UI_TAB_CONSTRAINT = (
+    "If the current tab is the boiled-claw Control UI chat, preserve that tab and "
+    "open a new tab in the same browser window for browsing or search. Otherwise "
+    "stay on the current tab."
 )
 
 
@@ -263,6 +305,16 @@ class GatewayServer:
                 return JSONResponse({"detail": "Unauthorized"}, status_code=401)
             return await call_next(request)
 
+        @self.app.middleware("http")
+        async def chat_cache_control_middleware(request: Request, call_next):
+            response = await call_next(request)
+            path = request.url.path
+            if path == "/chat" or path.startswith("/chat-static"):
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+            return response
+
         self.app.mount(
             "/chat-static",
             StaticFiles(directory=str(self.static_dir)),
@@ -427,7 +479,14 @@ class GatewayServer:
             (item.error for item in result.tool_failures if item.error),
             "required runtime is unavailable",
         )
-        if specialist_name in {"browser_automator", "control_ui_chat_operator"} and result.infrastructure_blocked:
+        if specialist_name in {"browser_automator", "control_ui_chat_operator", "current_tab_operator"} and result.infrastructure_blocked:
+            if specialist_name == "current_tab_operator":
+                return (
+                    "現在のブラウザ/タブ操作は実行できませんでした。\n"
+                    f"- 原因: {first_error}\n"
+                    "- 現在のリクエストでは、desktop 制御や managed browser へ自動フォールバックしません。\n"
+                    "- 対応: Host Bridge を起動し、Chrome に Current Tab Adapter extension を読み込んでください。"
+                )
             return (
                 "ブラウザ操作は実行できませんでした。\n"
                 f"- 原因: {first_error}\n"
@@ -439,6 +498,56 @@ class GatewayServer:
         return (
             f"{specialist_name} の実行に失敗しました。\n"
             f"- 原因: {first_error}"
+        )
+
+    async def _current_browser_runtime_error(
+        self,
+        message: str,
+    ) -> str | None:
+        if not targets_user_browser(message):
+            return None
+
+        if not getattr(self.settings, "desktop_bridge_enabled", False):
+            return (
+                "現在開いているブラウザや既存のスプレッドシートは操作できませんでした。\n"
+                "- 原因: Desktop Bridge が無効です。\n"
+                "- このリクエストは、managed browser やローカル CSV ではなく、"
+                "あなたが今開いているブラウザを対象にする必要があります。\n"
+                "- 対応: DESKTOP_BRIDGE_ENABLED=true と DESKTOP_BRIDGE_URL を設定し、"
+                "host 側で Desktop Bridge を起動してください。"
+            )
+
+        try:
+            from src.bridges.desktop_bridge_client import get_desktop_client
+
+            client = get_desktop_client()
+            capability_result = await client.capabilities()
+        except Exception as exc:
+            return (
+                "現在開いているブラウザや既存のスプレッドシートは操作できませんでした。\n"
+                f"- 原因: Desktop Bridge capability check failed: {exc}\n"
+                "- 対応: Desktop Bridge を起動し、host 側 runtime が正常応答することを確認してください。"
+            )
+
+        implemented = {
+            capability.name
+            for capability in capability_result.capabilities
+            if capability.implemented
+        }
+        missing = sorted(_USER_BROWSER_REQUIRED_CAPABILITIES - implemented)
+        if not missing:
+            return None
+
+        available = ", ".join(sorted(implemented)) or "(none)"
+        required = ", ".join(sorted(_USER_BROWSER_REQUIRED_CAPABILITIES))
+        missing_text = ", ".join(missing)
+        return (
+            "現在開いているブラウザや既存のスプレッドシートは操作できませんでした。\n"
+            f"- 原因: Desktop Bridge に必要 capability が不足しています: {missing_text}\n"
+            f"- 必要 capability: {required}\n"
+            f"- 利用可能 capability: {available}\n"
+            "- このリクエストは、managed browser やローカル CSV に置き換えず、"
+            "現在のブラウザを対象にする必要があります。"
         )
 
     async def _emit_runner_tool_events(
@@ -1312,10 +1421,17 @@ class GatewayServer:
 
             resumed_result = None
             if approved and pending:
+                resume_goal = (
+                    await self.control_loop.get_task_goal(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    or pending.get("goal", "")
+                )
                 resumed_result = await self._run_control_loop_http(
                     user_id=user_id,
                     session_id=session_id,
-                    goal=pending.get("goal", ""),
+                    goal=resume_goal,
                     constraints=_normalize_constraints(
                         (pending.get("plan") or {}).get("constraints")
                     ),
@@ -1572,6 +1688,11 @@ class GatewayServer:
                     elif event_name == "chat.abort":
                         request_id = data.get("request_id")
                         aborted = await self.manager.abort(session_id)
+                        await self._desktop_emergency_stop(
+                            session_id=session_id,
+                            user_id=user_id,
+                            reason="Abort requested from Web UI",
+                        )
                         if not aborted:
                             await self.manager.send_json(
                                 session_id,
@@ -1639,10 +1760,17 @@ class GatewayServer:
                                 and control_loop_resolved
                                 and pending_control_request
                             ):
+                                resume_goal = (
+                                    await self.control_loop.get_task_goal(
+                                        user_id=user_id,
+                                        session_id=session_id,
+                                    )
+                                    or pending_control_request.get("goal", "")
+                                )
                                 await self._start_control_loop_run(
                                     session_id=session_id,
                                     user_id=user_id,
-                                    goal=pending_control_request.get("goal", ""),
+                                    goal=resume_goal,
                                     constraints=_normalize_constraints(
                                         (pending_control_request.get("plan") or {}).get(
                                             "constraints"
@@ -1703,6 +1831,7 @@ class GatewayServer:
     ) -> None:
         """Abort existing task then start a new agent run."""
         await self.manager.abort(session_id)
+        await self._desktop_clear_stop(session_id=session_id, user_id=user_id)
         task = asyncio.create_task(
             self._agent_run_task(session_id, user_id, message, request_id),
             name=f"agent:{session_id}",
@@ -1718,6 +1847,7 @@ class GatewayServer:
         request_id: Optional[str] = None,
     ) -> None:
         await self.manager.abort(session_id)
+        await self._desktop_clear_stop(session_id=session_id, user_id=user_id)
         task = asyncio.create_task(
             self._control_loop_task(
                 session_id,
@@ -2048,10 +2178,35 @@ class GatewayServer:
         request_id: Optional[str] = None,
     ) -> None:
         try:
+            current_browser_error = await self._current_browser_runtime_error(goal)
+            if current_browser_error:
+                self.transcript.append(
+                    session_id,
+                    "assistant",
+                    current_browser_error,
+                    user_id=user_id,
+                    request_id=request_id,
+                    metadata={
+                        "type": "control_loop",
+                        "success": False,
+                        "error": "desktop_bridge_unavailable",
+                    },
+                )
+                await self.manager.send_json(
+                    session_id,
+                    ev_chat_done(current_browser_error, request_id, aborted=False),
+                )
+                return
+
+            effective_constraints = self._merge_control_constraints(
+                goal=goal,
+                constraints=constraints,
+                preserve_control_ui_tab=True,
+            )
             result = await self.control_loop.run(
                 goal=goal,
                 user_id=user_id,
-                constraints=constraints,
+                constraints=effective_constraints,
                 session_id=session_id,
             )
             self.transcript.append(
@@ -2098,6 +2253,43 @@ class GatewayServer:
             )
         finally:
             self.manager.clear_task(session_id)
+
+    def _merge_control_constraints(
+        self,
+        *,
+        goal: str,
+        constraints: list[str],
+        preserve_control_ui_tab: bool,
+    ) -> list[str]:
+        effective_constraints = list(constraints)
+        if not targets_user_browser(goal):
+            return effective_constraints
+        for item in _CURRENT_BROWSER_CONTROL_BASE_CONSTRAINTS:
+            if item not in effective_constraints:
+                effective_constraints.append(item)
+        if preserve_control_ui_tab:
+            if (
+                _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+                in effective_constraints
+            ):
+                effective_constraints.remove(
+                    _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+                )
+            if (
+                _CURRENT_BROWSER_PRESERVE_CONTROL_UI_TAB_CONSTRAINT
+                not in effective_constraints
+            ):
+                effective_constraints.append(
+                    _CURRENT_BROWSER_PRESERVE_CONTROL_UI_TAB_CONSTRAINT
+                )
+        elif (
+            _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+            not in effective_constraints
+        ):
+            effective_constraints.append(
+                _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
+            )
+        return effective_constraints
 
     # HTTP agent execution (no abort support)
     async def _run_agent_http(self, user_id: str, session_id: str, message: str) -> dict:
@@ -2364,10 +2556,25 @@ class GatewayServer:
         goal: str,
         constraints: list[str],
     ):
+        current_browser_error = await self._current_browser_runtime_error(goal)
+        if current_browser_error:
+            return ExecutionResult(
+                request_id=f"http_{uuid.uuid4().hex[:12]}",
+                session_id=session_id,
+                user_id=user_id,
+                final_text=current_browser_error,
+                success=False,
+                metadata={"error": "desktop_bridge_unavailable"},
+            )
+        effective_constraints = self._merge_control_constraints(
+            goal=goal,
+            constraints=constraints,
+            preserve_control_ui_tab=False,
+        )
         return await self.control_loop.run(
             goal=goal,
             user_id=user_id,
-            constraints=constraints,
+            constraints=effective_constraints,
             session_id=session_id,
         )
 
@@ -2392,6 +2599,70 @@ class GatewayServer:
                 reason=approval_request.get("reason", ""),
             ),
         )
+
+    async def _desktop_emergency_stop(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        reason: str,
+    ) -> bool:
+        if not getattr(self.settings, "desktop_bridge_enabled", False):
+            return False
+        try:
+            from src.bridges.desktop_bridge_client import get_desktop_client
+            from src.desktop import DesktopEmergencyStopRequest
+
+            client = get_desktop_client()
+            result = await client.emergency_stop(
+                DesktopEmergencyStopRequest(
+                    request_id=f"gateway-stop-{uuid.uuid4().hex[:12]}",
+                    session_id=session_id,
+                    user_id=user_id,
+                    agent_name="gateway",
+                    reason=reason,
+                )
+            )
+            return bool(result.ok)
+        except Exception as exc:
+            self.audit_logger.log_error(
+                error=str(exc),
+                user_id=user_id,
+                session_id=session_id,
+                context={"action": "desktop_emergency_stop"},
+            )
+            return False
+
+    async def _desktop_clear_stop(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+    ) -> bool:
+        if not getattr(self.settings, "desktop_bridge_enabled", False):
+            return False
+        try:
+            from src.bridges.desktop_bridge_client import get_desktop_client
+            from src.desktop import DesktopClearStopRequest
+
+            client = get_desktop_client()
+            result = await client.clear_stop(
+                DesktopClearStopRequest(
+                    request_id=f"gateway-clear-stop-{uuid.uuid4().hex[:12]}",
+                    session_id=session_id,
+                    user_id=user_id,
+                    agent_name="gateway",
+                )
+            )
+            return bool(result.ok)
+        except Exception as exc:
+            self.audit_logger.log_error(
+                error=str(exc),
+                user_id=user_id,
+                session_id=session_id,
+                context={"action": "desktop_clear_stop"},
+            )
+            return False
 
     # ------------------------------------------------------------------
     # session / transcript helpers
@@ -2501,7 +2772,11 @@ class GatewayServer:
         )
         session = self.transcript.get_session(session_id)
         resolved_user = user_id or (session.user_id if session else None)
-        if session is not None and resolved_user:
+        if (
+            session is not None
+            and resolved_user
+            and source != "tools.approval"
+        ):
             self.transcript.append(
                 session_id,
                 "system",

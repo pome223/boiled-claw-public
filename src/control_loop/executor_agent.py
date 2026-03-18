@@ -2,6 +2,7 @@
 
 from google.adk.agents import LlmAgent
 
+from src.agents.model_config import DEFAULT_MODEL
 from src.control_loop.guarded_tools import (
     guarded_browser_click,
     guarded_web_search,
@@ -33,7 +34,7 @@ from src.runtime.state_keys import StateKeys
 
 executor_agent = LlmAgent(
     name="executor",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     instruction=build_executor_instruction,
     tools=[
         guarded_web_search,

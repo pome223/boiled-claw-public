@@ -1,14 +1,15 @@
 # 🦀 boiled-claw
 
-> Your personal AI agent powered by Google ADK and Gemini 3.0 Flash. Any platform, any channel.
+> Your personal AI agent powered by Google ADK and Gemini 3.1 Flash Lite Preview. Any platform, any channel.
 
 OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベースのパーソナルAIエージェントです。
 
 ## 特徴
 
-- 🤖 **Gemini 3.0 Flash** - 最新の高速AIモデル
+- 🤖 **Gemini 3.1 Flash Lite Preview** - 既定の高速AIモデル
 - 🔍 **Web検索** - DuckDuckGo API 経由
 - 🌐 **ブラウザ自動化** - Playwright によるスクレイピング、スクリーンショット
+- 🧷 **Current Tab Adapter** - Chrome extension relay で「今見ているタブ」を直接操作
 - 💻 **シェル実行** - セキュリティポリシー付き安全なコマンド実行
 - 📁 **ファイル操作** - 読み書き対応
 - 🧩 **Host Bridge** - host OS 上の shell / file / browser を別プロセスで実行
@@ -45,7 +46,8 @@ boiled-claw/
 ├── Host Bridge
 │   ├── host.shell.run
 │   ├── host.file.read / write / list
-│   └── host.browser.navigate / extract_text / screenshot
+│   ├── host.browser.navigate / extract_text / screenshot
+│   └── host.current_tab.*  (Chrome extension relay)
 ├── Desktop Bridge
 │   ├── desktop.runtime.*
 │   ├── desktop.view.*
@@ -185,6 +187,47 @@ pip install -e '.[browser]'
 playwright install
 ```
 
+### 5b. Current Tab Adapter (Chrome extension relay)
+
+`このブラウザ` / `このタブ` を stable に扱いたい場合は、Desktop hotkey ではなく
+Chrome extension relay を使います。これは Host Bridge 内の local WebSocket server と、
+Chrome の active tab / `chrome.scripting` をつなぐ最小 adapter です。
+
+`.env`:
+
+```bash
+CURRENT_TAB_BRIDGE_ENABLED=true
+CURRENT_TAB_BRIDGE_HOST=127.0.0.1
+CURRENT_TAB_BRIDGE_PORT=8768
+CURRENT_TAB_BRIDGE_TOKEN=change-me
+```
+
+Chrome extension の読み込み:
+
+1. Chrome で `chrome://extensions` を開く
+2. `Developer mode` を有効化
+3. `Load unpacked` で `chrome_extension/current_tab_adapter` を選ぶ
+4. 拡張機能の `Options` で relay URL と token を設定する
+
+この extension は active tab に対して `chrome.scripting` を実行するため
+`<all_urls>` の host permission を持ちます。これは「どのサイトでも user が今見ているタブ」
+を対象に selector click / fill / text extraction を行うために必要です。通信先自体は
+local relay のみで、loopback bind・origin check・optional token によって絞っています。
+
+この extension は relay に再接続し続けるので、Host Bridge を先に起動しておくのが簡単です。
+現在の vertical slice では次の操作をサポートしています。
+
+- active tab 情報取得
+- active tab の URL 遷移
+- selector click
+- selector fill
+- selector text 抽出
+
+まずは `このブラウザを使って ... を調べて` のような current-tab research flow を、
+desktop control loop ではなく browser-native に通すための最小実装です。
+bridge は既定で loopback bind しか許可しません。Host/Desktop Bridge では DNS rebinding protection も有効です。
+`0.0.0.0` などの bind を許す必要がある場合だけ `BRIDGE_ALLOW_REMOTE_BIND=true` を明示してください。
+
 ### 6. Desktop Bridge
 
 Desktop Bridge は `DesktopClient` を呼ぶ thin adapter です。
@@ -207,6 +250,11 @@ desktop request の routing は次のように分かれます。
 pip install -e '.[desktop]'
 ```
 
+desktop extra は `pyobjc-framework-Cocoa` を使います。PyObjC の現行構成では
+AppKit / Foundation をこの umbrella package 経由で解決する前提です。
+既存環境で個別の `pyobjc-framework-AppKit` を pin している場合は、
+desktop extra の再インストールを推奨します。
+
 ```bash
 python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
 
@@ -227,7 +275,7 @@ DESKTOP_BRIDGE_URL=http://127.0.0.1:8767/sse
 boiled-claw/
 ├── src/
 │   ├── agents/
-│   │   ├── root_agent.py       # メインエージェント (gemini-3.0-flash)
+│   │   ├── root_agent.py       # メインエージェント (gemini-3.1-flash-lite-preview)
 │   │   ├── sub_agents.py       # サブエージェント定義
 │   │   └── model_config.py     # モデル設定管理
 │   ├── gateway/
@@ -242,6 +290,8 @@ boiled-claw/
 │   │   ├── host_bridge_client.py     # Host Bridge MCP client
 │   │   ├── host_bridge_exec.py       # Host Bridge 共通実行ヘルパー
 │   │   └── desktop_bridge_schema.py  # Desktop Bridge contract
+│   ├── browser/
+│   │   └── current_tab_bridge.py     # Chrome extension relay server
 │   ├── desktop/
 │   │   ├── client.py           # Desktop runtime interface
 │   │   ├── runtime.py          # emergency stop / runtime state
@@ -254,6 +304,7 @@ boiled-claw/
 │   │   ├── file_manager.py     # ファイル操作
 │   │   ├── context.py          # ToolContext 共通解決
 │   │   ├── browser.py          # ブラウザ自動化
+│   │   ├── current_tab.py      # Current-tab browser tools
 │   │   ├── memory.py           # メモリツール
 │   │   └── subagents.py        # サブエージェント・動的エージェント管理
 │   ├── mcp_servers/
@@ -460,7 +511,7 @@ curl http://127.0.0.1:18789/subagents/{session_id}
 ```bash
 # SSE モード（docker-compose.yml に定義済み）
 docker compose up -d boiled-claw-mcp-sample
-# → http://localhost:8765/sse でアクセス可能
+# → Docker ネットワーク内で http://boiled-claw-mcp-sample:8765/sse として利用
 ```
 
 Docker ネットワーク内からは `http://boiled-claw-mcp-sample:8765/sse` で接続できます。
@@ -507,7 +558,7 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 ## ロードマップ
 
 - [x] 基本エージェント構造 (Google ADK)
-- [x] Gemini 3.0 Flash モデル
+- [x] Gemini 3.1 Flash Lite Preview モデル
 - [x] Web検索ツール
 - [x] シェル実行ツール
 - [x] ファイル操作ツール

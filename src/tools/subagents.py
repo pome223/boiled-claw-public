@@ -25,13 +25,14 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from src.agents.sub_agents import SUB_AGENTS
+from src.agents.model_config import DEFAULT_MODEL
 from src.config.settings import get_settings
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.security.audit import AuditEventType, get_audit_logger
 
 _AGENT_MAP = {agent.name: agent for agent in SUB_AGENTS}
 
-_DEFAULT_DYNAMIC_MODEL = "gemini-3-flash-preview"
+_DEFAULT_DYNAMIC_MODEL = DEFAULT_MODEL.name
 
 
 def _build_mcp_toolsets(mcp_servers: list[dict]) -> list:
@@ -623,7 +624,7 @@ async def sessions_spawn_dynamic(
             {"type": "sse",   "url": "http://..."}
             {"type": "http",  "url": "http://..."}
             {"type": "stdio", "command": "npx", "args": [...], "env": {...}}
-        model: 使用モデル（デフォルト: gemini-3-flash-preview）
+        model: 使用モデル（デフォルト: settings.agent_model）
         mode: "run"（1回実行）/ "session"（継続セッション）
         run_timeout_seconds: タイムアウト秒数（0 = 無制限）
     """

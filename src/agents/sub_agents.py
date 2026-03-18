@@ -16,6 +16,13 @@ from src.tools.browser import (
     browser_screenshot,
 )
 from src.tools.control_ui_chat import control_ui_chat_send_message
+from src.tools.current_tab import (
+    current_tab_click,
+    current_tab_extract_text,
+    current_tab_fill,
+    current_tab_info,
+    current_tab_navigate,
+)
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
@@ -36,12 +43,13 @@ from src.tools.desktop import (
     desktop_view_windows,
 )
 from src.tools.memory import memory_store, memory_search
+from src.agents.model_config import DEFAULT_MODEL
 
 
 # Web検索特化エージェント
 web_agent = Agent(
     name="web_researcher",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="Web検索と情報収集を専門とするエージェント",
     instruction="""
 あなたはWeb検索のスペシャリストです。
@@ -64,7 +72,7 @@ web_agent = Agent(
 # ファイル操作特化エージェント
 file_agent = Agent(
     name="file_manager",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="ファイル操作とコード解析を専門とするエージェント",
     instruction="""
 あなたはファイル操作のスペシャリストです。
@@ -87,7 +95,7 @@ file_agent = Agent(
 # システム操作特化エージェント
 system_agent = Agent(
     name="system_operator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="システムコマンド実行とタスク自動化を専門とするエージェント",
     instruction="""
 あなたはシステム操作のスペシャリストです。
@@ -114,7 +122,7 @@ system_agent = Agent(
 # メモリ管理エージェント
 memory_agent = Agent(
     name="memory_keeper",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="会話履歴とメモリ管理を専門とするエージェント",
     instruction="""
 あなたはメモリ管理のスペシャリストです。
@@ -137,7 +145,7 @@ memory_agent = Agent(
 # ブラウザ自動化エージェント
 browser_agent = Agent(
     name="browser_automator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="ブラウザ自動化とスクレイピングを専門とするエージェント",
     instruction="""
 あなたはブラウザ自動化のスペシャリストです。
@@ -174,9 +182,43 @@ browser_agent = Agent(
 )
 
 
+current_tab_agent = Agent(
+    name="current_tab_operator",
+    model=DEFAULT_MODEL.name,
+    description="現在の Chrome タブを拡張 relay 経由で操作するエージェント",
+    instruction="""
+あなたは current-tab browser automation のスペシャリストです。
+
+## 役割
+- ユーザーが今見ている Chrome タブを直接操作する
+- Desktop hotkey や managed browser ではなく extension relay を使う
+- 検索・遷移・クリック・入力・テキスト抽出を現在タブ上で行う
+
+## 原則
+- まず `current_tab_info` で現在タブの URL / title を確認する
+- 検索系の依頼は raw の日本語文字列を打たず、検索 URL を組み立てて `current_tab_navigate` を使う
+- `current_tab_extract_text` は対象 selector が分かるなら selector を使う。曖昧なときだけ body を使う
+- ユーザーが「このブラウザ」「このタブ」と言った場合、別ブラウザや managed browser を開いたとは絶対に言わない
+- extension relay が使えないときはそのエラーを明示して止まる
+
+## 禁止
+- Desktop control tool にフォールバックしない
+- managed browser を開かない
+- CSV やローカルファイル作成に勝手に置き換えない
+""",
+    tools=[
+        current_tab_info,
+        current_tab_navigate,
+        current_tab_click,
+        current_tab_fill,
+        current_tab_extract_text,
+    ],
+)
+
+
 control_ui_chat_agent = Agent(
     name="control_ui_chat_operator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="boiled-claw Control UI の /chat ページとの会話を専門とするエージェント",
     instruction="""
 あなたは boiled-claw Control UI の `/chat` ページ専用オペレーターです。
@@ -204,7 +246,7 @@ control_ui_chat_agent = Agent(
 
 desktop_agent = Agent(
     name="desktop_operator",
-    model="gemini-3-flash-preview",
+    model=DEFAULT_MODEL.name,
     description="Desktop view/control を専門とするエージェント",
     instruction="""
 あなたは desktop automation のスペシャリストです。
@@ -253,6 +295,7 @@ SUB_AGENTS = [
     system_agent,
     memory_agent,
     browser_agent,
+    current_tab_agent,
     control_ui_chat_agent,
     desktop_agent,
 ]

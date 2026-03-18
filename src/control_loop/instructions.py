@@ -77,6 +77,65 @@ Risk level guide:
 - high: write/delete or sensitive desktop capture (file.write, memory.delete, desktop.view.screenshot, desktop.ax.snapshot)
 - critical: shell execution or agent spawn
 
+When a desktop automation step needs to inspect or verify UI state, include the
+necessary low-risk observation capabilities in required_capabilities as well.
+Typical pairings:
+- desktop.control.launch_app / desktop.control.focus_window -> desktop.view.windows, desktop.wait.window
+- desktop.control.click / desktop.control.type -> desktop.ax.find, desktop.wait.element
+
+When the user explicitly refers to the current browser/tab/page/window
+("this browser", "current tab", "このブラウザ", "このタブ"), treat it as a
+desktop-backed browser task, not a managed browser task. Include the desktop
+capabilities needed to actually interact with the visible browser window.
+Use the frontmost existing browser window as the source of truth.
+Minimum browser-operation capability set:
+- desktop.view.frontmost_app
+- desktop.view.windows
+- desktop.control.focus_window
+- desktop.control.click
+- desktop.control.hotkey
+- desktop.control.scroll
+- desktop.ax.find
+- desktop.wait.element
+- desktop.view.screenshot
+- desktop.ax.snapshot
+
+For current-browser tasks, do NOT include desktop.control.launch_app unless the
+user explicitly asked to open a new browser application. If the frontmost or
+existing browser window cannot be identified, fail with explicit evidence
+instead of falling back to launching a separate browser.
+Do not open a new tab or window for these tasks unless the user explicitly
+asked for that behavior, or the constraints explicitly require preserving the
+boiled-claw Control UI chat tab. When constraints say to preserve the Control
+UI tab, open a new tab in the same browser window before navigation so the
+chat session stays connected.
+When preserving the Control UI tab, target the browser window whose title
+contains "boiled-claw Control UI" before sending any browser hotkeys.
+
+If the user wants to populate or edit a spreadsheet or any visible text field,
+also include:
+- desktop.control.type
+
+If the user explicitly asks to populate a spreadsheet in the browser, do NOT
+substitute a local CSV file or file.write step unless the user explicitly asked
+for a local file. Prefer a browser/desktop plan that interacts with the visible
+spreadsheet instead.
+
+For current-browser research or search tasks, do NOT treat typed text alone as
+success. Include the submit action (for example, Enter or clicking a search
+button) and at least one follow-up read or verification step that confirms the
+page content after submission. Opening the address bar and typing a query is
+not sufficient.
+When entering a search into the browser address bar, prefer a fully formed
+search URL over raw non-ASCII text so the query is submitted reliably even
+with IME or browser suggestions active.
+For current-browser tasks, prefer Cmd/Ctrl+L to focus the address bar. Do NOT
+use Cmd/Ctrl+K or Cmd/Ctrl+E because browser extensions or side panels may
+intercept those shortcuts.
+If constraints require preserving the boiled-claw Control UI chat tab, prefer
+Cmd/Ctrl+T to open a new tab in the same browser window before using
+Cmd/Ctrl+L or typing the destination/query.
+
 Do NOT include anything outside the JSON object.
 """.strip()
 
@@ -97,6 +156,15 @@ do NOT call any tools. Return a JSON error immediately.
 
 Execute each step in the plan's "steps" array in dependency order.
 For each step, call the appropriate tool and collect its output.
+When the task refers to the current browser/tab/page/window, never launch a
+new browser application. If you need to bring the browser to the foreground,
+focus the existing browser window instead.
+If the constraints require preserving the boiled-claw Control UI chat tab,
+open a new tab in that same browser window before navigation so the original
+chat tab remains connected.
+When preserving that tab, focus the browser window whose title contains
+"boiled-claw Control UI" instead of focusing an arbitrary browser window by
+app name alone.
 
 Return ONLY a JSON object:
 {{

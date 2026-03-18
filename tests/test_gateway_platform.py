@@ -108,6 +108,23 @@ def test_http_run_persists_transcript_and_session_listing(monkeypatch, tmp_path)
         assert entries[1]["content"] == "echo:hello gateway"
 
 
+def test_chat_ui_and_static_assets_disable_caching(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        chat_response = client.get("/chat")
+        assert chat_response.status_code == 200
+        assert chat_response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
+        assert chat_response.headers["pragma"] == "no-cache"
+        assert chat_response.headers["expires"] == "0"
+
+        app_js_response = client.get("/chat-static/app.js")
+        assert app_js_response.status_code == 200
+        assert app_js_response.headers["cache-control"] == "no-store, no-cache, must-revalidate, max-age=0"
+        assert app_js_response.headers["pragma"] == "no-cache"
+        assert app_js_response.headers["expires"] == "0"
+
+
 def test_gateway_package_exports_remain_available():
     import src.gateway as gateway_pkg
 
@@ -338,6 +355,120 @@ async def test_run_agent_http_returns_browser_runtime_error_without_root_fallbac
     assert "web_search" in result["message"]
 
 
+@pytest.mark.asyncio
+async def test_run_control_loop_http_rejects_current_browser_request_without_desktop_bridge(
+    monkeypatch,
+    tmp_path,
+):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _unexpected_control_loop_run(*args, **kwargs):
+        raise AssertionError("control loop should not execute without current-browser runtime")
+
+    monkeypatch.setattr(gateway.control_loop, "run", _unexpected_control_loop_run)
+
+    result = await gateway._run_control_loop_http(
+        user_id="alice",
+        session_id="sess-browser",
+        goal="私が開いているブラウザのスプレッドシートに GTC の予想を書いて",
+        constraints=[],
+    )
+
+    assert result.success is False
+    assert "現在開いているブラウザや既存のスプレッドシートは操作できませんでした" in result.final_text
+    assert "Desktop Bridge が無効です" in result.final_text
+
+
+@pytest.mark.asyncio
+async def test_run_control_loop_http_adds_current_browser_constraints(
+    monkeypatch,
+    tmp_path,
+):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    async def _fake_current_browser_runtime_error(_goal: str):
+        return None
+
+    async def _fake_control_loop_run(*, goal, user_id, constraints, session_id):
+        captured["goal"] = goal
+        captured["user_id"] = user_id
+        captured["constraints"] = constraints
+        captured["session_id"] = session_id
+        return ExecutionResult(
+            request_id="req-1",
+            session_id=session_id,
+            user_id=user_id,
+            final_text="ok",
+            success=True,
+        )
+
+    monkeypatch.setattr(gateway, "_current_browser_runtime_error", _fake_current_browser_runtime_error)
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_loop_run)
+
+    result = await gateway._run_control_loop_http(
+        user_id="alice",
+        session_id="sess-browser",
+        goal="このブラウザを使って明日の天気を調べて",
+        constraints=[],
+    )
+
+    assert result.success is True
+    constraints = captured["constraints"]
+    assert "Operate only on the currently visible browser/tab/window." in constraints
+    assert "Do not launch a new browser application or open a managed browser for this task." in constraints
+    assert "Do not open a new browser tab or window unless the user explicitly asked for it." in constraints
+
+
+@pytest.mark.asyncio
+async def test_control_loop_task_preserves_control_ui_tab_for_current_browser(
+    monkeypatch,
+    tmp_path,
+):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    async def _fake_current_browser_runtime_error(_goal: str):
+        return None
+
+    async def _fake_control_loop_run(*, goal, user_id, constraints, session_id):
+        captured["goal"] = goal
+        captured["user_id"] = user_id
+        captured["constraints"] = constraints
+        captured["session_id"] = session_id
+        return ExecutionResult(
+            request_id="req-1",
+            session_id=session_id,
+            user_id=user_id,
+            final_text="ok",
+            success=True,
+        )
+
+    monkeypatch.setattr(
+        gateway, "_current_browser_runtime_error", _fake_current_browser_runtime_error
+    )
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_loop_run)
+
+    await gateway._control_loop_task(
+        session_id="sess-browser",
+        user_id="alice",
+        goal="このブラウザを使って午後の東京の花粉を調べて",
+        constraints=[],
+    )
+
+    constraints = captured["constraints"]
+    assert "Operate only on the currently visible browser/tab/window." in constraints
+    assert (
+        "If the current tab is the boiled-claw Control UI chat, preserve that tab and "
+        "open a new tab in the same browser window for browsing or search. Otherwise "
+        "stay on the current tab."
+    ) in constraints
+    assert (
+        "Do not open a new browser tab or window unless the user explicitly asked for it."
+        not in constraints
+    )
+
+
 def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
@@ -389,9 +520,13 @@ def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
 
             ws.send_json({"event": "chat.send", "text": "NVIDIA を検索"})
 
-            tool_start = ws.receive_json()
-            tool_result = ws.receive_json()
-            done = ws.receive_json()
+            seen_events = []
+            while len(seen_events) < 3:
+                event = ws.receive_json()
+                if event["event"] in {"tool.start", "tool.result", "chat.done"}:
+                    seen_events.append(event)
+
+            tool_start, tool_result, done = seen_events
 
             assert tool_start["event"] == "tool.start"
             assert tool_start["tool_name"] == "web_search"
@@ -770,6 +905,70 @@ def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
             assert gateway.tool_policy.get_pending_approval("req-123") is None
+            history = gateway.transcript.get_history(session_id, limit=20)
+            assert all(
+                not (
+                    entry.role == "system"
+                    and entry.metadata.get("source") == "tools.approval"
+                )
+                for entry in history
+            )
+
+
+def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, str] = {}
+
+    async def _fake_stop(*, session_id: str, user_id: str, reason: str):
+        captured["session_id"] = session_id
+        captured["user_id"] = user_id
+        captured["reason"] = reason
+        return True
+
+    monkeypatch.setattr(gateway, "_desktop_emergency_stop", _fake_stop)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.abort"})
+
+            done = ws.receive_json()
+            assert done["event"] == "chat.done"
+
+    assert captured["user_id"] == "alice"
+    assert captured["reason"] == "Abort requested from Web UI"
+
+
+@pytest.mark.asyncio
+async def test_start_agent_run_clears_desktop_stop(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, str] = {}
+
+    async def _fake_clear(*, session_id: str, user_id: str):
+        captured["session_id"] = session_id
+        captured["user_id"] = user_id
+        return True
+
+    async def _fake_abort(session_id: str):
+        return False
+
+    async def _fake_agent_task(session_id: str, user_id: str, message: str, request_id=None):
+        return None
+
+    monkeypatch.setattr(gateway, "_desktop_clear_stop", _fake_clear)
+    monkeypatch.setattr(gateway.manager, "abort", _fake_abort)
+    monkeypatch.setattr(gateway, "_agent_run_task", _fake_agent_task)
+
+    await gateway._start_agent_run(
+        session_id="sess-clear-1",
+        user_id="alice",
+        message="hello",
+    )
+    await asyncio.sleep(0)
+
+    assert captured == {"session_id": "sess-clear-1", "user_id": "alice"}
 
 
 def test_websocket_tool_approval_falls_back_to_control_loop(monkeypatch, tmp_path):
@@ -811,6 +1010,56 @@ def test_websocket_tool_approval_falls_back_to_control_loop(monkeypatch, tmp_pat
             assert resolved["event"] == "system.event"
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
+
+
+def test_websocket_control_loop_approval_resume_uses_session_task_goal(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    async def _fake_pending(*, user_id: str, session_id: str):
+        return {
+            "request_id": "plan_resume_1",
+            "goal": "planner rewritten goal",
+            "plan": {"constraints": ["keep-browser"]},
+        }
+
+    async def _fake_resolve(*, user_id: str, session_id: str, approved: bool, request_id: str | None = None):
+        assert approved is True
+        assert request_id == "plan_resume_1"
+        return True
+
+    async def _fake_task_goal(*, user_id: str, session_id: str):
+        return "original user goal"
+
+    async def _fake_start(*, session_id: str, user_id: str, goal: str, constraints: list[str], request_id=None):
+        captured["goal"] = goal
+        captured["constraints"] = constraints
+
+    monkeypatch.setattr(gateway.control_loop, "get_pending_approval", _fake_pending)
+    monkeypatch.setattr(gateway.control_loop, "resolve_human_approval", _fake_resolve)
+    monkeypatch.setattr(gateway.control_loop, "get_task_goal", _fake_task_goal)
+    monkeypatch.setattr(gateway, "_start_control_loop_run", _fake_start)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json(
+                {
+                    "event": "tools.approval",
+                    "request_id": "plan_resume_1",
+                    "approved": True,
+                }
+            )
+
+            resolved = ws.receive_json()
+            assert resolved["event"] == "system.event"
+            assert resolved["source"] == "tools.approval"
+            assert resolved["status"] == "resolved"
+
+    assert captured["goal"] == "original user goal"
+    assert captured["constraints"] == ["keep-browser"]
 
 
 def test_http_control_loop_run_returns_pending_approval(monkeypatch, tmp_path):

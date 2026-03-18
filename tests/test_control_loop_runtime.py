@@ -17,7 +17,7 @@ from src.control_loop.instructions import (
     build_planner_instruction,
     build_verifier_instruction,
 )
-from src.control_loop.root_workflow import ControlLoop, planner_with_policy
+from src.control_loop.root_workflow import ControlLoop, planner_with_policy, verifier_with_hooks
 import src.memory_lifecycle.candidate_store as candidate_store_module
 from src.memory_lifecycle.adk_memory_service import PromotedMemoryService
 from src.memory_lifecycle.candidate_store import CandidateStore
@@ -253,6 +253,35 @@ async def test_guarded_desktop_view_windows_allows_policy_approved(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_guarded_desktop_view_windows_allows_launch_app_plan(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [
+                    {"name": "desktop.control.launch_app"}
+                ]
+            },
+        }
+    )
+
+    async def _fake_windows(*, include_minimized=False):
+        assert include_minimized is False
+        return {"windows": [{"window_id": "w1", "app_name": "Google Chrome"}]}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_view_windows",
+        _fake_windows,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_view_windows(
+        tool_context=tool_context,
+    )
+
+    assert result["windows"][0]["app_name"] == "Google Chrome"
+
+
+@pytest.mark.asyncio
 async def test_guarded_desktop_ax_find_allows_policy_approved(monkeypatch):
     tool_context = SimpleNamespace(
         state={
@@ -270,6 +299,33 @@ async def test_guarded_desktop_ax_find_allows_policy_approved(monkeypatch):
     monkeypatch.setattr("src.tools.desktop.desktop_ax_find", _fake_find)
 
     result = await guarded_tools_module.guarded_desktop_ax_find(
+        app_name="Safari",
+        window_id="w1",
+        identifier="open-button",
+        tool_context=tool_context,
+    )
+
+    assert result["matched"] is True
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_wait_element_allows_click_plan(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.click"}]
+            },
+        }
+    )
+
+    async def _fake_wait(**kwargs):
+        assert kwargs["identifier"] == "open-button"
+        return {"matched": True, "target": {"identifier": "open-button"}}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_wait_element", _fake_wait)
+
+    result = await guarded_tools_module.guarded_desktop_wait_element(
         app_name="Safari",
         window_id="w1",
         identifier="open-button",
@@ -392,9 +448,76 @@ async def test_guarded_desktop_control_type_passes_selector(monkeypatch):
     assert seen["identifier"] == "search-field"
 
 
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_type_rewrites_current_browser_search_to_url(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザをつかって午後の東京の花粉を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.type"}]
+            },
+            "temp:current_browser_address_bar_focused": True,
+        }
+    )
+    seen = {}
+
+    async def _fake_type(**kwargs):
+        seen.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_control_type", _fake_type)
+
+    result = await guarded_tools_module.guarded_desktop_control_type(
+        text="午後の東京の花粉",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert (
+        seen["text"]
+        == "https://www.google.com/search?q=%E5%8D%88%E5%BE%8C%E3%81%AE%E6%9D%B1%E4%BA%AC%E3%81%AE%E8%8A%B1%E7%B2%89"
+    )
+    assert tool_context.state["temp:current_browser_address_bar_focused"] is False
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_type_rewrites_current_browser_search_without_focus_flag(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザをつかって明日の東京の花粉を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.type"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_type(**kwargs):
+        seen.update(kwargs)
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.desktop.desktop_control_type", _fake_type)
+
+    result = await guarded_tools_module.guarded_desktop_control_type(
+        text="明日の東京の花粉",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["text"].startswith("https://www.google.com/search?q=")
+    assert "%E6%98%8E%E6%97%A5" in seen["text"]
+
+
 def test_policy_judge_requires_human_for_desktop_control():
     callback_context = SimpleNamespace(
         state={
+            StateKeys.TASK_GOAL: "open the existing browser spreadsheet",
             StateKeys.TEMP_PLANNER_DRAFT: {
                 "plan_id": "plan-desktop-1",
                 "goal": "click through the desktop flow",
@@ -410,6 +533,82 @@ def test_policy_judge_requires_human_for_desktop_control():
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
     assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-desktop-1"
+    assert callback_context.state[StateKeys.APPROVAL_REQUEST]["goal"] == "open the existing browser spreadsheet"
+
+
+def test_policy_judge_expands_current_browser_capabilities():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを操作して、",
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "browser-op-init-v1",
+                "goal": "このブラウザを操作して、",
+                "risk_level": "high",
+                "required_capabilities": [
+                    {"name": "desktop.ax.snapshot", "mode": "read"},
+                    {"name": "desktop.control.focus_window", "mode": "execute"},
+                    {"name": "desktop.view.windows", "mode": "read"},
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+    approval_required = set(
+        callback_context.state[StateKeys.APPROVAL_REQUEST]["required_capabilities"]
+    )
+
+    assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
+    assert "desktop.view.frontmost_app" in required
+    assert "desktop.control.click" in required
+    assert "desktop.control.hotkey" in required
+    assert "desktop.control.scroll" in required
+    assert "desktop.ax.find" in required
+    assert "desktop.wait.element" in required
+    assert "desktop.view.screenshot" in required
+    assert "desktop.ax.snapshot" in required
+    assert "desktop.control.launch_app" not in required
+    assert "desktop.view.frontmost_app" in approval_required
+    assert "desktop.control.click" in approval_required
+
+
+def test_policy_judge_expands_type_for_current_browser_spreadsheet_goal():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: (
+                "このブラウザを使ってNvidaのGTCで紹介される可能性のある技術を"
+                "調べてスプレッドシーートにまとめて"
+            ),
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "nvidia-gtc-research-spreadsheet",
+                "goal": "visible spreadsheet workflow",
+                "risk_level": "high",
+                "required_capabilities": [
+                    {"name": "web.search", "mode": "network"},
+                    {"name": "browser.navigate", "mode": "network"},
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+
+    assert "desktop.view.frontmost_app" in required
+    assert "desktop.control.click" in required
+    assert "desktop.control.type" in required
+    assert "desktop.control.hotkey" in required
+    assert "desktop.control.scroll" in required
+    assert "desktop.ax.find" in required
+    assert "desktop.wait.element" in required
+    assert "desktop.view.screenshot" in required
+    assert "desktop.ax.snapshot" in required
+    assert "desktop.control.launch_app" not in required
 
 
 def test_planner_after_agent_callback_accepts_callback_context_only():
@@ -428,6 +627,247 @@ def test_planner_after_agent_callback_accepts_callback_context_only():
 
     assert callback_context.state[StateKeys.APPROVAL_STATUS] == "policy_approved"
     assert callback_context.state[StateKeys.PLAN_APPROVED]["plan_id"] == "plan-simple-1"
+
+
+def test_verifier_after_agent_callback_accepts_callback_context_only():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.VERIFY_LAST_REPORT: {
+                "report_id": "report-1",
+                "plan_id": "plan-1",
+                "status": "pass",
+            }
+        }
+    )
+
+    verifier_with_hooks.after_agent_callback(callback_context=callback_context)
+
+    assert callback_context.state[StateKeys.REPAIR_COUNT] == 0
+    assert callback_context.state[StateKeys.TEMP_REPAIR_PATCH] is None
+
+
+@pytest.mark.asyncio
+async def test_planner_instruction_mentions_current_browser_desktop_capabilities():
+    ctx = _make_readonly_context(
+        {
+            StateKeys.TASK_GOAL: "このブラウザを操作して、",
+            StateKeys.TASK_CONSTRAINTS: [],
+            StateKeys.TEMP_REPAIR_PATCH: None,
+        }
+    )
+
+    planner = await build_planner_instruction(ctx)
+
+    assert "desktop.view.frontmost_app" in planner
+    assert "desktop.control.click" in planner
+    assert "desktop.control.type" in planner
+    assert "desktop.control.hotkey" in planner
+    assert "desktop.control.scroll" in planner
+    assert "desktop.view.screenshot" in planner
+    assert "desktop.ax.snapshot" in planner
+    assert "desktop-backed browser task" in planner
+    assert "do not include desktop.control.launch_app" in planner.lower()
+    assert "preserving the boiled-claw Control UI chat tab" in planner
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_launch_app_rejects_current_browser_task():
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って明日の天気を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.launch_app"}]
+            },
+        }
+    )
+
+    with pytest.raises(PermissionError, match="not allowed for current-browser tasks"):
+        await guarded_tools_module.guarded_desktop_control_launch_app(
+            app_name="TextEdit",
+            tool_context=tool_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_launch_app_redirects_to_focus_for_current_browser(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って明日の天気を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.launch_app"}]
+            },
+        }
+    )
+
+    async def fake_focus_window(
+        app_name: str | None = None,
+        window_id: str | None = None,
+        title: str | None = None,
+        tool_context=None,
+    ) -> dict:
+        return {"success": True, "target": {"app_name": app_name, "window_id": window_id, "title": title}}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_focus_window",
+        fake_focus_window,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_launch_app(
+        app_name="Google Chrome",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["target"]["app_name"] == "Google Chrome"
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_focus_window_prefers_control_ui_title_when_preserving_tab(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザをつかって明日の東京の花粉を調べて",
+            StateKeys.TASK_CONSTRAINTS: [
+                (
+                    "If the current tab is the boiled-claw Control UI chat, preserve "
+                    "that tab and open a new tab in the same browser window for "
+                    "browsing or search. Otherwise stay on the current tab."
+                )
+            ],
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.focus_window"}]
+            },
+        }
+    )
+    calls: list[dict[str, str | None]] = []
+
+    async def fake_focus_window(
+        app_name: str | None = None,
+        window_id: str | None = None,
+        title: str | None = None,
+        tool_context=None,
+    ) -> dict:
+        calls.append(
+            {
+                "app_name": app_name,
+                "window_id": window_id,
+                "title": title,
+            }
+        )
+        return {
+            "success": True,
+            "target": {
+                "app_name": app_name,
+                "window_id": window_id,
+                "title": title,
+            },
+        }
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_focus_window",
+        fake_focus_window,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_focus_window(
+        app_name="Google Chrome",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert calls[0]["app_name"] == "Google Chrome"
+    assert calls[0]["title"] == "boiled-claw Control UI"
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_hotkey_rejects_new_tab_for_current_browser():
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って明日の天気を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.hotkey"}]
+            },
+        }
+    )
+
+    with pytest.raises(PermissionError, match="focus-address-bar or submit hotkeys"):
+        await guarded_tools_module.guarded_desktop_control_hotkey(
+            keys=["cmd", "t"],
+            tool_context=tool_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_hotkey_allows_browser_search_shortcuts_for_current_browser(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って午後の東京の花粉を調べて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.hotkey"}]
+            },
+        }
+    )
+
+    async def fake_hotkey(keys: list[str]) -> dict:
+        return {"ok": True, "keys": keys}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_hotkey",
+        fake_hotkey,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_hotkey(
+        keys=["cmd", "k"],
+        tool_context=tool_context,
+    )
+
+    assert result == {"ok": True, "keys": ["meta", "l"]}
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_hotkey_allows_new_tab_when_preserving_control_ui(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザを使って午後の東京の花粉を調べて",
+            StateKeys.TASK_CONSTRAINTS: [
+                (
+                    "If the current tab is the boiled-claw Control UI chat, preserve "
+                    "that tab and open a new tab in the same browser window for "
+                    "browsing or search. Otherwise stay on the current tab."
+                )
+            ],
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.hotkey"}]
+            },
+        }
+    )
+
+    async def fake_hotkey(keys: list[str]) -> dict:
+        return {"ok": True, "keys": keys}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_hotkey",
+        fake_hotkey,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_hotkey(
+        keys=["cmd", "t"],
+        tool_context=tool_context,
+    )
+
+    assert result == {"ok": True, "keys": ["cmd", "t"]}
 
 
 @pytest.mark.asyncio
@@ -646,3 +1086,42 @@ async def test_control_loop_rejects_goal_change_for_existing_session():
             user_id="user-1",
             session_id="sess-1",
         )
+
+
+@pytest.mark.asyncio
+async def test_control_loop_allows_goal_change_after_terminal_report():
+    session_service = InMemorySessionService()
+    existing = await session_service.create_session(
+        app_name="boiled_claw_v2",
+        user_id="user-1",
+        session_id="sess-1",
+        state={
+            StateKeys.TASK_GOAL: "Old goal",
+            StateKeys.TASK_CONSTRAINTS: ["legacy"],
+            StateKeys.PLAN_APPROVED: {"plan_id": "plan-old"},
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.VERIFY_LAST_REPORT: {"status": "pass", "summary": "done"},
+            StateKeys.TEMP_REPAIR_PATCH: {"note": "stale"},
+        },
+    )
+
+    loop = ControlLoop(session_service=session_service)
+    session, created = await loop._get_or_create_session(
+        user_id="user-1",
+        session_id="sess-1",
+        goal="New goal",
+        init_state={
+            StateKeys.TASK_GOAL: "New goal",
+            StateKeys.TASK_CONSTRAINTS: ["fresh"],
+            StateKeys.REPAIR_COUNT: 0,
+        },
+    )
+
+    assert created is False
+    assert session.id == existing.id
+    assert session.state[StateKeys.TASK_GOAL] == "New goal"
+    assert session.state[StateKeys.TASK_CONSTRAINTS] == ["fresh"]
+    assert session.state.get(StateKeys.PLAN_APPROVED) is None
+    assert session.state.get(StateKeys.APPROVAL_STATUS) is None
+    assert session.state.get(StateKeys.VERIFY_LAST_REPORT) is None
+    assert session.state.get(StateKeys.TEMP_REPAIR_PATCH) is None

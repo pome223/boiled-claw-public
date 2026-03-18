@@ -47,7 +47,7 @@ async def run_cli():
 
     console.print(Panel(
         "[bold cyan]boiled-claw[/bold cyan] 🦀\n"
-        "Your personal AI agent powered by Gemini 3.0 Flash\n"
+        "Your personal AI agent powered by Gemini\n"
         f"[dim]Model: {settings.agent_model}[/dim]\n"
         "[dim]Type 'exit' or 'quit' to stop[/dim]",
         border_style="cyan"

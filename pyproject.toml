@@ -27,7 +27,7 @@ slack = ["slack-bolt>=1.18.0"]
 browser = ["playwright>=1.40.0"]
 desktop = [
     "pyobjc-core>=10.0; sys_platform == 'darwin'",
-    "pyobjc-framework-AppKit>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
 ]
 redis = ["redis>=5.0.0"]
@@ -37,7 +37,7 @@ all = [
     "slack-bolt>=1.18.0",
     "playwright>=1.40.0",
     "pyobjc-core>=10.0; sys_platform == 'darwin'",
-    "pyobjc-framework-AppKit>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
     "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
     "redis>=5.0.0",
 ]

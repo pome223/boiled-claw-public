@@ -1,14 +1,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import AbstractSet, Any
 
+from src.runtime.task_keywords import (
+    CURRENT_BROWSER_KEYWORDS,
+    SPREADSHEET_KEYWORDS,
+)
 
 VALID_TARGETS = {"root_agent", "control_loop", "specialist", "dynamic_agent"}
 VALID_SPECIALISTS = {
     "web_researcher",
     "file_manager",
     "browser_automator",
+    "current_tab_operator",
     "control_ui_chat_operator",
     "desktop_operator",
     "system_operator",
@@ -36,6 +41,8 @@ _RESEARCH_KEYWORDS = {
     "gtc",
     "report",
     "research",
+    "検索",
+    "search",
 }
 
 _LONGFORM_KEYWORDS = {
@@ -300,6 +307,7 @@ def heuristic_decision(message: str) -> RoutingDecision:
     has_desktop_view = _contains_any(normalized, _DESKTOP_VIEW_KEYWORDS)
     has_desktop_control = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS)
     has_desktop_runtime = _contains_any(normalized, _DESKTOP_RUNTIME_KEYWORDS)
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
     has_file = _contains_any(normalized, _FILE_KEYWORDS)
     has_system = _contains_any(normalized, _SYSTEM_KEYWORDS)
     has_memory = _contains_any(normalized, _MEMORY_KEYWORDS)
@@ -310,6 +318,13 @@ def heuristic_decision(message: str) -> RoutingDecision:
         return RoutingDecision(
             target="dynamic_agent",
             reason="request explicitly asks for a custom or MCP-backed agent",
+            confidence=0.9,
+        )
+
+    if has_browser and has_spreadsheet:
+        return RoutingDecision(
+            target="control_loop",
+            reason="browser spreadsheet request requires multi-step automation instead of research/file fallback",
             confidence=0.9,
         )
 
@@ -415,6 +430,22 @@ def decision_from_payload(
     *,
     fallback_message: str,
 ) -> RoutingDecision:
+    if _is_current_tab_web_flow(fallback_message):
+        return RoutingDecision(
+            target="specialist",
+            specialist="current_tab_operator",
+            handoff_mode="direct",
+            reason="current browser web request should stay on the current-tab operator",
+            confidence=0.93,
+        )
+
+    if _requires_current_browser_control_loop(fallback_message):
+        return RoutingDecision(
+            target="control_loop",
+            reason="current browser or existing spreadsheet request requires desktop-backed control loop",
+            confidence=0.94,
+        )
+
     if _is_control_ui_chat_flow(fallback_message):
         return RoutingDecision(
             target="specialist",
@@ -438,8 +469,44 @@ def decision_from_payload(
     return heuristic_decision(fallback_message)
 
 
-def _contains_any(text: str, keywords: set[str]) -> bool:
+def _contains_any(text: str, keywords: AbstractSet[str]) -> bool:
     return any(keyword in text for keyword in keywords)
+
+
+def targets_user_browser(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    return _contains_any(normalized, CURRENT_BROWSER_KEYWORDS)
+
+
+def _requires_current_browser_control_loop(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized or not targets_user_browser(normalized):
+        return False
+
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
+    has_browser = _contains_any(normalized, _BROWSER_KEYWORDS)
+    has_desktop = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
+    has_research = _contains_any(normalized, _RESEARCH_KEYWORDS)
+    has_longform = _contains_any(normalized, _LONGFORM_KEYWORDS)
+
+    return has_spreadsheet or has_browser or has_desktop or has_research or has_longform
+
+
+def _is_current_tab_web_flow(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized or not targets_user_browser(normalized):
+        return False
+
+    if _is_control_ui_chat_flow(normalized):
+        return False
+
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
+    has_desktop = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
+    has_research = _contains_any(normalized, _RESEARCH_KEYWORDS | _LONGFORM_KEYWORDS)
+    has_browser = _contains_any(normalized, _BROWSER_KEYWORDS | _BROWSER_INTERACTION_KEYWORDS)
+    return not has_spreadsheet and not has_desktop and (has_research or has_browser)
 
 
 def _is_browser_only_flow(text: str) -> bool:

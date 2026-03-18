@@ -852,7 +852,7 @@ async def desktop_control_hotkey(
         tool_context=tool_context,
         success_response=lambda result: {"success": True},
         default_error="desktop hotkey failed",
-        extra_metadata={"approval_token": approval_token},
+        extra_metadata={"approval_token": approval_token, "keys": keys},
     )
 
 

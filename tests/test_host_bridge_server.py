@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import src.config.settings as settings_module
 from src.mcp_servers import host_bridge_server as server_module
 
 
@@ -42,6 +43,11 @@ class TestHostBridgeTools:
             "host.browser.extract_text",
             "host.browser.screenshot",
             "host.control_ui_chat.send_message",
+            "host.current_tab.info",
+            "host.current_tab.navigate",
+            "host.current_tab.click",
+            "host.current_tab.fill",
+            "host.current_tab.extract_text",
         }
 
     @pytest.mark.asyncio
@@ -66,6 +72,28 @@ class TestHostBridgeTools:
         assert "host.browser.extract_text" in text
         assert "host.browser.screenshot" in text
         assert "host.control_ui_chat.send_message" in text
+        assert "host.current_tab.info" in text
+        assert "host.current_tab.navigate" in text
+        assert "host.current_tab.click" in text
+        assert "host.current_tab.fill" in text
+        assert "host.current_tab.extract_text" in text
+
+    def test_create_server_blocks_remote_bind_by_default(self, monkeypatch):
+        from src.mcp_servers.host_bridge_server import create_server
+
+        monkeypatch.delenv("BRIDGE_ALLOW_REMOTE_BIND", raising=False)
+        settings_module.reset_settings()
+        with pytest.raises(ValueError):
+            create_server(host="0.0.0.0")
+
+    def test_create_server_allows_remote_bind_when_enabled(self, monkeypatch):
+        from src.mcp_servers.host_bridge_server import create_server
+
+        monkeypatch.setenv("BRIDGE_ALLOW_REMOTE_BIND", "true")
+        settings_module.reset_settings()
+        mcp = create_server(host="0.0.0.0")
+        assert mcp.settings.host == "0.0.0.0"
+        assert mcp.settings.transport_security.enable_dns_rebinding_protection is False
 
     @pytest.mark.asyncio
     async def test_host_shell_run_success(self, mcp):
@@ -350,6 +378,90 @@ class TestHostBridgeTools:
         assert '"ok": true' in text.lower()
         assert seen["visible"] is True
 
+    @pytest.mark.asyncio
+    async def test_host_current_tab_info_success(self, mcp, monkeypatch):
+        async def fake_current_tab_info():
+            return {
+                "ok": True,
+                "tab_id": 12,
+                "window_id": 7,
+                "url": "https://example.com",
+                "title": "Example",
+            }
+
+        monkeypatch.setattr(server_module, "_current_tab_info_payload", fake_current_tab_info)
+        monkeypatch.setattr(server_module, "current_tab_bridge_enabled", lambda: True)
+
+        result = await mcp.call_tool(
+            "host.current_tab.info",
+            {
+                "request_id": "req-current-tab-info",
+                "session_id": "sess-current-tab-info",
+                "user_id": "user-current-tab-info",
+                "agent_name": "pytest",
+            },
+        )
+        text = self._text(result)
+        assert '"tab_id": 12' in text
+        assert '"ok": true' in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_current_tab_navigate_success(self, mcp, monkeypatch):
+        async def fake_current_tab_navigate(request):
+            assert request.url == "https://example.com/search?q=tokyo"
+            return {
+                "ok": True,
+                "tab_id": 12,
+                "window_id": 7,
+                "url": request.url,
+                "title": "Search",
+            }
+
+        monkeypatch.setattr(server_module, "_current_tab_navigate_payload", fake_current_tab_navigate)
+        monkeypatch.setattr(server_module, "current_tab_bridge_enabled", lambda: True)
+
+        result = await mcp.call_tool(
+            "host.current_tab.navigate",
+            {
+                "request_id": "req-current-tab-nav",
+                "session_id": "sess-current-tab-nav",
+                "user_id": "user-current-tab-nav",
+                "agent_name": "pytest",
+                "url": "https://example.com/search?q=tokyo",
+            },
+        )
+        text = self._text(result)
+        assert "Search" in text
+        assert '"ok": true' in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_current_tab_extract_text_success(self, mcp, monkeypatch):
+        async def fake_current_tab_extract(request):
+            assert request.selector == "#content"
+            return {
+                "ok": True,
+                "selector": "#content",
+                "text": "tokyo pollen",
+                "length": 12,
+            }
+
+        monkeypatch.setattr(server_module, "_current_tab_extract_text_payload", fake_current_tab_extract)
+        monkeypatch.setattr(server_module, "current_tab_bridge_enabled", lambda: True)
+
+        result = await mcp.call_tool(
+            "host.current_tab.extract_text",
+            {
+                "request_id": "req-current-tab-text",
+                "session_id": "sess-current-tab-text",
+                "user_id": "user-current-tab-text",
+                "agent_name": "pytest",
+                "selector": "#content",
+            },
+        )
+        text = self._text(result)
+        assert "tokyo pollen" in text
+        assert '"ok": true' in text.lower()
+
 
 async def _send_stdio_requests(messages: list[dict]) -> list[dict]:
     proc = await asyncio.create_subprocess_exec(
@@ -419,6 +531,11 @@ async def test_stdio_tools_list():
         "host.browser.extract_text",
         "host.browser.screenshot",
         "host.control_ui_chat.send_message",
+        "host.current_tab.info",
+        "host.current_tab.navigate",
+        "host.current_tab.click",
+        "host.current_tab.fill",
+        "host.current_tab.extract_text",
     }
 
 

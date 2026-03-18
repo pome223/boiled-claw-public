@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 from typing import Optional
 
+from src.config.settings import get_settings
 from src.desktop import (
     DesktopAxFindRequest,
     BridgePingResult,
@@ -37,6 +38,7 @@ from src.desktop import (
     DesktopWaitWindowRequest,
     DesktopWindowsRequest,
 )
+from src.security.network import enforce_loopback_bind, is_loopback_host
 
 
 def create_server(
@@ -47,13 +49,29 @@ def create_server(
 ):
     from mcp.server.fastmcp import FastMCP
     from mcp.server.fastmcp.server import TransportSecuritySettings
+    settings = get_settings()
+
+    enforce_loopback_bind(
+        host,
+        service_name="Desktop Bridge",
+        allow_remote_bind=settings.bridge_allow_remote_bind,
+    )
+
+    if is_loopback_host(host):
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=True,
+            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
+            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+        )
+    else:
+        transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=False,
+        )
 
     mcp = FastMCP("desktop-bridge")
     mcp.settings.host = host
     mcp.settings.port = port
-    mcp.settings.transport_security = TransportSecuritySettings(
-        enable_dns_rebinding_protection=False,
-    )
+    mcp.settings.transport_security = transport_security
 
     transport_hint = "sse" if host != "stdio" else "stdio"
     client = desktop_client or build_default_desktop_client()

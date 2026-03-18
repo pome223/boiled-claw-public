@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Agent settings
     agent_name: str = Field(default="boiled-claw", description="Agent name")
-    agent_model: str = Field(default="gemini-3-flash-preview", description="Default model")
+    agent_model: str = Field(default="gemini-3.1-flash-lite-preview", description="Default model")
 
     # Gateway settings
     gateway_host: str = Field(default="127.0.0.1", description="Gateway host")
@@ -79,6 +79,12 @@ class Settings(BaseSettings):
         description="Allow browser automation to access localhost / loopback URLs",
     )
 
+    # Host / Desktop Bridge settings
+    bridge_allow_remote_bind: bool = Field(
+        default=False,
+        description="Allow bridge services to bind to non-loopback addresses",
+    )
+
     # Host Bridge settings
     host_bridge_enabled: bool = Field(default=False, description="Enable Host Bridge execution")
     host_bridge_url: Optional[str] = Field(
@@ -92,6 +98,24 @@ class Settings(BaseSettings):
     host_bridge_sse_read_timeout_seconds: int = Field(
         default=300,
         description="SSE read timeout for Host Bridge MCP connection",
+    )
+
+    # Current Tab extension bridge settings
+    current_tab_bridge_enabled: bool = Field(
+        default=False,
+        description="Enable the Chrome extension relay for current-tab control",
+    )
+    current_tab_bridge_host: str = Field(
+        default="127.0.0.1",
+        description="Bind host for the current-tab extension relay WebSocket server",
+    )
+    current_tab_bridge_port: int = Field(
+        default=8768,
+        description="Bind port for the current-tab extension relay WebSocket server",
+    )
+    current_tab_bridge_token: Optional[str] = Field(
+        default=None,
+        description="Optional shared token required by the Chrome Current Tab relay",
     )
 
     # Desktop Bridge settings
