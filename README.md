@@ -8,44 +8,43 @@
   A reference architecture for closed-loop AI agents — plan, execute, verify, repair.
 </p>
 
-**検証ループのないエージェントは本番で使えない。** boiled-claw は Planner → PolicyJudge → Executor → Verifier → Repair の閉ループ実行を持つ AI エージェントアーキテクチャです。
+**Agents without a verification loop can't be trusted in production.** boiled-claw is an AI agent architecture with a closed-loop execution cycle: Planner → PolicyJudge → Executor → Verifier → Repair.
 
-Google Agent Development Kit (ADK) ベース。MIT License。fork-friendly, upstream-curated.
+Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstream-curated.
 
 > **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## 特徴
+## Features
 
-- 🤖 **Gemini 3.1 Flash Lite Preview** - 既定の高速AIモデル
-- 🔍 **Web検索** - DuckDuckGo API 経由
-- 🌐 **ブラウザ自動化** - Playwright によるスクレイピング、スクリーンショット
-- 🧷 **Current Tab Adapter** - Chrome extension relay で「今見ているタブ」を直接操作
-- 💻 **シェル実行** - セキュリティポリシー付き安全なコマンド実行
-- 📁 **ファイル操作** - 読み書き対応
-- 🧩 **Host Bridge** - host OS 上の shell / file / browser を別プロセスで実行
-- 🧠 **メモリシステム** - SQLite + ベクトル検索
-- 💬 **マルチチャネル** - Telegram, Discord, WebSocket 対応
-- 🤝 **マルチエージェント委譲** - ADK sub_agents + AgentTool + sessions_spawn
-- 🔧 **動的エージェント生成** - 実行時に MCP サーバーをアタッチしてエージェントを生成
+- 🤖 **Gemini 3.1 Flash Lite Preview** - Default high-speed AI model
+- 🔍 **Web Search** - Via DuckDuckGo API
+- 🌐 **Browser Automation** - Scraping and screenshots with Playwright
+- 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
+- 💻 **Shell Execution** - Secure command execution with security policies
+- 📁 **File Operations** - Read and write support
+- 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
+- 🧠 **Memory System** - SQLite + vector search
+- 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
+- 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
+- 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
-- 📝 **永続 transcript** - SQLite-backed session history を Gateway が保持
-- ⏰ **Cron platform** - system event 連動、delivery target、retry をサポート
-- 🔌 **MCP サポート** - SSE / HTTP / stdio 接続に対応したサンプル MCP サーバー同梱
-- 🔒 **セキュリティ** - 監査ログ、コマンドポリシー、tool approvals
-- 📦 **拡張可能** - スキルプラグインシステム
-- 🐳 **Docker対応** - `docker compose` で簡単デプロイ
+- 📝 **Persistent Transcript** - Gateway holds SQLite-backed session history
+- ⏰ **Cron Platform** - System event integration, delivery targets, and retry support
+- 🔌 **MCP Support** - Bundled sample MCP server supporting SSE / HTTP / stdio connections
+- 🔒 **Security** - Audit logs, command policies, tool approvals
+- 📦 **Extensible** - Skill plugin system
+- 🐳 **Docker Ready** - Easy deployment with `docker compose`
 
-## アーキテクチャ
+## Architecture
 
-OpenClaw の control plane / execution plane 分離に影響を受けつつ、boiled-claw では次の 3 層で構成しています。
+Inspired by OpenClaw's control plane / execution plane separation, boiled-claw is composed of the following three layers:
 
-- **Gateway (Docker / control plane)**: routing、session、transcript、cron、approvals、UI event stream
-- **Host Bridge (host OS / execution plane)**: shell、file、browser を host 上の別プロセスで実行
-- **Desktop Bridge (host OS / desktop capability plane)**: GUI automation、Accessibility、emergency stop 向けの runtime
+- **Gateway (Docker / control plane)**: Routing, session, transcript, cron, approvals, UI event stream
+- **Host Bridge (host OS / execution plane)**: Runs shell, file, and browser operations in a separate process on the host
+- **Desktop Bridge (host OS / desktop capability plane)**: Runtime for GUI automation, Accessibility, and emergency stop
 
-desktop 側の core は `src/desktop/` にあり、bridge は adapter としてぶら下がる構成です。
-共通の capability / ping schema は `src/bridges/common_schema.py` に置き、desktop runtime が
-host bridge schema に依存しないようにしています。
+The desktop core lives in `src/desktop/`, with bridges hanging off it as adapters.
+Common capability / ping schemas are placed in `src/bridges/common_schema.py` to ensure the desktop runtime does not depend on the host bridge schema.
 
 ```
 boiled-claw/
@@ -67,110 +66,106 @@ boiled-claw/
 └── Skills / Memory / Channels / Security
 ```
 
-## セットアップ
+## Setup
 
-Docker ベースの運用と開発を前提にしています。ホスト側の `.venv` は使いません。
+This project is designed primarily for Docker-based operation and development.
+If you want to run Host Bridge or Desktop Bridge on the host OS, prepare a separate host-side Python environment for those standalone bridge processes.
 
-### 1. 前提条件
+### 1. Prerequisites
 
 - Docker
 - Docker Compose v2
 
-### 2. 環境変数設定
+### 2. Environment Variables
 
 ```bash
 cp .env.example .env
-# .env を編集して GOOGLE_API_KEY を設定
-# 必要に応じて Gateway auth も設定:
+# Edit .env and set GOOGLE_API_KEY
+# Optionally configure Gateway auth:
 # GATEWAY_API_KEY=change-me
 # GATEWAY_AUTH_USER_HEADER=X-Auth-User
 ```
 
-Google API Key は [Google AI Studio](https://aistudio.google.com/apikey) で取得できます。
+You can obtain a Google API Key from [Google AI Studio](https://aistudio.google.com/apikey).
 
-`GATEWAY_API_KEY` を設定すると Gateway の HTTP / WebSocket API に認証が掛かります。
-さらに `GATEWAY_AUTH_USER_HEADER` を設定した場合、effective `user_id` はその trusted header
-から解決され、path や body に含まれる `user_id` では上書きできません。`GATEWAY_AUTH_USER_HEADER`
-を未設定のまま shared API key を使う場合、認証済みリクエストは単一の shared principal に束ねられます。
+Setting `GATEWAY_API_KEY` enables authentication on the Gateway's HTTP / WebSocket API.
+If `GATEWAY_AUTH_USER_HEADER` is also set, the effective `user_id` is resolved from that trusted header, and cannot be overridden by the `user_id` in the path or body. When `GATEWAY_AUTH_USER_HEADER` is left unset and a shared API key is used, authenticated requests are grouped under a single shared principal.
 
-### 3. Gateway を起動
+### 3. Start the Gateway
 
 ```bash
-# Gateway のみ起動
+# Start Gateway only
 docker compose up -d --build boiled-claw-gateway
 
-# Gateway + サンプル MCP サーバーを起動
+# Start Gateway + sample MCP server
 docker compose up -d --build boiled-claw-gateway boiled-claw-mcp-sample
 
-# ログ確認
+# View logs
 docker compose logs -f boiled-claw-gateway
 
-# 停止
+# Stop
 docker compose down
 ```
 
-Gateway 起動後のエンドポイント:
+Endpoints available after Gateway startup:
 
 - Web UI: `http://127.0.0.1:18789/chat`
 - WebSocket endpoint: `ws://127.0.0.1:18789/ws/{user_id}`
 - Protocol schema: `http://127.0.0.1:18789/protocol`
 
-### 4. コンテナから使う
+### 4. Using from a Container
 
-#### CLIモード
+#### CLI Mode
 
 ```bash
 docker compose --profile cli run --rm boiled-claw-cli cli
 ```
 
-#### チャネルモード (Telegram, Discord)
+#### Channel Mode (Telegram, Discord)
 
 ```bash
-# .env にチャネルトークンを設定してから
+# Set channel tokens in .env first
 docker compose run --rm boiled-claw-gateway python -m src.main channels
 ```
 
-#### 開発コマンド
+#### Development Commands
 
 ```bash
-# 単体テスト
+# Unit tests
 docker compose --profile dev run --rm boiled-claw-dev pytest tests/ -m "not e2e"
 
-# E2E テスト
+# E2E tests
 docker compose --profile dev run --rm boiled-claw-dev pytest tests/test_e2e.py -v -m e2e
 
 # Lint
 docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 ```
 
-`boiled-claw-dev` は Docker ネットワーク内で `GATEWAY_URL=http://boiled-claw-gateway:18789`
-を使うため、E2E テストもホストの Python 環境に依存しません。
+`boiled-claw-dev` uses `GATEWAY_URL=http://boiled-claw-gateway:18789` within the Docker network, so E2E tests do not depend on the host's Python environment.
 
-#### ブラウザ自動化をコンテナに含める
+#### Including Browser Automation in the Container
 
 ```bash
 docker compose build --build-arg INSTALL_BROWSER=true boiled-claw-gateway
 docker compose up -d boiled-claw-gateway
 ```
 
-### 5. Host Bridge を host OS で起動する
+### 5. Running Host Bridge on the Host OS
 
-Gateway を Docker に残したまま host shell / file / browser を使う場合は、
-Host Bridge を **Docker 外の別プロセス** として起動します。
+To use host shell / file / browser while keeping the Gateway in Docker, start Host Bridge as a **separate process outside Docker**.
 
-この standalone bridge 自体には `GOOGLE_API_KEY` は不要です。
+This standalone bridge does not require `GOOGLE_API_KEY`.
 
 ```bash
-# SSE で起動
+# Start with SSE
 python -m src.main host-bridge --host 127.0.0.1 --port 8766
 
-# または console script
+# Or via console script
 boiled-claw-host-bridge --sse --host 127.0.0.1 --port 8766
 ```
 
-`.env` に置くか、`docker compose up` のシェル環境変数として渡します。
-現行の `docker-compose.yml` は `HOST_BRIDGE_*` / `DESKTOP_BRIDGE_*` を
-gateway / cli / dev コンテナへ明示的に渡すので、どちらの方法でも有効です。
+Set these in `.env` or pass them as shell environment variables when running `docker compose up`.
+The current `docker-compose.yml` explicitly forwards `HOST_BRIDGE_*` / `DESKTOP_BRIDGE_*` variables to the gateway / cli / dev containers, so either method works.
 
 ```bash
 HOST_BRIDGE_ENABLED=true
@@ -178,30 +173,21 @@ HOST_BRIDGE_URL=http://host.docker.internal:8766/sse
 BROWSER_ALLOW_LOOPBACK=true
 ```
 
-Playwright を Host Bridge 側で使う場合は、host 側 Python 環境に browser extras を入れておきます。
+If using Playwright on the Host Bridge side, install the browser extras in the host's Python environment.
 
-`http://localhost:18789/chat` のような loopback URL を browser automation で開きたい場合は、
-Host Bridge / gateway の両方で `BROWSER_ALLOW_LOOPBACK=true` を有効にします。
+To open loopback URLs like `http://localhost:18789/chat` with browser automation, enable `BROWSER_ALLOW_LOOPBACK=true` on both the Host Bridge and the Gateway.
 
-`browser_navigate(..., visible=true)` を使うと、Host Bridge 側で headless ではない
-Playwright managed browser を開けます。`control_ui_chat_operator` はこの visible mode を
-既定で使うので、`/chat` 向けの会話フローは user に見える Chromium window を優先します。
-Desktop Bridge も有効なら、visible browser window の前面化も補助します。
-現在の browser session は global singleton なので、`visible=true` と `visible=false` を
-明示的に切り替えると既存 session を閉じて作り直します。`visible=None` の呼び出しは
-既存 session をそのまま再利用します。前面化は best-effort で、現状は Playwright の
-Chromium window を前提に `bring_to_front()` と Desktop Bridge `focus_window(...)` を順に試します。
+Using `browser_navigate(..., visible=true)` opens a non-headless Playwright managed browser on the Host Bridge side. `control_ui_chat_operator` uses this visible mode by default, so conversation flows targeting `/chat` prefer a user-visible Chromium window. If Desktop Bridge is also enabled, it assists with bringing the visible browser window to the foreground.
+The current browser session is a global singleton, so explicitly switching between `visible=true` and `visible=false` closes the existing session and creates a new one. Calls with `visible=None` reuse the existing session as-is. Foregrounding is best-effort; currently it assumes Playwright's Chromium window and tries `bring_to_front()` followed by Desktop Bridge `focus_window(...)`.
 
 ```bash
 pip install -e '.[browser]'
 playwright install
 ```
 
-### 5b. Current Tab Adapter (Chrome extension relay)
+### 5b. Current Tab Adapter (Chrome Extension Relay)
 
-`このブラウザ` / `このタブ` を stable に扱いたい場合は、Desktop hotkey ではなく
-Chrome extension relay を使います。これは Host Bridge 内の local WebSocket server と、
-Chrome の active tab / `chrome.scripting` をつなぐ最小 adapter です。
+To handle "this browser" / "this tab" in a stable way, use the Chrome extension relay instead of a Desktop hotkey. This is a minimal adapter connecting a local WebSocket server inside Host Bridge to Chrome's active tab / `chrome.scripting`.
 
 `.env`:
 
@@ -212,135 +198,126 @@ CURRENT_TAB_BRIDGE_PORT=8768
 CURRENT_TAB_BRIDGE_TOKEN=change-me
 ```
 
-Chrome extension の読み込み:
+Loading the Chrome extension:
 
-1. Chrome で `chrome://extensions` を開く
-2. `Developer mode` を有効化
-3. `Load unpacked` で `chrome_extension/current_tab_adapter` を選ぶ
-4. 拡張機能の `Options` で relay URL と token を設定する
+1. Open `chrome://extensions` in Chrome
+2. Enable `Developer mode`
+3. Click `Load unpacked` and select `chrome_extension/current_tab_adapter`
+4. Open the extension's `Options` page to configure the relay URL and token
 
-この extension は active tab に対して `chrome.scripting` を実行するため
-`<all_urls>` の host permission を持ちます。これは「どのサイトでも user が今見ているタブ」
-を対象に selector click / fill / text extraction を行うために必要です。通信先自体は
-local relay のみで、loopback bind・origin check・optional token によって絞っています。
+This extension requires `<all_urls>` host permission because it uses `chrome.scripting` on the active tab. This is necessary to perform selector click / fill / text extraction on "whichever tab the user is currently viewing" regardless of the site. Communication itself is limited to the local relay only, restricted by loopback bind, origin check, and an optional token.
 
-この extension は relay に再接続し続けるので、Host Bridge を先に起動しておくのが簡単です。
-現在の vertical slice では次の操作をサポートしています。
+The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 
-- active tab 情報取得
-- active tab の URL 遷移
-- selector click
-- selector fill
-- selector text 抽出
+- Get active tab info
+- Navigate the active tab to a URL
+- Selector click
+- Selector fill
+- Selector text extraction
 
-まずは `このブラウザを使って ... を調べて` のような current-tab research flow を、
-desktop control loop ではなく browser-native に通すための最小実装です。
-bridge は既定で loopback bind しか許可しません。Host/Desktop Bridge では DNS rebinding protection も有効です。
-`0.0.0.0` などの bind を許す必要がある場合だけ `BRIDGE_ALLOW_REMOTE_BIND=true` を明示してください。
+This is the minimal implementation for routing current-tab research flows like "use this browser to look up ..." through the browser natively rather than through the desktop control loop.
+Bridges bind to loopback only by default. DNS rebinding protection is also enabled on Host/Desktop Bridge.
+Only set `BRIDGE_ALLOW_REMOTE_BIND=true` explicitly if you need to allow binding to addresses like `0.0.0.0`.
 
 ### 6. Desktop Bridge
 
-Desktop Bridge は `DesktopClient` を呼ぶ thin adapter です。
-現時点では macOS 向けの `pyobjc` 実装が入り、
-`runtime.status` / `runtime.stop` / `runtime.clear_stop` による emergency stop 管理と、
-`frontmost_app` / `windows` / `screenshot` / `ax_find` / `ax_snapshot` に加えて、
-`wait_window` / `wait_element`、`launch_app` / `focus_window` / `click` / `type` / `hotkey` / `scroll` / `drag` まで扱えます。
-`click` と `type` は座標指定だけでなく、Accessibility selector を使った targeting にも対応します。
-スクリーンショットは Phase 1 では `screencapture` を使う pragmatic fallback です。将来的には native companion 側で
-ScreenCaptureKit に置き換えても `DesktopClient` surface は変えない前提です。
-こちらも standalone bridge として起動でき、`GOOGLE_API_KEY` は不要です。
+Desktop Bridge is a thin adapter that calls `DesktopClient`.
+Currently it includes a macOS implementation using `pyobjc`, and supports:
+emergency stop management via `runtime.status` / `runtime.stop` / `runtime.clear_stop`,
+`frontmost_app` / `windows` / `screenshot` / `ax_find` / `ax_snapshot`,
+`wait_window` / `wait_element`, `launch_app` / `focus_window` / `click` / `type` / `hotkey` / `scroll` / `drag`.
+`click` and `type` support not only coordinate-based targeting but also Accessibility selector-based targeting.
+Screenshots use `screencapture` as a pragmatic Phase 1 fallback. In the future, even if the native companion switches to ScreenCaptureKit, the `DesktopClient` surface will remain unchanged.
+This bridge can also run standalone and does not require `GOOGLE_API_KEY`.
 
-desktop request の routing は次のように分かれます。
+Desktop request routing is split as follows:
 
-- 単発の desktop view / runtime safety: `desktop_operator`
-- 単発の desktop control: `desktop_operator`
-- 複数手順で verify を伴う desktop automation: `control_loop`
+- Single-shot desktop view / runtime safety: `desktop_operator`
+- Single-shot desktop control: `desktop_operator`
+- Multi-step desktop automation with verification: `control_loop`
 
 ```bash
 pip install -e '.[desktop]'
 ```
 
-desktop extra は `pyobjc-framework-Cocoa` を使います。PyObjC の現行構成では
-AppKit / Foundation をこの umbrella package 経由で解決する前提です。
-既存環境で個別の `pyobjc-framework-AppKit` を pin している場合は、
-desktop extra の再インストールを推奨します。
+The desktop extra uses `pyobjc-framework-Cocoa`. In PyObjC's current structure, AppKit / Foundation are resolved through this umbrella package. If your existing environment pins a separate `pyobjc-framework-AppKit`, reinstalling the desktop extra is recommended.
 
 ```bash
 python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
 
-# または console script
+# Or via console script
 boiled-claw-desktop-bridge --sse --host 127.0.0.1 --port 8767
 ```
 
-Gateway から Desktop Bridge を使うときは `.env` に次を設定します。
+To use Desktop Bridge from the Gateway, set the following in `.env`:
 
 ```bash
 DESKTOP_BRIDGE_ENABLED=true
 DESKTOP_BRIDGE_URL=http://127.0.0.1:8767/sse
 ```
 
-## プロジェクト構造
+## Project Structure
 
 ```
 boiled-claw/
 ├── src/
 │   ├── agents/
-│   │   ├── root_agent.py       # メインエージェント (gemini-3.1-flash-lite-preview)
-│   │   ├── sub_agents.py       # サブエージェント定義
-│   │   └── model_config.py     # モデル設定管理
+│   │   ├── root_agent.py       # Main agent (gemini-3.1-flash-lite-preview)
+│   │   ├── sub_agents.py       # Sub-agent definitions
+│   │   └── model_config.py     # Model configuration management
 │   ├── gateway/
-│   │   ├── server.py           # WebSocketゲートウェイサーバー
+│   │   ├── server.py           # WebSocket gateway server
 │   │   ├── protocol.py         # Typed Gateway Protocol v1
-│   │   ├── transcript.py       # 永続 transcript / history
-│   │   ├── session_manager.py  # セッション管理
-│   │   └── router.py           # メッセージルーティング
+│   │   ├── transcript.py       # Persistent transcript / history
+│   │   ├── session_manager.py  # Session management
+│   │   └── router.py           # Message routing
 │   ├── bridges/
-│   │   ├── common_schema.py         # Bridge/runtime 共通 schema
+│   │   ├── common_schema.py         # Bridge/runtime common schema
 │   │   ├── host_bridge_schema.py     # Host Bridge contract
 │   │   ├── host_bridge_client.py     # Host Bridge MCP client
-│   │   ├── host_bridge_exec.py       # Host Bridge 共通実行ヘルパー
+│   │   ├── host_bridge_exec.py       # Host Bridge common execution helper
 │   │   └── desktop_bridge_schema.py  # Desktop Bridge contract
 │   ├── browser/
 │   │   └── current_tab_bridge.py     # Chrome extension relay server
 │   ├── desktop/
 │   │   ├── client.py           # Desktop runtime interface
-│   │   ├── runtime.py          # emergency stop / runtime state
-│   │   ├── fake_client.py      # contract test 用 fake runtime
-│   │   ├── pyobjc_client.py    # macOS pyobjc 実装
-│   │   └── factory.py          # runtime factory
+│   │   ├── runtime.py          # Emergency stop / runtime state
+│   │   ├── fake_client.py      # Fake runtime for contract tests
+│   │   ├── pyobjc_client.py    # macOS pyobjc implementation
+│   │   └── factory.py          # Runtime factory
 │   ├── tools/
-│   │   ├── web_search.py       # Web検索
-│   │   ├── shell.py            # シェル実行
-│   │   ├── file_manager.py     # ファイル操作
-│   │   ├── context.py          # ToolContext 共通解決
-│   │   ├── browser.py          # ブラウザ自動化
+│   │   ├── web_search.py       # Web search
+│   │   ├── shell.py            # Shell execution
+│   │   ├── file_manager.py     # File operations
+│   │   ├── context.py          # ToolContext common resolution
+│   │   ├── browser.py          # Browser automation
 │   │   ├── current_tab.py      # Current-tab browser tools
-│   │   ├── memory.py           # メモリツール
-│   │   └── subagents.py        # サブエージェント・動的エージェント管理
+│   │   ├── memory.py           # Memory tools
+│   │   └── subagents.py        # Sub-agent / dynamic agent management
 │   ├── mcp_servers/
-│   │   ├── sample_server.py         # サンプル MCP サーバー
+│   │   ├── sample_server.py         # Sample MCP server
 │   │   ├── host_bridge_server.py    # Host Bridge MCP server
 │   │   └── desktop_bridge_server.py # Desktop Bridge adapter server
 │   ├── channels/
-│   │   ├── base.py             # チャネル基底クラス
-│   │   ├── registry.py         # チャネルレジストリ
-│   │   ├── telegram.py         # Telegram統合
-│   │   └── discord_ch.py       # Discord統合
+│   │   ├── base.py             # Channel base class
+│   │   ├── registry.py         # Channel registry
+│   │   ├── telegram.py         # Telegram integration
+│   │   └── discord_ch.py       # Discord integration
 │   ├── memory/
-│   │   └── (メモリストア実装)
+│   │   └── (memory store implementation)
 │   ├── security/
-│   │   ├── audit.py            # 監査ログ
-│   │   ├── policy.py           # コマンド/パス セキュリティポリシー
-│   │   └── tool_policy.py      # tool approvals / per-agent policy
+│   │   ├── audit.py            # Audit logs
+│   │   ├── policy.py           # Command/path security policy
+│   │   └── tool_policy.py      # Tool approvals / per-agent policy
 │   ├── config/
-│   │   ├── settings.py         # Pydantic設定
-│   │   └── schema.py           # 設定スキーマ
+│   │   ├── settings.py         # Pydantic settings
+│   │   └── schema.py           # Configuration schema
 │   ├── skills/
-│   │   ├── loader.py           # スキルローダー
-│   │   └── base.py             # スキル基底クラス
-│   └── main.py                 # エントリーポイント
+│   │   ├── loader.py           # Skill loader
+│   │   └── base.py             # Skill base class
+│   └── main.py                 # Entry point
 ├── tests/
-│   ├── test_sample_mcp_server.py  # MCP サーバーテスト
+│   ├── test_sample_mcp_server.py  # MCP server tests
 │   └── ...
 ├── Dockerfile
 ├── docker-compose.yml
@@ -349,20 +326,20 @@ boiled-claw/
 └── README.md
 ```
 
-## 使い方
+## Usage
 
-### CLIで使う
+### Using via CLI
 
 ```bash
 $ docker compose --profile cli run --rm boiled-claw-cli cli
 
-You: Pythonの最新ニュースを検索して
+You: Search for the latest Python news
 
-boiled-claw 🦀 [Web検索を実行...]
-Python 3.12がリリースされました...
+boiled-claw 🦀 [Running web search...]
+Python 3.12 has been released...
 ```
 
-### WebSocket経由で使う
+### Using via WebSocket
 
 ```python
 import asyncio
@@ -390,7 +367,7 @@ async def chat():
 asyncio.run(chat())
 ```
 
-クライアントから送る主なイベント:
+Primary events sent by the client:
 
 - `chat.send`
 - `chat.inject`
@@ -399,7 +376,7 @@ asyncio.run(chat())
 - `presence.ping`
 - `tools.approval`
 
-サーバーから返る主なイベント:
+Primary events returned by the server:
 
 - `connected`
 - `chat.done`
@@ -409,9 +386,9 @@ asyncio.run(chat())
 - `cron.update`
 - `tools.approval_request`
 
-イベント schema は `GET /protocol` で取得できます。
+The event schema can be retrieved via `GET /protocol`.
 
-### HTTP API（curl）で使う
+### Using via HTTP API (curl)
 
 ```bash
 curl -sS -X POST http://127.0.0.1:18789/agent/run \
@@ -419,141 +396,140 @@ curl -sS -X POST http://127.0.0.1:18789/agent/run \
   -H "Authorization: Bearer ${GATEWAY_API_KEY}" \
   -d '{
     "user_id": "curl_user",
-    "message": "NVIDIAの最新ニュースを3つ教えて"
+    "message": "Tell me the 3 latest NVIDIA news items"
   }'
 ```
 
-`GATEWAY_API_KEY` を設定していない場合は `Authorization` ヘッダは不要です。
-`session_id` を指定すれば同一会話を継続できます。
+If `GATEWAY_API_KEY` is not set, the `Authorization` header is not required.
+Specify a `session_id` to continue the same conversation.
 
-### Gateway 認証と `user_id`
+### Gateway Authentication and `user_id`
 
-- 認証無効時: HTTP body / WebSocket path の `user_id` をそのまま使います。
-- `GATEWAY_API_KEY` のみ設定時: 認証済みリクエストは single shared principal に束ねられます。
-- `GATEWAY_API_KEY` + `GATEWAY_AUTH_USER_HEADER` 設定時: effective `user_id` は trusted header から解決されます。
+- Auth disabled: Uses the `user_id` from the HTTP body / WebSocket path as-is.
+- `GATEWAY_API_KEY` only: Authenticated requests are grouped under a single shared principal.
+- `GATEWAY_API_KEY` + `GATEWAY_AUTH_USER_HEADER`: The effective `user_id` is resolved from the trusted header.
 
-つまり、認証有効時は path/body の `user_id` を transcript ownership の境界として信用しません。
-reverse proxy や API gateway で認証済みユーザー ID を `GATEWAY_AUTH_USER_HEADER` に流す構成を想定しています。
+In other words, when auth is enabled, the `user_id` in the path/body is not trusted as a transcript ownership boundary. The expected setup is a reverse proxy or API gateway that passes the authenticated user ID via `GATEWAY_AUTH_USER_HEADER`.
 
-### Gateway の主要エンドポイント
+### Key Gateway Endpoints
 
-- `GET /protocol` - typed protocol schema
-- `GET /sessions/{user_id}` - セッション一覧
-- `GET /sessions/{user_id}/{session_id}/history` - transcript history
-- `GET /transcript/sessions?user_id=...` - transcript-backed session summaries
-- `POST /cron` / `GET /cron` - cron platform
-- `GET /tools/policy` - tool policy 一覧
-- `GET /tools/approvals` - pending approval 一覧
+- `GET /protocol` - Typed protocol schema
+- `GET /sessions/{user_id}` - Session list
+- `GET /sessions/{user_id}/{session_id}/history` - Transcript history
+- `GET /transcript/sessions?user_id=...` - Transcript-backed session summaries
+- `POST /cron` / `GET /cron` - Cron platform
+- `GET /tools/policy` - Tool policy list
+- `GET /tools/approvals` - Pending approval list
 
-### Telegramで使う
+### Using with Telegram
 
-1. BotFather で Telegram Bot を作成
-2. `.env` に `TELEGRAM_BOT_TOKEN` を設定
-3. `docker compose run --rm boiled-claw-gateway python -m src.main channels` で起動
-4. Telegram で Bot にメッセージ送信
+1. Create a Telegram Bot via BotFather
+2. Set `TELEGRAM_BOT_TOKEN` in `.env`
+3. Start with `docker compose run --rm boiled-claw-gateway python -m src.main channels`
+4. Send a message to the Bot on Telegram
 
-## 機能一覧
+## Feature List
 
-### ツール
+### Tools
 
-- **web_search** - DuckDuckGo API で Web 検索
-- **browser_navigate** - URL に移動
-- **browser_click** - 要素をクリック
-- **browser_fill** - フォーム入力
-- **browser_press** - Enter などのキー送信
-- **browser_screenshot** - スクリーンショット取得
-- **browser_extract_text** - テキスト抽出
-- **run_shell** - シェルコマンド実行
-- **read_file** - ファイル読み込み
-- **write_file** - ファイル書き込み
-- **memory_store** - メモリに保存
-- **memory_search** - メモリから検索
-- **agents_list** - 利用可能なサブエージェント一覧
-- **sessions_spawn** - サブエージェントをバックグラウンド起動
-- **sessions_spawn_dynamic** - MCP サーバー付き動的エージェントを生成・起動
-- **subagents_list** - サブエージェント実行の状態確認
-- **subagents_steer** - mode=session のサブエージェントへ追加入力
-- **subagents_kill** - サブエージェント実行停止
-- **skill_list** - ロード済みスキル一覧を取得
-- **skill_execute** - 指定スキルを実行
-- **skill_spawn** - スキル内容を instruction にして動的 Agent を起動
+- **web_search** - Web search via DuckDuckGo API
+- **browser_navigate** - Navigate to a URL
+- **browser_click** - Click an element
+- **browser_fill** - Fill a form field
+- **browser_press** - Send a key press (e.g., Enter)
+- **browser_screenshot** - Take a screenshot
+- **browser_extract_text** - Extract text
+- **run_shell** - Execute a shell command
+- **read_file** - Read a file
+- **write_file** - Write a file
+- **memory_store** - Save to memory
+- **memory_search** - Search memory
+- **agents_list** - List available sub-agents
+- **sessions_spawn** - Launch a sub-agent in the background
+- **sessions_spawn_dynamic** - Generate and launch a dynamic agent with MCP servers
+- **subagents_list** - Check sub-agent execution status
+- **subagents_steer** - Send additional input to a mode=session sub-agent
+- **subagents_kill** - Stop a sub-agent execution
+- **skill_list** - List loaded skills
+- **skill_execute** - Execute a specified skill
+- **skill_spawn** - Launch a dynamic agent using skill content as its instruction
 
-### 動的エージェント生成 (sessions_spawn_dynamic)
+### Dynamic Agent Generation (sessions_spawn_dynamic)
 
-実行時にシステムプロンプトと MCP サーバーを指定して、カスタムエージェントを動的に生成できます。
+You can dynamically generate custom agents at runtime by specifying a system prompt and MCP servers.
 
 ```bash
-# エージェントを起動（例: サンプル MCP サーバーをアタッチ）
+# Launch an agent (example: attach the sample MCP server)
 curl -sS -X POST http://127.0.0.1:18789/agent/run \
   -H "Content-Type: application/json" \
   -d '{
     "user_id": "my_user",
-    "message": "sessions_spawn_dynamic でエージェントを起動して。instruction=\"あなたは計算エージェントです\"、mcp_servers=[{\"type\":\"sse\",\"url\":\"http://boiled-claw-mcp-sample:8765/sse\"}]、task=\"100 + 200 を計算して\""
+    "message": "Launch an agent with sessions_spawn_dynamic. instruction=\"You are a calculation agent\", mcp_servers=[{\"type\":\"sse\",\"url\":\"http://boiled-claw-mcp-sample:8765/sse\"}], task=\"Calculate 100 + 200\""
   }'
 
-# 実行結果を確認
+# Check execution results
 curl http://127.0.0.1:18789/subagents/{session_id}
 ```
 
-**MCP 接続タイプ:**
+**MCP Connection Types:**
 
-| type | 説明 | 設定例 |
-|------|------|--------|
-| `sse` | SSE 接続 | `{"type": "sse", "url": "http://..."}` |
-| `http` | Streamable HTTP 接続 | `{"type": "http", "url": "http://..."}` |
-| `stdio` | サブプロセス起動 | `{"type": "stdio", "command": "npx", "args": [...]}` |
+| type | Description | Configuration Example |
+|------|-------------|----------------------|
+| `sse` | SSE connection | `{"type": "sse", "url": "http://..."}` |
+| `http` | Streamable HTTP connection | `{"type": "http", "url": "http://..."}` |
+| `stdio` | Subprocess launch | `{"type": "stdio", "command": "npx", "args": [...]}` |
 
-### サンプル MCP サーバー
+### Sample MCP Server
 
-`src/mcp_servers/sample_server.py` に FastMCP ベースのサンプルサーバーを同梱しています。
+A FastMCP-based sample server is bundled in `src/mcp_servers/sample_server.py`.
 
-**提供ツール:**
+**Provided Tools:**
 
-| ツール | 説明 |
-|--------|------|
-| `echo(text)` | テキストをそのまま返す |
-| `add(a, b)` | 2数値の加算 |
-| `current_time()` | 現在日時を ISO 8601 で返す |
-| `reverse_text(text)` | テキストを逆順にする |
+| Tool | Description |
+|------|-------------|
+| `echo(text)` | Returns the text as-is |
+| `add(a, b)` | Adds two numbers |
+| `current_time()` | Returns the current datetime in ISO 8601 |
+| `reverse_text(text)` | Reverses the text |
 
-**起動方法:**
+**How to Start:**
 
 ```bash
-# SSE モード（docker-compose.yml に定義済み）
+# SSE mode (defined in docker-compose.yml)
 docker compose up -d boiled-claw-mcp-sample
-# → Docker ネットワーク内で http://boiled-claw-mcp-sample:8765/sse として利用
+# → Available within the Docker network at http://boiled-claw-mcp-sample:8765/sse
 ```
 
-Docker ネットワーク内からは `http://boiled-claw-mcp-sample:8765/sse` で接続できます。
+Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 
-### Skills の使い方
+### Using Skills
 
-- `skills/<name>/SKILL.md` を追加すると起動時に自動ロードされます（OpenClaw 形式）。
-- 互換性のために `skills/*.py` の旧形式も引き続きロードされます。
-- ゲートウェイ起動後に `GET /skills` でロード状況を確認できます。
-- `skill_execute` はスキル内容の確認・実行に使います。
-- `skill_spawn` はスキル内容を dynamic agent の instruction として使い、タスク実行を委譲します。
-- サンプルとして `skills/coding-agent/SKILL.md` と `skills/e2e-test/SKILL.md` を同梱しています。
+- Adding `skills/<name>/SKILL.md` will auto-load it at startup (OpenClaw format).
+- For backward compatibility, the legacy `skills/*.py` format is still loaded.
+- After the Gateway starts, check loading status via `GET /skills`.
+- Use `skill_execute` to inspect and run a skill's content.
+- Use `skill_spawn` to delegate task execution using the skill content as a dynamic agent's instruction.
+- Sample skills are bundled: `skills/coding-agent/SKILL.md` and `skills/e2e-test/SKILL.md`.
 
-### セキュリティ
+### Security
 
-- 監査ログ (全操作を記録)
-- コマンドブロックリスト
-- パスアクセス制御
-- 秘密情報検出
-- per-agent tool policy
-- tool approval request / resolve (`tools.approval_request`, `tools.approval`)
-- Gateway API key + trusted identity header による transcript ownership 保護
+- Audit logs (all operations are recorded)
+- Command blocklist
+- Path access control
+- Secret detection
+- Per-agent tool policy
+- Tool approval request / resolve (`tools.approval_request`, `tools.approval`)
+- Transcript ownership protection via Gateway API key + trusted identity header
 
-### チャネル
+### Channels
 
 - Telegram (python-telegram-bot)
 - Discord (discord.py)
 - WebSocket (FastAPI)
 
-## 開発
+## Development
 
-### テスト
+### Tests
 
 ```bash
 docker compose --profile dev run --rm boiled-claw-dev pytest tests/ -m "not e2e"
@@ -565,40 +541,40 @@ docker compose --profile dev run --rm boiled-claw-dev pytest tests/ -m "not e2e"
 docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 ```
 
-## ロードマップ
+## Roadmap
 
-- [x] 基本エージェント構造 (Google ADK)
-- [x] Gemini 3.1 Flash Lite Preview モデル
-- [x] Web検索ツール
-- [x] シェル実行ツール
-- [x] ファイル操作ツール
-- [x] ブラウザ自動化 (Playwright)
-- [x] メモリシステム (SQLite + ベクトル検索)
-- [x] WebSocketゲートウェイ
+- [x] Core agent structure (Google ADK)
+- [x] Gemini 3.1 Flash Lite Preview model
+- [x] Web search tool
+- [x] Shell execution tool
+- [x] File operations tool
+- [x] Browser automation (Playwright)
+- [x] Memory system (SQLite + vector search)
+- [x] WebSocket gateway
 - [x] Typed Gateway Protocol v1
 - [x] Gateway-owned transcript / history persistence
 - [x] Cron platform (delivery target / retry / system events)
 - [x] Tool security / approvals
-- [x] Telegram チャネル
-- [x] Discord チャネル
-- [x] セキュリティ (監査ログ + ポリシー)
-- [x] Docker 対応
-- [x] マルチエージェント (サブエージェント)
-- [x] スキルプラグインシステム
-- [x] 動的エージェント生成 (sessions_spawn_dynamic)
-- [x] MCP サポート (SSE / HTTP / stdio) + サンプルサーバー
-- [ ] Redis セッション
-- [ ] Slack チャネル
-- [ ] WhatsApp チャネル
-- [ ] Canvas (ビジュアルワークスペース)
-- [ ] 音声インターフェース
+- [x] Telegram channel
+- [x] Discord channel
+- [x] Security (audit logs + policies)
+- [x] Docker support
+- [x] Multi-agent (sub-agents)
+- [x] Skill plugin system
+- [x] Dynamic agent generation (sessions_spawn_dynamic)
+- [x] MCP support (SSE / HTTP / stdio) + sample server
+- [ ] Redis sessions
+- [ ] Slack channel
+- [ ] WhatsApp channel
+- [ ] Canvas (visual workspace)
+- [ ] Voice interface
 
-## 参考
+## References
 
-- [OpenClaw](https://github.com/openclaw/openclaw) - インスピレーション元 (1,500-2,000 ファイルの大規模TypeScriptプロジェクト)
-- [Google ADK](https://google.github.io/adk-docs/) - エージェントフレームワーク
-- [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) - ツール接続プロトコル
+- [OpenClaw](https://github.com/openclaw/openclaw) - Inspiration source (large-scale TypeScript project with 1,500-2,000 files)
+- [Google ADK](https://google.github.io/adk-docs/) - Agent framework
+- [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) - Tool connection protocol
 
-## ライセンス
+## License
 
 MIT
