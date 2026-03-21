@@ -68,7 +68,8 @@ boiled-claw/
 
 ## Setup
 
-This project assumes Docker-based operation and development. No host-side `.venv` is used.
+This project is designed primarily for Docker-based operation and development.
+If you want to run Host Bridge or Desktop Bridge on the host OS, prepare a separate host-side Python environment for those standalone bridge processes.
 
 ### 1. Prerequisites
 
