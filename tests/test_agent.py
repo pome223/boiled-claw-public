@@ -97,6 +97,13 @@ async def test_file_manager(monkeypatch):
         lambda: type("Settings", (), {"host_bridge_enabled": False})(),
     )
 
+    # Allow tmp directory for file operations
+    import src.security.policy as policy_module
+    policy_module._security_policy = None
+    monkeypatch.setenv("FILE_WORKSPACE_PATHS", tempfile.gettempdir())
+    from src.config.settings import reset_settings
+    reset_settings()
+
     write_file = file_module.write_file
     read_file = file_module.read_file
 
@@ -116,6 +123,9 @@ async def test_file_manager(monkeypatch):
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
+        # Restore security policy so subsequent tests are not affected
+        policy_module._security_policy = None
+        reset_settings()
 
 
 def test_security_policy():

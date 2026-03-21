@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import uuid
 from typing import Any, Optional
 from urllib.parse import parse_qs, urlparse
@@ -12,6 +13,8 @@ import websockets
 
 from src.config.settings import get_settings
 from src.security.network import enforce_loopback_bind
+
+logger = logging.getLogger(__name__)
 
 
 class CurrentTabBridgeError(RuntimeError):
@@ -99,8 +102,12 @@ class CurrentTabExtensionBridge:
         try:
             await self._authenticate_connection(websocket)
         except CurrentTabBridgeError as exc:
+            logger.warning("Current Tab auth failed: %s", exc)
             await websocket.close(code=1008, reason=str(exc))
             return
+
+        await websocket.send(json.dumps({"type": "hello_ack"}))
+        logger.info("Current Tab extension connected")
 
         async with self._client_lock:
             previous = self._client
@@ -115,8 +122,19 @@ class CurrentTabExtensionBridge:
                     message = json.loads(raw_message)
                 except json.JSONDecodeError:
                     continue
+                msg_type = str(message.get("type") or "").strip().lower()
+                if msg_type == "ping":
+                    await websocket.send(json.dumps({"type": "pong"}))
+                    continue
                 await self._handle_message(message)
         finally:
+            close_code = getattr(websocket, "close_code", None)
+            close_reason = getattr(websocket, "close_reason", None) or "(none)"
+            logger.info(
+                "Current Tab extension disconnected: code=%s reason=%s",
+                close_code,
+                close_reason,
+            )
             async with self._client_lock:
                 if self._client is websocket:
                     self._client = None

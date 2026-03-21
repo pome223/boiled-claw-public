@@ -59,14 +59,39 @@ class BrowserSession:
         self.page = await self.browser.new_page()
         self.headless = headless
 
+    @property
+    def is_alive(self) -> bool:
+        """ブラウザセッションが利用可能かチェック"""
+        try:
+            return (
+                self.browser is not None
+                and self.browser.is_connected()
+                and self.page is not None
+                and not self.page.is_closed()
+            )
+        except Exception:
+            return False
+
     async def close(self):
         """ブラウザセッションを閉じる"""
         if self.page:
-            await self.page.close()
+            try:
+                await self.page.close()
+            except Exception:
+                pass
         if self.browser:
-            await self.browser.close()
+            try:
+                await self.browser.close()
+            except Exception:
+                pass
         if self.playwright:
-            await self.playwright.stop()
+            try:
+                await self.playwright.stop()
+            except Exception:
+                pass
+        self.page = None
+        self.browser = None
+        self.playwright = None
 
 
 _ALLOWED_SCHEMES = {"http", "https"}
@@ -145,6 +170,10 @@ async def get_browser_session(*, visible: Optional[bool] = None) -> BrowserSessi
     settings = get_settings()
     desired_headless = settings.browser_headless if visible is None else (not visible)
 
+    if _browser_session is not None and not _browser_session.is_alive:
+        await _browser_session.close()
+        _browser_session = None
+
     if (
         _browser_session is not None
         and visible is not None
@@ -152,9 +181,6 @@ async def get_browser_session(*, visible: Optional[bool] = None) -> BrowserSessi
     ):
         await _browser_session.close()
         _browser_session = None
-
-    if _browser_session is not None:
-        return _browser_session
 
     if _browser_session is None:
         _browser_session = BrowserSession()

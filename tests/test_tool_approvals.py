@@ -405,6 +405,10 @@ async def test_get_browser_session_keeps_visible_session_until_explicit_override
             self.headless = True
             self.page = object()
 
+        @property
+        def is_alive(self):
+            return True
+
         async def start(self, headless=True):
             self.headless = headless
             starts.append(headless)
