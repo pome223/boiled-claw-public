@@ -1,6 +1,12 @@
-# 🦀 boiled-claw
+<p align="center">
+  <img src="assets/logo.png" alt="boiled-claw logo" width="160">
+</p>
 
-> A reference architecture for closed-loop AI agents — plan, execute, verify, repair.
+<h1 align="center">boiled-claw</h1>
+
+<p align="center">
+  A reference architecture for closed-loop AI agents — plan, execute, verify, repair.
+</p>
 
 **検証ループのないエージェントは本番で使えない。** boiled-claw は Planner → PolicyJudge → Executor → Verifier → Repair の閉ループ実行を持つ AI エージェントアーキテクチャです。
 
