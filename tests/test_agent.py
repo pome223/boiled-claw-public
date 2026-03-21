@@ -123,6 +123,9 @@ async def test_file_manager(monkeypatch):
     finally:
         if os.path.exists(temp_path):
             os.unlink(temp_path)
+        # Restore security policy so subsequent tests are not affected
+        policy_module._security_policy = None
+        reset_settings()
 
 
 def test_security_policy():

@@ -63,4 +63,5 @@ async def test():
                 break
 
 
-asyncio.run(test())
+if __name__ == "__main__":
+    asyncio.run(test())

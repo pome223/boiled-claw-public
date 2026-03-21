@@ -10,13 +10,11 @@ import websockets
 
 
 def _extract_text(message: dict) -> str:
-    content = message.get("content") or {}
-    parts = content.get("parts") or []
-    texts: list[str] = []
-    for part in parts:
-        if isinstance(part, dict) and part.get("text"):
-            texts.append(str(part["text"]))
-    return "\n".join(texts).strip()
+    """Extract reply text from a chat.done message.
+
+    Current protocol uses a top-level ``text`` field.
+    """
+    return str(message.get("text") or "").strip()
 
 
 async def run(args: argparse.Namespace) -> dict:
@@ -30,26 +28,26 @@ async def run(args: argparse.Namespace) -> dict:
         while True:
             raw = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             message = json.loads(raw)
-            event_type = message.get("type")
+            event_type = message.get("event")
 
             if event_type == "connected":
                 connected = message
                 break
 
         await websocket.send(json.dumps({
-            "type": "chat.send",
-            "message": args.message,
+            "event": "chat.send",
+            "text": args.message,
         }))
 
         while True:
             raw = await asyncio.wait_for(websocket.recv(), timeout=args.timeout)
             message = json.loads(raw)
-            event_type = message.get("type")
+            event_type = message.get("event")
 
             if event_type == "tools.approval_request":
                 approvals.append(str(message.get("tool_name") or ""))
                 await websocket.send(json.dumps({
-                    "type": "tools.approval_response",
+                    "event": "tools.approval",
                     "request_id": message["request_id"],
                     "approved": True,
                 }))
