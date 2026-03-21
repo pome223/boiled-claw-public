@@ -1,14 +1,14 @@
 # Contributing
 
-boiled-claw is published as a **reference architecture** for closed-loop AI agent systems.
+boiled-claw is a **maintainer-led reference implementation** of closed-loop AI agent architecture.
 
 ## Status
 
-This project is **not actively maintained**. It is shared so that others can study, fork, and adapt the design for their own needs.
+Upstream is curated for design coherence. The repository is updated at the maintainer's pace to reflect architectural evolution — but there is no support or review commitment.
 
-- Issues and pull requests are **not monitored**.
-- There is no commitment to review, merge, or respond to contributions.
-- If you find a bug or want a feature, fork the repository and make it your own.
+- Issues and pull requests are **not guaranteed a response**.
+- The maintainer may incorporate ideas or fixes without notice.
+- If you want to take the design in a different direction, fork freely under MIT License.
 
 ## Using this project
 

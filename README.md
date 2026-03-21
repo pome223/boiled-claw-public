@@ -4,9 +4,9 @@
 
 **検証ループのないエージェントは本番で使えない。** boiled-claw は Planner → PolicyJudge → Executor → Verifier → Repair の閉ループ実行を持つ AI エージェントアーキテクチャです。
 
-Google Agent Development Kit (ADK) ベース。MIT License で公開しています。fork して自由に使ってください。
+Google Agent Development Kit (ADK) ベース。MIT License。fork-friendly, upstream-curated.
 
-> **Note:** This is a reference implementation, not an actively maintained product. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
+> **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## 特徴
 
