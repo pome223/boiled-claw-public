@@ -1,8 +1,12 @@
 # 🦀 boiled-claw
 
-> Your personal AI agent powered by Google ADK and Gemini 3.1 Flash Lite Preview. Any platform, any channel.
+> A reference architecture for closed-loop AI agents — plan, execute, verify, repair.
 
-OpenClaw にインスパイアされた、Google Agent Development Kit (ADK) ベースのパーソナルAIエージェントです。
+**検証ループのないエージェントは本番で使えない。** boiled-claw は Planner → PolicyJudge → Executor → Verifier → Repair の閉ループ実行を持つ AI エージェントアーキテクチャです。
+
+Google Agent Development Kit (ADK) ベース。MIT License で公開しています。fork して自由に使ってください。
+
+> **Note:** This is a reference implementation, not an actively maintained product. See [CONTRIBUTING.md](CONTRIBUTING.md) for details.
 
 ## 特徴
 
