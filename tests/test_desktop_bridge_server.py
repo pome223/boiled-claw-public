@@ -55,7 +55,7 @@ class TestDesktopBridgeTools:
     def test_create_server_blocks_remote_bind_by_default(self, monkeypatch):
         from src.mcp_servers.desktop_bridge_server import create_server
 
-        monkeypatch.delenv("BRIDGE_ALLOW_REMOTE_BIND", raising=False)
+        monkeypatch.setenv("BRIDGE_ALLOW_REMOTE_BIND", "false")
         settings_module.reset_settings()
         with pytest.raises(ValueError):
             create_server(host="0.0.0.0", desktop_client=FakeDesktopClient())

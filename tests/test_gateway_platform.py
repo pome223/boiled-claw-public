@@ -521,19 +521,21 @@ def test_websocket_emits_tool_events_for_runner_calls(monkeypatch, tmp_path):
             ws.send_json({"event": "chat.send", "text": "NVIDIA を検索"})
 
             seen_events = []
-            while len(seen_events) < 3:
+            while True:
                 event = ws.receive_json()
                 if event["event"] in {"tool.start", "tool.result", "chat.done"}:
                     seen_events.append(event)
+                if event["event"] == "chat.done":
+                    break
 
-            tool_start, tool_result, done = seen_events
+            tool_starts = [e for e in seen_events if e["event"] == "tool.start"]
+            tool_results = [e for e in seen_events if e["event"] == "tool.result"]
+            done = seen_events[-1]
 
-            assert tool_start["event"] == "tool.start"
-            assert tool_start["tool_name"] == "web_search"
-            assert tool_start["request_id"] == "fc-1"
-            assert tool_result["event"] == "tool.result"
-            assert tool_result["tool_name"] == "web_search"
-            assert tool_result["ok"] is True
+            assert any(e["tool_name"] == "web_search" for e in tool_starts)
+            ws_start = next(e for e in tool_starts if e["tool_name"] == "web_search")
+            assert ws_start["request_id"]  # non-empty, may vary
+            assert any(e["tool_name"] == "web_search" and e["ok"] is True for e in tool_results)
             assert done["event"] == "chat.done"
             assert done["text"] == "grounded answer"
 

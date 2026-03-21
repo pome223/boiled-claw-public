@@ -4,6 +4,7 @@ Host Bridge MCP server tests.
 
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -81,7 +82,7 @@ class TestHostBridgeTools:
     def test_create_server_blocks_remote_bind_by_default(self, monkeypatch):
         from src.mcp_servers.host_bridge_server import create_server
 
-        monkeypatch.delenv("BRIDGE_ALLOW_REMOTE_BIND", raising=False)
+        monkeypatch.setenv("BRIDGE_ALLOW_REMOTE_BIND", "false")
         settings_module.reset_settings()
         with pytest.raises(ValueError):
             create_server(host="0.0.0.0")
@@ -126,8 +127,22 @@ class TestHostBridgeTools:
         text = self._text(result)
         assert "blocked" in text.lower()
 
+    @pytest.fixture(autouse=False)
+    def _allow_tmp(self, tmp_path, monkeypatch):
+        """Add tmp_path to FILE_WORKSPACE_PATHS so file ops are permitted."""
+        import src.security.policy as policy_module
+        current = os.environ.get("FILE_WORKSPACE_PATHS", "")
+        monkeypatch.setenv(
+            "FILE_WORKSPACE_PATHS",
+            f"{current},{tmp_path}" if current else str(tmp_path),
+        )
+        settings_module.reset_settings()
+        policy_module._security_policy = None
+        yield
+        policy_module._security_policy = None
+
     @pytest.mark.asyncio
-    async def test_host_file_read_success(self, mcp, tmp_path):
+    async def test_host_file_read_success(self, mcp, tmp_path, _allow_tmp):
         target = tmp_path / "note.txt"
         target.write_text("hello bridge", encoding="utf-8")
         result = await mcp.call_tool(
@@ -144,7 +159,7 @@ class TestHostBridgeTools:
         assert "hello bridge" in text
 
     @pytest.mark.asyncio
-    async def test_host_file_write_success(self, mcp, tmp_path):
+    async def test_host_file_write_success(self, mcp, tmp_path, _allow_tmp):
         target = tmp_path / "written.txt"
         result = await mcp.call_tool(
             "host.file.write",
@@ -162,7 +177,7 @@ class TestHostBridgeTools:
         assert target.read_text(encoding="utf-8") == "bridge write"
 
     @pytest.mark.asyncio
-    async def test_host_file_list_success(self, mcp, tmp_path):
+    async def test_host_file_list_success(self, mcp, tmp_path, _allow_tmp):
         (tmp_path / "a.txt").write_text("a", encoding="utf-8")
         (tmp_path / "b.txt").write_text("b", encoding="utf-8")
         result = await mcp.call_tool(

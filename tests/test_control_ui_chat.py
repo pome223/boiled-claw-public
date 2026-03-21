@@ -170,6 +170,7 @@ async def test_control_ui_chat_send_message_local_auto_approves_inner_requests(m
 
 @pytest.mark.asyncio
 async def test_control_ui_chat_send_message_rejects_non_chat_path(monkeypatch):
+    pytest.importorskip("playwright", reason="Playwright not installed; URL validation is skipped without it")
     monkeypatch.setattr(browser_module, "_validate_url", lambda url: (True, None))
 
     result = await control_ui_chat_module._control_ui_chat_send_message_local(
