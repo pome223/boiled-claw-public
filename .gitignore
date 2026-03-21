@@ -44,6 +44,7 @@ data/
 # Screenshots
 screenshots/
 *.png
+!assets/logo.png
 
 # Claude Code local settings
 .claude/settings.local.json
