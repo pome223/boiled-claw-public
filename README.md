@@ -14,6 +14,12 @@ Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstrea
 
 Homepage: [astropomeai.com](https://astropomeai.com)
 
+> [!WARNING]
+> boiled-claw can execute shell commands, read and write files, control browsers, and drive desktop UI on the host machine.
+> This repository is a reference implementation, not a hardened security product. Tool approvals and security policies reduce risk, but do not guarantee safety.
+> Do not expose Gateway / Host Bridge / Desktop Bridge to untrusted networks. Run it only in environments you control, and prefer isolated or disposable machines for experimentation.
+> By using or running this code, you accept all risk. To the maximum extent permitted by law, the author disclaims all liability for any damage, data loss, security incident, account action, system instability, or other harm resulting from its use, misuse, or modification.
+
 > **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 Start with [ARCHITECTURE.md](ARCHITECTURE.md) if you want the design rationale before the implementation details.
