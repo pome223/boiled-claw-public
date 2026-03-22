@@ -14,6 +14,8 @@ Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstrea
 
 > **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+Start with [ARCHITECTURE.md](ARCHITECTURE.md) if you want the design rationale before the implementation details.
+
 ## Features
 
 - 🤖 **Gemini 3.1 Flash Lite Preview** - Default high-speed AI model
