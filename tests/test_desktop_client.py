@@ -1,0 +1,297 @@
+"""
+Desktop client contract tests.
+"""
+
+import pytest
+
+from src.desktop import (
+    DesktopAxFindRequest,
+    DesktopClickRequest,
+    DesktopClearStopRequest,
+    DesktopEmergencyStopRequest,
+    DesktopElementSelector,
+    DesktopFocusWindowRequest,
+    DesktopFrontmostAppRequest,
+    DesktopLaunchAppRequest,
+    DesktopRuntimeStatusRequest,
+    DesktopScrollRequest,
+    DesktopWaitElementRequest,
+    DesktopWaitWindowRequest,
+    DesktopWindowBounds,
+    DesktopWindowDescriptor,
+    DesktopWindowsRequest,
+    FakeDesktopClient,
+)
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_reports_implemented_capabilities():
+    client = FakeDesktopClient(
+        implemented={"desktop.view.windows", "desktop.view.frontmost_app"}
+    )
+
+    capabilities = await client.capabilities()
+    by_name = {cap.name: cap for cap in capabilities.capabilities}
+
+    assert by_name["desktop.runtime.status"].implemented is True
+    assert by_name["desktop.runtime.stop"].implemented is True
+    assert by_name["desktop.runtime.clear_stop"].implemented is True
+    assert by_name["desktop.view.windows"].implemented is True
+    assert by_name["desktop.view.frontmost_app"].implemented is True
+    assert by_name["desktop.control.click"].implemented is False
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_returns_canned_view_state():
+    client = FakeDesktopClient(
+        implemented={"desktop.view.windows", "desktop.view.frontmost_app"},
+        windows=[
+            DesktopWindowDescriptor(
+                window_id="w1",
+                app_name="Safari",
+                title="Example",
+                bounds=DesktopWindowBounds(x=10, y=20, width=800, height=600),
+            )
+        ],
+        frontmost_app_name="Safari",
+        frontmost_pid=123,
+    )
+
+    windows = await client.windows(
+        DesktopWindowsRequest(
+            request_id="req-windows",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+    frontmost = await client.frontmost_app(
+        DesktopFrontmostAppRequest(
+            request_id="req-frontmost",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+
+    assert windows.ok is True
+    assert windows.windows[0].app_name == "Safari"
+    assert frontmost.ok is True
+    assert frontmost.app_name == "Safari"
+    assert frontmost.pid == 123
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_returns_not_implemented_for_missing_control():
+    client = FakeDesktopClient()
+
+    result = await client.click(
+        DesktopClickRequest(
+            request_id="req-click",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            x=10,
+            y=20,
+        )
+    )
+
+    assert result.ok is False
+    assert "not implemented" in (result.error or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_tracks_selector_click_and_launch_focus():
+    client = FakeDesktopClient(
+        implemented={
+            "desktop.ax.find",
+            "desktop.control.click",
+            "desktop.control.launch_app",
+            "desktop.control.focus_window",
+        },
+        windows=[
+            DesktopWindowDescriptor(
+                window_id="w1",
+                app_name="Safari",
+                title="Example",
+                bounds=DesktopWindowBounds(x=10, y=20, width=800, height=600),
+            )
+        ],
+    )
+
+    click = await client.click(
+        DesktopClickRequest(
+            request_id="req-click",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="w1",
+                title="Open",
+            ),
+        )
+    )
+    found = await client.ax_find(
+        DesktopAxFindRequest(
+            request_id="req-find",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="w1",
+                title="Open",
+            ),
+        )
+    )
+    launch = await client.launch_app(
+        DesktopLaunchAppRequest(
+            request_id="req-launch",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Safari",
+        )
+    )
+    focus = await client.focus_window(
+        DesktopFocusWindowRequest(
+            request_id="req-focus",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            window_id="w1",
+        )
+    )
+
+    assert click.ok is True
+    assert click.target is not None
+    assert click.target.window_id == "w1"
+    assert found.ok is True
+    assert found.matched is True
+    assert launch.ok is True
+    assert launch.target is not None
+    assert launch.target.app_name == "Safari"
+    assert focus.ok is True
+    assert focus.target is not None
+    assert focus.target.title == "Example"
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_waits_and_scrolls_when_capabilities_exist():
+    client = FakeDesktopClient(
+        implemented={
+            "desktop.view.windows",
+            "desktop.wait.window",
+            "desktop.ax.find",
+            "desktop.wait.element",
+            "desktop.control.scroll",
+        },
+        windows=[
+            DesktopWindowDescriptor(
+                window_id="w1",
+                app_name="Safari",
+                title="Example",
+                bounds=DesktopWindowBounds(x=10, y=20, width=800, height=600),
+            )
+        ],
+    )
+
+    waited_window = await client.wait_window(
+        DesktopWaitWindowRequest(
+            request_id="req-wait-window",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            app_name="Safari",
+        )
+    )
+    waited_element = await client.wait_element(
+        DesktopWaitElementRequest(
+            request_id="req-wait-element",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            target=DesktopElementSelector(
+                app_name="Safari",
+                window_id="w1",
+                title="Open",
+            ),
+        )
+    )
+    scrolled = await client.scroll(
+        DesktopScrollRequest(
+            request_id="req-scroll",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            delta_y=-3,
+        )
+    )
+
+    assert waited_window.ok is True
+    assert waited_window.matched is True
+    assert waited_window.window is not None
+    assert waited_element.ok is True
+    assert waited_element.matched is True
+    assert waited_element.target is not None
+    assert scrolled.ok is True
+
+
+@pytest.mark.asyncio
+async def test_fake_desktop_client_emergency_stop_blocks_control_until_cleared():
+    client = FakeDesktopClient(implemented={"desktop.control.click"})
+
+    stopped = await client.emergency_stop(
+        DesktopEmergencyStopRequest(
+            request_id="req-stop",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            reason="halt",
+        )
+    )
+    status = await client.runtime_status(
+        DesktopRuntimeStatusRequest(
+            request_id="req-status",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+    blocked = await client.click(
+        DesktopClickRequest(
+            request_id="req-click",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            x=1,
+            y=2,
+        )
+    )
+    cleared = await client.clear_stop(
+        DesktopClearStopRequest(
+            request_id="req-clear",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+        )
+    )
+    resumed = await client.click(
+        DesktopClickRequest(
+            request_id="req-click-2",
+            session_id="sess",
+            user_id="user",
+            agent_name="pytest",
+            x=1,
+            y=2,
+        )
+    )
+
+    assert stopped.stopped is True
+    assert stopped.reason == "halt"
+    assert status.stopped is True
+    assert blocked.ok is False
+    assert "stopped" in (blocked.error or "").lower()
+    assert cleared.stopped is False
+    assert resumed.ok is True

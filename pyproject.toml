@@ -1,0 +1,72 @@
+[project]
+name = "boiled-claw"
+version = "0.2.0"
+description = "Reference architecture for closed-loop AI agents — plan, execute, verify, repair."
+license = "MIT"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "google-adk>=0.1.0",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "websockets>=12.0",
+    "httpx>=0.27.0",
+    "ddgs>=0.1.0",
+    "rich>=13.0.0",
+    "numpy>=1.24.0",
+    "pyyaml>=6.0.0",
+    "croniter>=1.3.0",
+]
+
+[project.optional-dependencies]
+telegram = ["python-telegram-bot>=21.0"]
+discord = ["discord.py>=2.3.0"]
+slack = ["slack-bolt>=1.18.0"]
+browser = ["playwright>=1.40.0"]
+desktop = [
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+]
+redis = ["redis>=5.0.0"]
+all = [
+    "python-telegram-bot>=21.0",
+    "discord.py>=2.3.0",
+    "slack-bolt>=1.18.0",
+    "playwright>=1.40.0",
+    "pyobjc-core>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Cocoa>=10.0; sys_platform == 'darwin'",
+    "pyobjc-framework-Quartz>=10.0; sys_platform == 'darwin'",
+    "redis>=5.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+    "black>=24.0.0",
+]
+
+[project.scripts]
+boiled-claw = "src.main:main"
+boiled-claw-host-bridge = "src.mcp_servers.host_bridge_server:main"
+boiled-claw-desktop-bridge = "src.mcp_servers.desktop_bridge_server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "e2e: end-to-end tests requiring a running gateway",
+]

@@ -1,0 +1,116 @@
+services:
+  boiled-claw-gateway:
+    build:
+      context: .
+      args:
+        INSTALL_DEV: "false"
+        INSTALL_BROWSER: "false"
+    container_name: boiled-claw-gateway
+    env_file:
+      - .env
+    ports:
+      - "18789:18789"
+    environment:
+      - GATEWAY_HOST=0.0.0.0
+      - GATEWAY_PORT=18789
+      - FILE_WORKSPACE_PATHS=/app/data,/app/skills
+      - HOST_BRIDGE_ENABLED=${HOST_BRIDGE_ENABLED:-false}
+      - HOST_BRIDGE_URL=${HOST_BRIDGE_URL:-}
+      - HOST_BRIDGE_TIMEOUT_SECONDS=${HOST_BRIDGE_TIMEOUT_SECONDS:-5}
+      - HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+      - BROWSER_ALLOW_LOOPBACK=${BROWSER_ALLOW_LOOPBACK:-false}
+      - DESKTOP_BRIDGE_ENABLED=${DESKTOP_BRIDGE_ENABLED:-false}
+      - DESKTOP_BRIDGE_URL=${DESKTOP_BRIDGE_URL:-}
+      - DESKTOP_BRIDGE_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_TIMEOUT_SECONDS:-5}
+      - DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+      - ./skills:/app/skills
+    restart: unless-stopped
+
+  boiled-claw-mcp-sample:
+    build:
+      context: .
+      args:
+        INSTALL_DEV: "false"
+        INSTALL_BROWSER: "false"
+    container_name: boiled-claw-mcp-sample
+    env_file:
+      - .env
+    expose:
+      - "8765"
+    entrypoint: ["python", "-m", "src.mcp_servers.sample_server", "--sse", "--host", "0.0.0.0", "--port", "8765"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8765/sse', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  boiled-claw-cli:
+    build:
+      context: .
+      args:
+        INSTALL_DEV: "false"
+        INSTALL_BROWSER: "false"
+    env_file:
+      - .env
+    environment:
+      - FILE_WORKSPACE_PATHS=/app/data,/app/skills
+      - HOST_BRIDGE_ENABLED=${HOST_BRIDGE_ENABLED:-false}
+      - HOST_BRIDGE_URL=${HOST_BRIDGE_URL:-}
+      - HOST_BRIDGE_TIMEOUT_SECONDS=${HOST_BRIDGE_TIMEOUT_SECONDS:-5}
+      - HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+      - BROWSER_ALLOW_LOOPBACK=${BROWSER_ALLOW_LOOPBACK:-false}
+      - DESKTOP_BRIDGE_ENABLED=${DESKTOP_BRIDGE_ENABLED:-false}
+      - DESKTOP_BRIDGE_URL=${DESKTOP_BRIDGE_URL:-}
+      - DESKTOP_BRIDGE_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_TIMEOUT_SECONDS:-5}
+      - DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+    volumes:
+      - ./data:/app/data
+      - ./skills:/app/skills
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    network_mode: "service:boiled-claw-gateway"
+    depends_on:
+      boiled-claw-gateway:
+        condition: service_started
+    entrypoint: ["python", "-m", "src.main"]
+    stdin_open: true
+    tty: true
+    profiles:
+      - cli
+
+  boiled-claw-dev:
+    build:
+      context: .
+      args:
+        INSTALL_DEV: "true"
+        INSTALL_BROWSER: "false"
+    env_file:
+      - .env
+    environment:
+      - FILE_WORKSPACE_PATHS=/workspace/data,/workspace/skills
+      - GATEWAY_URL=http://boiled-claw-gateway:18789
+      - HOST_BRIDGE_ENABLED=${HOST_BRIDGE_ENABLED:-false}
+      - HOST_BRIDGE_URL=${HOST_BRIDGE_URL:-}
+      - HOST_BRIDGE_TIMEOUT_SECONDS=${HOST_BRIDGE_TIMEOUT_SECONDS:-5}
+      - HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${HOST_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+      - BROWSER_ALLOW_LOOPBACK=${BROWSER_ALLOW_LOOPBACK:-false}
+      - DESKTOP_BRIDGE_ENABLED=${DESKTOP_BRIDGE_ENABLED:-false}
+      - DESKTOP_BRIDGE_URL=${DESKTOP_BRIDGE_URL:-}
+      - DESKTOP_BRIDGE_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_TIMEOUT_SECONDS:-5}
+      - DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS=${DESKTOP_BRIDGE_SSE_READ_TIMEOUT_SECONDS:-300}
+    volumes:
+      - .:/workspace
+    working_dir: /workspace
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      boiled-claw-gateway:
+        condition: service_healthy
+    command: ["sleep", "infinity"]
+    profiles:
+      - dev
