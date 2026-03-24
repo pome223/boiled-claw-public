@@ -82,7 +82,11 @@ def handle_slash_command(raw_input: str, **ctx) -> bool | None:
     """Handle a slash command. Returns True if handled, None if not a slash command."""
     if not raw_input.startswith("/"):
         return None
-    cmd_name = raw_input[1:].strip().split()[0].lower()
+    tokens = raw_input[1:].strip().split()
+    if not tokens:
+        console.print("[yellow]Type /help for available commands.[/yellow]")
+        return True
+    cmd_name = tokens[0].lower()
     # Resolve alias
     cmd_name = _ALIAS_MAP.get(cmd_name, cmd_name)
     entry = SLASH_COMMANDS.get(cmd_name)

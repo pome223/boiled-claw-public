@@ -29,17 +29,25 @@ def _require_api_key():
 class _AliasGroup(click.Group):
     """Support legacy command aliases (cli -> chat, host-bridge -> bridge host, etc.)."""
 
-    _ALIASES: dict[str, list[str]] = {
-        "cli": ["chat"],               # legacy: `boiled-claw cli` -> chat
+    # Simple aliases: old name -> new subcommand name
+    _SIMPLE_ALIASES: dict[str, str] = {
+        "cli": "chat",
+    }
+    # Multi-token aliases: old name -> replacement tokens
+    _MULTI_ALIASES: dict[str, list[str]] = {
         "host-bridge": ["bridge", "host"],
         "desktop-bridge": ["bridge", "desktop"],
     }
 
-    def parse_args(self, ctx, args):
-        """Rewrite legacy single-token aliases before parsing."""
-        if args and args[0] in self._ALIASES:
-            args = list(self._ALIASES[args[0]]) + args[1:]
-        return super().parse_args(ctx, args)
+    def resolve_command(self, ctx, args):
+        """Rewrite legacy command names before resolution."""
+        if args:
+            cmd_name = args[0]
+            if cmd_name in self._SIMPLE_ALIASES:
+                args = [self._SIMPLE_ALIASES[cmd_name]] + args[1:]
+            elif cmd_name in self._MULTI_ALIASES:
+                args = self._MULTI_ALIASES[cmd_name] + args[1:]
+        return super().resolve_command(ctx, args)
 
 
 @click.group(cls=_AliasGroup, invoke_without_command=True)
@@ -100,7 +108,6 @@ async def _run_cli(
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
     from google.genai import types
-    from src.agents.root_agent import root_agent
     from src.config.settings import get_settings
     from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
     from src.skills.runtime import ensure_skills_loaded
@@ -111,6 +118,15 @@ async def _run_cli(
     settings = get_settings()
     if model_override:
         settings.agent_model = model_override
+        # Update the model config snapshot before root_agent is constructed
+        import src.agents.model_config as _mc
+        _mc._DEFAULT_MODEL_NAME = model_override
+        _mc.DEFAULT_MODEL = _mc.GeminiModelConfig(name=model_override, temperature=0.7)
+        _mc.PRECISE_MODEL = _mc.GeminiModelConfig(name=model_override, temperature=0.2, top_k=20)
+        _mc.CREATIVE_MODEL = _mc.GeminiModelConfig(name=model_override, temperature=1.2)
+
+    from src.agents.root_agent import root_agent
+
     await ensure_skills_loaded()
 
     if verbose:
@@ -358,8 +374,14 @@ def status():
         reachable = "-"
         if enabled and url:
             try:
-                resp = httpx.get(url.replace("/sse", "/"), timeout=3)
-                reachable = "[green]yes[/green]" if resp.status_code < 500 else f"[red]{resp.status_code}[/red]"
+                # Probe the actual SSE endpoint; a live FastMCP bridge returns 200
+                # with content-type text/event-stream on GET /sse.
+                resp = httpx.get(url, timeout=3, follow_redirects=True)
+                is_sse = "text/event-stream" in resp.headers.get("content-type", "")
+                if resp.status_code == 200 and is_sse:
+                    reachable = "[green]yes[/green]"
+                else:
+                    reachable = f"[yellow]{resp.status_code}[/yellow]"
             except Exception:
                 reachable = "[red]no[/red]"
         bridge_table.add_row(
