@@ -107,7 +107,75 @@ curl -s http://localhost:18789/sessions/e2e-skill 2>&1
 - ステータスコード 200 であること
 - `"sessions"` キーが存在すること
 
-### 6. 結果サマリを出力
+### 6. CLI 動作確認
+
+CLIのサブコマンド体系・エイリアス・フラグが正しく動作することを確認する。
+
+#### 6-1. ヘルプ表示
+
+```bash
+python -m src.main --help 2>&1
+```
+
+- `chat`, `web`, `channels`, `bridge`, `status` の5コマンドが表示されること
+- `--version`, `-v, --verbose` オプションが表示されること
+
+#### 6-2. レガシーエイリアスの互換性
+
+```bash
+python -m src.main cli --help 2>&1
+python -m src.main host-bridge --help 2>&1
+python -m src.main desktop-bridge --help 2>&1
+```
+
+- `cli` → `chat` のヘルプが表示されること
+- `host-bridge` → `bridge host` のヘルプが表示されること
+- `desktop-bridge` → `bridge desktop` のヘルプが表示されること
+- いずれも `No such command` エラーにならないこと
+
+#### 6-3. bridge サブコマンド
+
+```bash
+python -m src.main bridge --help 2>&1
+```
+
+- `host`, `desktop` のサブコマンドが表示されること
+
+#### 6-4. chat フラグ
+
+```bash
+python -m src.main chat --help 2>&1
+```
+
+- `--model`, `--dry-run` オプションが表示されること
+
+#### 6-5. dry-run テスト
+
+```bash
+python -m src.main chat --dry-run 2>&1
+```
+
+- `Config OK. Dry-run mode` が表示されてエラーなく終了すること
+
+#### 6-6. status コマンド
+
+```bash
+python -m src.main status 2>&1
+```
+
+- Configuration / Bridge Status / Channels の3テーブルが表示されること
+- エラーなく終了すること
+
+#### 6-7. 引数なし実行（デフォルト動作）
+
+```bash
+GOOGLE_API_KEY= python -m src.main 2>&1
+```
+
+- `GOOGLE_API_KEY is not set` のエラーメッセージが表示されること（トレースバックではないこと）
+- chat がデフォルトで起動しようとしていることを確認
+
+### 7. 結果サマリを出力
 
 以下の形式で報告すること:
 
@@ -123,6 +191,13 @@ curl -s http://localhost:18789/sessions/e2e-skill 2>&1
 | API 基本応答 | OK / NG |
 | API セッション継続 | OK / NG |
 | API セッション一覧 | OK / NG |
+| CLI ヘルプ表示 | OK / NG |
+| CLI レガシーエイリアス | OK / NG |
+| CLI bridge サブコマンド | OK / NG |
+| CLI chat フラグ | OK / NG |
+| CLI dry-run | OK / NG |
+| CLI status コマンド | OK / NG |
+| CLI デフォルト動作 | OK / NG |
 
 （失敗がある場合は詳細と対処法を記載）
 ```
