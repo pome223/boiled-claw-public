@@ -140,8 +140,10 @@ Endpoints available after Gateway startup:
 #### CLI Mode
 
 ```bash
-docker compose --profile cli run --rm boiled-claw-cli cli
+docker compose --profile cli run --rm boiled-claw-cli chat
 ```
+
+> **Note:** The legacy `cli` command name still works as an alias for `chat`.
 
 #### Channel Mode (Telegram, Discord)
 
@@ -180,11 +182,13 @@ This standalone bridge does not require `GOOGLE_API_KEY`.
 
 ```bash
 # Start with SSE
-python -m src.main host-bridge --host 127.0.0.1 --port 8766
+python -m src.main bridge host --host 127.0.0.1 --port 8766
 
 # Or via console script
 boiled-claw-host-bridge --sse --host 127.0.0.1 --port 8766
 ```
+
+> **Note:** The legacy `host-bridge` command name still works as an alias for `bridge host`.
 
 Set these in `.env` or pass them as shell environment variables when running `docker compose up`.
 The current `docker-compose.yml` explicitly forwards `HOST_BRIDGE_*` / `DESKTOP_BRIDGE_*` variables to the gateway / cli / dev containers, so either method works.
@@ -265,11 +269,13 @@ pip install -e '.[desktop]'
 The desktop extra uses `pyobjc-framework-Cocoa`. In PyObjC's current structure, AppKit / Foundation are resolved through this umbrella package. If your existing environment pins a separate `pyobjc-framework-AppKit`, reinstalling the desktop extra is recommended.
 
 ```bash
-python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
+python -m src.main bridge desktop --host 127.0.0.1 --port 8767
 
 # Or via console script
 boiled-claw-desktop-bridge --sse --host 127.0.0.1 --port 8767
 ```
+
+> **Note:** The legacy `desktop-bridge` command name still works as an alias for `bridge desktop`.
 
 To use Desktop Bridge from the Gateway, set the following in `.env`:
 
@@ -334,10 +340,12 @@ boiled-claw/
 │   ├── config/
 │   │   ├── settings.py         # Pydantic settings
 │   │   └── schema.py           # Configuration schema
+│   ├── cli/
+│   │   └── repl.py             # REPL slash commands & handler
 │   ├── skills/
 │   │   ├── loader.py           # Skill loader
 │   │   └── base.py             # Skill base class
-│   └── main.py                 # Entry point
+│   └── main.py                 # Entry point (click-based CLI)
 ├── tests/
 │   ├── test_sample_mcp_server.py  # MCP server tests
 │   └── ...
@@ -350,15 +358,42 @@ boiled-claw/
 
 ## Usage
 
-### Using via CLI
+### CLI Commands
+
+```
+boiled-claw [OPTIONS] COMMAND [ARGS]...
+
+Options:
+  --version       Show the version and exit.
+  -v, --verbose   Enable verbose output.
+
+Commands:
+  chat       Start an interactive chat session (REPL).
+  web        Start the WebSocket Gateway server.
+  channels   Start multi-channel mode (Telegram, Discord).
+  bridge     Manage bridge services (host, desktop).
+  status     Show configuration, bridge connectivity, and registered tools.
+```
+
+The REPL supports slash commands (`/help`, `/status`, `/tools`, `/clear`) and readline history.
+
+Legacy command names (`cli`, `host-bridge`, `desktop-bridge`) are supported as aliases.
+
+#### Example: Interactive Chat
 
 ```bash
-$ docker compose --profile cli run --rm boiled-claw-cli cli
+$ docker compose --profile cli run --rm boiled-claw-cli chat
 
 You: Search for the latest Python news
 
 boiled-claw 🦀 [Running web search...]
 Python 3.12 has been released...
+```
+
+#### Example: Check Status
+
+```bash
+$ boiled-claw status
 ```
 
 ### Using via WebSocket
