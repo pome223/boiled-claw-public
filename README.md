@@ -12,6 +12,12 @@
 
 Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstream-curated.
 
+> [!WARNING]
+> boiled-claw can execute shell commands, read and write files, control browsers, and drive desktop UI on the host machine.
+> This repository is a reference implementation, not a hardened security product. Tool approvals and security policies reduce risk, but do not guarantee safety.
+> Do not expose Gateway / Host Bridge / Desktop Bridge to untrusted networks. Run it only in environments you control, and prefer isolated or disposable machines for experimentation.
+> By using or running this code, you accept all risk. To the maximum extent permitted by law, the author disclaims all liability for any damage, data loss, security incident, account action, system instability, or other harm resulting from its use, misuse, or modification.
+
 > **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Features
@@ -46,24 +52,40 @@ Inspired by OpenClaw's control plane / execution plane separation, boiled-claw i
 The desktop core lives in `src/desktop/`, with bridges hanging off it as adapters.
 Common capability / ping schemas are placed in `src/bridges/common_schema.py` to ensure the desktop runtime does not depend on the host bridge schema.
 
-```
-boiled-claw/
-├── Gateway
-│   ├── typed WS / HTTP protocol
-│   ├── transcript / cron / approvals
-│   └── routing_agent / root_agent / control_loop
-├── Host Bridge
-│   ├── host.shell.run
-│   ├── host.file.read / write / list
-│   ├── host.browser.navigate / extract_text / screenshot
-│   └── host.current_tab.*  (Chrome extension relay)
-├── Desktop Bridge
-│   ├── desktop.runtime.*
-│   ├── desktop.view.*
-│   └── desktop.control.*   (high-risk, approval + stop aware)
-├── MCP Servers
-│   └── sample / host_bridge / desktop_bridge
-└── Skills / Memory / Channels / Security
+```mermaid
+flowchart LR
+    User["User"]
+    Channels["Web UI / CLI / Telegram / Discord"]
+
+    subgraph Gateway["Gateway (Docker / control plane)"]
+        Protocol["Typed WS / HTTP protocol"]
+        Routing["Routing agent / root agent"]
+        ControlLoop["Planner -> PolicyJudge -> Executor -> Verifier -> Repair"]
+        Transcript["Transcript / approvals / cron"]
+        Memory["Curated memory lifecycle"]
+    end
+
+    subgraph Host["Host Bridge (host OS / execution plane)"]
+        HostTools["shell / file / browser"]
+        CurrentTab["Current Tab relay"]
+    end
+
+    subgraph Desktop["Desktop Bridge (host OS / desktop capability plane)"]
+        DesktopRuntime["runtime / view / control"]
+    end
+
+    MCP["MCP servers"]
+    Skills["Skills / plugins"]
+
+    User --> Channels --> Protocol
+    Protocol --> Routing --> ControlLoop
+    Protocol --> Transcript
+    ControlLoop --> Memory
+    ControlLoop --> MCP
+    ControlLoop --> Skills
+    ControlLoop --> HostTools
+    ControlLoop --> DesktopRuntime
+    HostTools --> CurrentTab
 ```
 
 ## Setup
