@@ -295,6 +295,68 @@ async def _run_channels():
         await registry.stop_all_channels()
 
 
+# ── status ───────────────────────────────────────────────────────
+
+
+@cli.command()
+def status():
+    """Show configuration, bridge connectivity, and registered tools."""
+    import httpx
+    from src.config.settings import get_settings
+
+    settings = get_settings()
+
+    # ── Configuration summary ──
+    from rich.table import Table
+
+    cfg_table = Table(title="Configuration", show_header=False)
+    cfg_table.add_column("Key", style="cyan")
+    cfg_table.add_column("Value")
+    cfg_table.add_row("Agent Model", settings.agent_model)
+    cfg_table.add_row("Gateway", f"{settings.gateway_host}:{settings.gateway_port}")
+    cfg_table.add_row("Shell Enabled", str(settings.shell_enabled))
+    cfg_table.add_row("Browser Headless", str(settings.browser_headless))
+    cfg_table.add_row("API Key Set", "yes" if os.getenv("GOOGLE_API_KEY") else "no")
+    console.print(cfg_table)
+
+    # ── Bridge connectivity ──
+    bridge_table = Table(title="Bridge Status", show_header=True, header_style="bold cyan")
+    bridge_table.add_column("Bridge")
+    bridge_table.add_column("Enabled")
+    bridge_table.add_column("URL")
+    bridge_table.add_column("Reachable")
+
+    bridges = [
+        ("Host Bridge", settings.host_bridge_enabled, settings.host_bridge_url),
+        ("Desktop Bridge", settings.desktop_bridge_enabled, settings.desktop_bridge_url),
+    ]
+
+    for name, enabled, url in bridges:
+        reachable = "-"
+        if enabled and url:
+            try:
+                resp = httpx.get(url.replace("/sse", "/"), timeout=3)
+                reachable = "[green]yes[/green]" if resp.status_code < 500 else f"[red]{resp.status_code}[/red]"
+            except Exception:
+                reachable = "[red]no[/red]"
+        bridge_table.add_row(
+            name,
+            "[green]yes[/green]" if enabled else "[dim]no[/dim]",
+            url or "-",
+            reachable,
+        )
+    console.print(bridge_table)
+
+    # ── Channel tokens ──
+    ch_table = Table(title="Channels", show_header=True, header_style="bold cyan")
+    ch_table.add_column("Channel")
+    ch_table.add_column("Configured")
+    ch_table.add_row("Telegram", "[green]yes[/green]" if settings.telegram_bot_token else "[dim]no[/dim]")
+    ch_table.add_row("Discord", "[green]yes[/green]" if settings.discord_bot_token else "[dim]no[/dim]")
+    ch_table.add_row("Slack", "[green]yes[/green]" if settings.slack_bot_token else "[dim]no[/dim]")
+    console.print(ch_table)
+
+
 # ── bridge group (host / desktop) ───────────────────────────────
 
 
