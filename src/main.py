@@ -27,9 +27,13 @@ def _require_api_key():
 
 
 @click.group(invoke_without_command=True)
+@click.version_option(package_name="boiled-claw")
+@click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose output.")
 @click.pass_context
-def cli(ctx):
+def cli(ctx, verbose):
     """boiled-claw — Your personal AI agent powered by Gemini."""
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
     if ctx.invoked_subcommand is None:
         click.echo(ctx.get_help())
 
@@ -38,10 +42,14 @@ def cli(ctx):
 
 
 @cli.command()
-def chat():
+@click.option("--model", default=None, help="Override the agent model (e.g. gemini-2.5-flash).")
+@click.option("--dry-run", is_flag=True, default=False, help="Validate config and exit without running.")
+@click.pass_context
+def chat(ctx, model, dry_run):
     """Start an interactive chat session (REPL)."""
     _require_api_key()
-    asyncio.run(_run_cli())
+    verbose = ctx.obj.get("verbose", False)
+    asyncio.run(_run_cli(model_override=model, verbose=verbose, dry_run=dry_run))
 
 
 def _setup_readline():
@@ -60,7 +68,11 @@ def _setup_readline():
     atexit.register(readline.write_history_file, str(history_file))
 
 
-async def _run_cli():
+async def _run_cli(
+    model_override: str | None = None,
+    verbose: bool = False,
+    dry_run: bool = False,
+):
     """CLIモードでエージェントを実行する"""
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
@@ -74,7 +86,18 @@ async def _run_cli():
     _setup_readline()
 
     settings = get_settings()
+    if model_override:
+        settings.agent_model = model_override
     await ensure_skills_loaded()
+
+    if verbose:
+        console.print(f"[dim]Config: model={settings.agent_model}, "
+                       f"host_bridge={settings.host_bridge_enabled}, "
+                       f"desktop_bridge={settings.desktop_bridge_enabled}[/dim]")
+
+    if dry_run:
+        console.print("[green]Config OK. Dry-run mode — exiting.[/green]")
+        return
 
     session_service = InMemorySessionService()
     memory_service = get_promoted_memory_service()
@@ -145,14 +168,32 @@ async def _run_cli():
 @cli.command()
 @click.option("--host", default=None, help="Bind host (default: 127.0.0.1)")
 @click.option("--port", default=None, type=int, help="Bind port (default: 18789)")
-def web(host, port):
+@click.option("--model", default=None, help="Override the agent model.")
+@click.option("--dry-run", is_flag=True, default=False, help="Validate config and exit without running.")
+@click.pass_context
+def web(ctx, host, port, model, dry_run):
     """Start the WebSocket Gateway server."""
     _require_api_key()
+    from src.config.settings import get_settings
     from src.gateway.server import create_gateway
+
+    settings = get_settings()
+    if model:
+        settings.agent_model = model
+
+    verbose = ctx.obj.get("verbose", False)
+    if verbose:
+        console.print(f"[dim]Config: model={settings.agent_model}, "
+                       f"host={host or settings.gateway_host}, "
+                       f"port={port or settings.gateway_port}[/dim]")
+
+    if dry_run:
+        console.print("[green]Config OK. Dry-run mode — exiting.[/green]")
+        return
 
     console.print(Panel(
         "[bold cyan]boiled-claw Gateway Server[/bold cyan] 🦀\n"
-        "WebSocket endpoint: ws://{host}:{port}/ws/{{user_id}}\n"
+        f"WebSocket endpoint: ws://{host or settings.gateway_host}:{port or settings.gateway_port}/ws/{{user_id}}\n"
         "[dim]Press Ctrl+C to stop[/dim]",
         border_style="cyan"
     ))
