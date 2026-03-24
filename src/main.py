@@ -5,20 +5,46 @@ CLI / Web 両対応
 
 import asyncio
 import os
-import sys
-from typing import Optional
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.panel import Panel
 from rich.prompt import Prompt
-import argparse
+import click
 
 load_dotenv()
 
 console = Console()
 
 
-async def run_cli():
+def _require_api_key():
+    """GOOGLE_API_KEY が設定されていなければエラー終了する。"""
+    if not os.getenv("GOOGLE_API_KEY"):
+        console.print(
+            "[red]Error: GOOGLE_API_KEY is not set.[/red]\n"
+            "Copy .env.example to .env and set your API key."
+        )
+        raise SystemExit(1)
+
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def cli(ctx):
+    """boiled-claw — Your personal AI agent powered by Gemini."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+
+
+# ── chat (default interactive REPL) ──────────────────────────────
+
+
+@cli.command()
+def chat():
+    """Start an interactive chat session (REPL)."""
+    _require_api_key()
+    asyncio.run(_run_cli())
+
+
+async def _run_cli():
     """CLIモードでエージェントを実行する"""
     from google.adk.runners import Runner
     from google.adk.sessions import InMemorySessionService
@@ -88,8 +114,15 @@ async def run_cli():
             console.print(f"[red]Error: {e}[/red]")
 
 
-def run_web(host: Optional[str] = None, port: Optional[int] = None):
-    """Webサーバーモードで実行する"""
+# ── web (Gateway server) ────────────────────────────────────────
+
+
+@cli.command()
+@click.option("--host", default=None, help="Bind host (default: 127.0.0.1)")
+@click.option("--port", default=None, type=int, help="Bind port (default: 18789)")
+def web(host, port):
+    """Start the WebSocket Gateway server."""
+    _require_api_key()
     from src.gateway.server import create_gateway
 
     console.print(Panel(
@@ -103,77 +136,17 @@ def run_web(host: Optional[str] = None, port: Optional[int] = None):
     gateway.run(host=host, port=port)
 
 
-def run_host_bridge(
-    host: Optional[str] = None,
-    port: Optional[int] = None,
-    *,
-    transport: str = "sse",
-):
-    """Host Bridge モードで実行する。"""
-    from src.mcp_servers.host_bridge_server import create_server
-
-    bind_host = host or "127.0.0.1"
-    bind_port = port or 8766
-
-    if transport == "stdio":
-        console.print(
-            Panel(
-                "[bold cyan]boiled-claw Host Bridge[/bold cyan] 🦀\n"
-                "Transport: stdio\n"
-                "[dim]Use from a local MCP stdio client[/dim]",
-                border_style="cyan",
-            )
-        )
-        create_server(host="stdio").run(transport="stdio")
-        return
-
-    console.print(
-        Panel(
-            "[bold cyan]boiled-claw Host Bridge[/bold cyan] 🦀\n"
-            f"SSE endpoint: http://{bind_host}:{bind_port}/sse\n"
-            "[dim]Run this on the host OS, outside Docker[/dim]",
-            border_style="cyan",
-        )
-    )
-    create_server(host=bind_host, port=bind_port).run(transport="sse")
+# ── channels (Telegram / Discord) ───────────────────────────────
 
 
-def run_desktop_bridge(
-    host: Optional[str] = None,
-    port: Optional[int] = None,
-    *,
-    transport: str = "sse",
-):
-    """Desktop Bridge を実行する。"""
-    from src.mcp_servers.desktop_bridge_server import create_server
-
-    bind_host = host or "127.0.0.1"
-    bind_port = port or 8767
-
-    if transport == "stdio":
-        console.print(
-            Panel(
-                "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
-                "Transport: stdio\n"
-                "[dim]Desktop client adapter. Control capabilities are still incomplete.[/dim]",
-                border_style="cyan",
-            )
-        )
-        create_server(host="stdio").run(transport="stdio")
-        return
-
-    console.print(
-        Panel(
-            "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
-            f"SSE endpoint: http://{bind_host}:{bind_port}/sse\n"
-            "[dim]Run on the host OS. View-only desktop capabilities can be enabled first.[/dim]",
-            border_style="cyan",
-        )
-    )
-    create_server(host=bind_host, port=bind_port).run(transport="sse")
+@cli.command()
+def channels():
+    """Start multi-channel mode (Telegram, Discord)."""
+    _require_api_key()
+    asyncio.run(_run_channels())
 
 
-async def run_channels():
+async def _run_channels():
     """チャネルモードで実行する"""
     from src.config.settings import get_settings
     from src.channels.registry import get_channel_registry
@@ -190,7 +163,6 @@ async def run_channels():
     await ensure_skills_loaded()
     registry = get_channel_registry()
 
-    # セッションとランナー
     session_service = InMemorySessionService()
     memory_service = get_promoted_memory_service()
     runner = Runner(
@@ -200,20 +172,15 @@ async def run_channels():
         memory_service=memory_service,
     )
 
-    # メッセージハンドラー
     async def handle_message(msg):
-        """チャネルメッセージ処理"""
-        # セッション取得または作成
         session = await session_service.create_session(
             app_name="boiled-claw",
             user_id=msg.user_id,
         )
-
         content = types.Content(
             role="user",
             parts=[types.Part(text=msg.content)]
         )
-
         response_text = ""
         async for event in runner.run_async(
             user_id=msg.user_id,
@@ -225,10 +192,8 @@ async def run_channels():
                     for part in event.content.parts:
                         if part.text:
                             response_text += part.text
-
         return response_text
 
-    # Telegram設定
     if settings.telegram_bot_token:
         try:
             telegram = TelegramChannel({"bot_token": settings.telegram_bot_token})
@@ -238,7 +203,6 @@ async def run_channels():
         except Exception as e:
             console.print(f"[yellow]![/yellow] Telegram channel failed: {e}")
 
-    # Discord設定
     if settings.discord_bot_token:
         try:
             discord_ch = DiscordChannel({"bot_token": settings.discord_bot_token})
@@ -248,7 +212,6 @@ async def run_channels():
         except Exception as e:
             console.print(f"[yellow]![/yellow] Discord channel failed: {e}")
 
-    # 全チャネル起動
     console.print(Panel(
         "[bold cyan]boiled-claw Channels[/bold cyan] 🦀\n"
         f"Active channels: {len(registry.list_channels())}\n"
@@ -258,7 +221,6 @@ async def run_channels():
 
     await registry.start_all_channels()
 
-    # 無限ループ (Ctrl+Cまで)
     try:
         while True:
             await asyncio.sleep(1)
@@ -267,48 +229,87 @@ async def run_channels():
         await registry.stop_all_channels()
 
 
-def main():
-    """メイン関数"""
-    parser = argparse.ArgumentParser(description="boiled-claw - Your personal AI agent")
-    parser.add_argument(
-        "mode",
-        nargs="?",
-        default="cli",
-        choices=["cli", "web", "channels", "host-bridge", "desktop-bridge"],
-        help="Run mode: cli (default), web, channels, host-bridge, or desktop-bridge"
-    )
-    parser.add_argument("--host", type=str, help="Web server host (default: 127.0.0.1)")
-    parser.add_argument("--port", type=int, help="Web server port (default: 18789)")
-    parser.add_argument(
-        "--transport",
-        choices=["sse", "stdio"],
-        default="sse",
-        help="Transport for bridge modes (default: sse)",
-    )
+# ── bridge group (host / desktop) ───────────────────────────────
 
-    args = parser.parse_args()
 
-    # API key check
-    api_key = os.getenv("GOOGLE_API_KEY")
-    requires_google_api = args.mode in {"cli", "web", "channels"}
-    if requires_google_api and not api_key:
-        console.print(
-            "[red]Error: GOOGLE_API_KEY is not set.[/red]\n"
-            "Copy .env.example to .env and set your API key."
-        )
+@cli.group()
+def bridge():
+    """Manage bridge services (host, desktop)."""
+    pass
+
+
+@bridge.command("host")
+@click.option("--host", default=None, help="Bind host (default: 127.0.0.1)")
+@click.option("--port", default=None, type=int, help="Bind port (default: 8766)")
+@click.option(
+    "--transport", type=click.Choice(["sse", "stdio"]), default="sse",
+    help="Transport mode (default: sse)",
+)
+def bridge_host(host, port, transport):
+    """Start the Host Bridge MCP server."""
+    from src.mcp_servers.host_bridge_server import create_server
+
+    bind_host = host or "127.0.0.1"
+    bind_port = port or 8766
+
+    if transport == "stdio":
+        console.print(Panel(
+            "[bold cyan]boiled-claw Host Bridge[/bold cyan] 🦀\n"
+            "Transport: stdio\n"
+            "[dim]Use from a local MCP stdio client[/dim]",
+            border_style="cyan",
+        ))
+        create_server(host="stdio").run(transport="stdio")
         return
 
-    # モード別実行
-    if args.mode == "cli":
-        asyncio.run(run_cli())
-    elif args.mode == "web":
-        run_web(host=args.host, port=args.port)
-    elif args.mode == "channels":
-        asyncio.run(run_channels())
-    elif args.mode == "host-bridge":
-        run_host_bridge(host=args.host, port=args.port, transport=args.transport)
-    elif args.mode == "desktop-bridge":
-        run_desktop_bridge(host=args.host, port=args.port, transport=args.transport)
+    console.print(Panel(
+        "[bold cyan]boiled-claw Host Bridge[/bold cyan] 🦀\n"
+        f"SSE endpoint: http://{bind_host}:{bind_port}/sse\n"
+        "[dim]Run this on the host OS, outside Docker[/dim]",
+        border_style="cyan",
+    ))
+    create_server(host=bind_host, port=bind_port).run(transport="sse")
+
+
+@bridge.command("desktop")
+@click.option("--host", default=None, help="Bind host (default: 127.0.0.1)")
+@click.option("--port", default=None, type=int, help="Bind port (default: 8767)")
+@click.option(
+    "--transport", type=click.Choice(["sse", "stdio"]), default="sse",
+    help="Transport mode (default: sse)",
+)
+def bridge_desktop(host, port, transport):
+    """Start the Desktop Bridge MCP server."""
+    from src.mcp_servers.desktop_bridge_server import create_server
+
+    bind_host = host or "127.0.0.1"
+    bind_port = port or 8767
+
+    if transport == "stdio":
+        console.print(Panel(
+            "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
+            "Transport: stdio\n"
+            "[dim]Desktop client adapter. Control capabilities are still incomplete.[/dim]",
+            border_style="cyan",
+        ))
+        create_server(host="stdio").run(transport="stdio")
+        return
+
+    console.print(Panel(
+        "[bold cyan]boiled-claw Desktop Bridge[/bold cyan] 🦀\n"
+        f"SSE endpoint: http://{bind_host}:{bind_port}/sse\n"
+        "[dim]Run on the host OS. View-only desktop capabilities can be enabled first.[/dim]",
+        border_style="cyan",
+    ))
+    create_server(host=bind_host, port=bind_port).run(transport="sse")
+
+
+# ── entry point ──────────────────────────────────────────────────
+
+
+def main():
+    """メイン関数"""
+    cli()
 
 
 if __name__ == "__main__":
