@@ -44,6 +44,22 @@ def chat():
     asyncio.run(_run_cli())
 
 
+def _setup_readline():
+    """readline 履歴を設定する。"""
+    import readline
+    from pathlib import Path
+
+    history_file = Path.home() / ".boiled_claw_history"
+    try:
+        readline.read_history_file(history_file)
+    except FileNotFoundError:
+        pass
+    readline.set_history_length(1000)
+
+    import atexit
+    atexit.register(readline.write_history_file, str(history_file))
+
+
 async def _run_cli():
     """CLIモードでエージェントを実行する"""
     from google.adk.runners import Runner
@@ -53,6 +69,9 @@ async def _run_cli():
     from src.config.settings import get_settings
     from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
     from src.skills.runtime import ensure_skills_loaded
+    from src.cli.repl import handle_slash_command
+
+    _setup_readline()
 
     settings = get_settings()
     await ensure_skills_loaded()
@@ -75,9 +94,11 @@ async def _run_cli():
         "[bold cyan]boiled-claw[/bold cyan] 🦀\n"
         "Your personal AI agent powered by Gemini\n"
         f"[dim]Model: {settings.agent_model}[/dim]\n"
-        "[dim]Type 'exit' or 'quit' to stop[/dim]",
+        "[dim]Type /help for commands, 'exit' to quit[/dim]",
         border_style="cyan"
     ))
+
+    repl_ctx = dict(settings=settings, session=session, root_agent=root_agent)
 
     while True:
         try:
@@ -88,6 +109,10 @@ async def _run_cli():
                 break
 
             if not user_input.strip():
+                continue
+
+            # Slash commands
+            if handle_slash_command(user_input, **repl_ctx):
                 continue
 
             content = types.Content(
