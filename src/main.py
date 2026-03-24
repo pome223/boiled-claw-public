@@ -23,10 +23,26 @@ def _require_api_key():
             "[red]Error: GOOGLE_API_KEY is not set.[/red]\n"
             "Copy .env.example to .env and set your API key."
         )
-        raise SystemExit(1)
+        raise click.Abort()
 
 
-@click.group(invoke_without_command=True)
+class _AliasGroup(click.Group):
+    """Support legacy command aliases (cli -> chat, host-bridge -> bridge host, etc.)."""
+
+    _ALIASES: dict[str, list[str]] = {
+        "cli": ["chat"],               # legacy: `boiled-claw cli` -> chat
+        "host-bridge": ["bridge", "host"],
+        "desktop-bridge": ["bridge", "desktop"],
+    }
+
+    def parse_args(self, ctx, args):
+        """Rewrite legacy single-token aliases before parsing."""
+        if args and args[0] in self._ALIASES:
+            args = list(self._ALIASES[args[0]]) + args[1:]
+        return super().parse_args(ctx, args)
+
+
+@click.group(cls=_AliasGroup, invoke_without_command=True)
 @click.version_option(package_name="boiled-claw")
 @click.option("-v", "--verbose", is_flag=True, default=False, help="Enable verbose output.")
 @click.pass_context
@@ -35,7 +51,7 @@ def cli(ctx, verbose):
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
     if ctx.invoked_subcommand is None:
-        click.echo(ctx.get_help())
+        ctx.invoke(chat)
 
 
 # ── chat (default interactive REPL) ──────────────────────────────
@@ -60,12 +76,19 @@ def _setup_readline():
     history_file = Path.home() / ".boiled_claw_history"
     try:
         readline.read_history_file(history_file)
-    except FileNotFoundError:
+    except (FileNotFoundError, OSError):
         pass
     readline.set_history_length(1000)
 
     import atexit
-    atexit.register(readline.write_history_file, str(history_file))
+
+    def _save_history():
+        try:
+            readline.write_history_file(str(history_file))
+        except OSError:
+            pass
+
+    atexit.register(_save_history)
 
 
 async def _run_cli(
