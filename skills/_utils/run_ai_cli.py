@@ -46,9 +46,9 @@ def _build_args_and_input(cli_name: str, prompt: str, mode: str,
 
     Special case — ``codex review``:
       Codex review reads its own diff from the repo via --base / --uncommitted.
-      The positional argument is *custom instructions*, not the diff itself.
-      We therefore pass custom instructions (if any) as an argv positional
-      and do NOT pipe the diff via stdin.
+      The --base/--uncommitted flags and the [PROMPT] positional are **mutually
+      exclusive** in the Codex CLI. When a scope flag is used, custom
+      instructions cannot be passed.
     """
     if cli_name == "claude":
         # claude -p  (reads prompt from stdin when no positional given)
@@ -56,15 +56,17 @@ def _build_args_and_input(cli_name: str, prompt: str, mode: str,
 
     if cli_name == "codex":
         if mode == "review":
-            # codex review --base <branch> "optional instructions"
             args = ["codex", "review"]
             if review_base:
+                # --base and [PROMPT] are mutually exclusive
                 args += ["--base", review_base]
             elif review_uncommitted:
+                # --uncommitted and [PROMPT] are mutually exclusive
                 args.append("--uncommitted")
-            # prompt is custom instructions (short), safe as argv
-            if prompt.strip():
-                args.append(prompt)
+            else:
+                # No scope flag — prompt is used as custom instructions
+                if prompt.strip():
+                    args.append(prompt)
             args += extra_args
             return args, None  # no stdin — codex reads its own diff
         # codex exec — reads from stdin when positional is "-"

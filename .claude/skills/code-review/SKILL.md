@@ -75,14 +75,17 @@ cat /tmp/bc_review_prompt.txt | gemini 2>&1 | tee /tmp/bc_review_gemini.txt
 ```
 
 **Codex** — 自分でリポジトリの diff を読む。`--base` / `--uncommitted` でスコープ指定。
-ポジショナル引数はカスタム指示（レビュー観点）であり、diff そのものではない:
+`--base`/`--uncommitted` と `[PROMPT]` は **排他** なので、スコープ指定時はカスタム指示を渡せない:
 
 ```bash
-# ブランチベースのレビュー
-codex review --base main "セキュリティとエラーハンドリングに注目" 2>&1 | tee /tmp/bc_review_codex.txt
+# ブランチベースのレビュー（カスタム指示なし）
+codex review --base main 2>&1 | tee /tmp/bc_review_codex.txt
 
-# 未コミット変更のレビュー
-codex review --uncommitted "パフォーマンスに注目" 2>&1 | tee /tmp/bc_review_codex.txt
+# 未コミット変更のレビュー（カスタム指示なし）
+codex review --uncommitted 2>&1 | tee /tmp/bc_review_codex.txt
+
+# カスタム指示付き（スコープはデフォルト = 現在のブランチ）
+codex review "セキュリティとエラーハンドリングに注目" 2>&1 | tee /tmp/bc_review_codex.txt
 ```
 
 - 各 CLI のタイムアウトは 120 秒
