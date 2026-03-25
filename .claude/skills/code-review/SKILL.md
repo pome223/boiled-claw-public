@@ -62,23 +62,35 @@ git diff <from>..<to>
 
 ### 4. 各 CLI にレビューを送信
 
-利用可能な各 CLI に順番に送信する:
+各 CLI で diff の渡し方が異なる点に注意:
+
+**Claude / Gemini** — 収集した diff をプロンプトに含め stdin 経由で送る:
 
 ```bash
-# Claude Code（非対話 print モード）
+# Claude Code（非対話 print モード、stdin でプロンプト受信）
 cat /tmp/bc_review_prompt.txt | claude -p 2>&1 | tee /tmp/bc_review_claude.txt
 
-# Codex（専用 review サブコマンドがあればそちらを優先）
-codex review --base main "セキュリティとエラーハンドリングに注目" 2>&1 | tee /tmp/bc_review_codex.txt
-# または汎用プロンプト:
-# cat /tmp/bc_review_prompt.txt | codex exec - 2>&1 | tee /tmp/bc_review_codex.txt
-
-# Gemini CLI
+# Gemini CLI（stdin でプロンプト受信）
 cat /tmp/bc_review_prompt.txt | gemini 2>&1 | tee /tmp/bc_review_gemini.txt
+```
+
+**Codex** — 自分でリポジトリの diff を読む。`--base` / `--uncommitted` でスコープ指定。
+ポジショナル引数はカスタム指示（レビュー観点）であり、diff そのものではない:
+
+```bash
+# ブランチベースのレビュー
+codex review --base main "セキュリティとエラーハンドリングに注目" 2>&1 | tee /tmp/bc_review_codex.txt
+
+# 未コミット変更のレビュー
+codex review --uncommitted "パフォーマンスに注目" 2>&1 | tee /tmp/bc_review_codex.txt
 ```
 
 - 各 CLI のタイムアウトは 120 秒
 - 失敗した CLI はエラーを記録してスキップする
+
+> **集約時の注意:** Claude/Gemini はプロンプト内の diff をレビューし、Codex は
+> `--base`/`--uncommitted` で決まる diff をレビューする。作業ツリーが diff 収集後に
+> 変更されていると、レビュー対象が異なる可能性がある。diff 収集後すぐにレビューを実行すること。
 
 ### 5. 結果を集約して報告
 

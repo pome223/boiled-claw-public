@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: Send git diffs to external AI CLIs (Claude, Codex, Gemini) for code review and aggregate findings.
-version: 1.0.0
+version: 1.1.0
 author: boiled-claw
 tags:
   - review
@@ -13,30 +13,40 @@ tags:
 
 You are a code review orchestrator. You collect git diffs and send them to one or more external AI CLIs for review, then aggregate and report findings.
 
+## Runtime Requirements
+
+This skill is designed for **root agent execution** — it requires built-in tools
+(`run_shell`, `write_file`, `memory_store`) that are available to the root agent.
+Use `skill_execute("code-review")` to load the instructions, then follow them
+with the root agent's tools.
+
+> **Note:** `skill_spawn` creates dynamic agents with MCP toolsets only, which
+> do not include `run_shell` or `write_file`. Until built-in tool injection is
+> supported for dynamic agents, use `skill_execute` instead.
+
 ## Supported External CLIs
 
-| CLI | Non-interactive Command | Notes |
-|-----|------------------------|-------|
-| Claude Code | `claude -p "prompt"` | `--print` mode for non-interactive output |
-| OpenAI Codex | `codex review "prompt"` | Built-in review with `--base`, `--uncommitted` |
-| Gemini CLI | `gemini "prompt"` | Positional prompt argument |
+| CLI | Non-interactive Command | Prompt Transport |
+|-----|------------------------|-----------------|
+| Claude Code | `claude -p` | stdin |
+| OpenAI Codex | `codex review --base <branch>` | Codex reads its own diff |
+| Gemini CLI | `gemini` | stdin |
 
 ## Utility Script
 
-Use the shared utility at `skills/_utils/run_ai_cli.py` for consistent CLI invocation:
+Use `skills/_utils/run_ai_cli.py` for consistent CLI invocation. Prompts are
+passed via **stdin** (not argv) to avoid OS argument-size limits on large diffs.
 
 ```bash
 # Detect available CLIs
 python3 skills/_utils/run_ai_cli.py --detect
 
-# Run with inline prompt
-python3 skills/_utils/run_ai_cli.py --cli claude --prompt "Review this code"
+# Claude / Gemini — prompt via stdin from file
+python3 skills/_utils/run_ai_cli.py --cli claude --prompt-file /tmp/bc_review_prompt.txt
+python3 skills/_utils/run_ai_cli.py --cli gemini --prompt-file /tmp/bc_review_prompt.txt
 
-# Run with file-based prompt (for long diffs)
-python3 skills/_utils/run_ai_cli.py --cli claude --prompt-file /tmp/review_prompt.txt
-
-# Codex has a dedicated review mode
-python3 skills/_utils/run_ai_cli.py --cli codex --mode review --prompt "Focus on security"
+# Codex — uses its own diff reader; prompt is custom instructions only
+python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main
 ```
 
 ## Workflow
@@ -46,27 +56,17 @@ python3 skills/_utils/run_ai_cli.py --cli codex --mode review --prompt "Focus on
 Determine the review scope via `run_shell`:
 
 ```bash
-# Unstaged changes
-git diff
-
-# Staged changes
-git diff --cached
-
-# Compare branches
-git diff main...HEAD
-
-# Specific commit range
-git log --oneline -5   # identify range first
-git diff <from>..<to>
+git diff                    # unstaged
+git diff --cached           # staged
+git diff main...HEAD        # branch comparison
+git diff <from>..<to>       # commit range
 ```
 
-Save the diff output for use in the next step. If the diff is empty, report that there are no changes to review and stop.
+Save the diff output. If empty, report "no changes to review" and stop.
 
 ### 2. Prepare the Review Prompt
 
-Write the prompt to a temporary file using `write_file` (required for long diffs since `run_shell` does not support pipes or shell expansion):
-
-Template:
+Write a prompt file using `write_file` to `/tmp/bc_review_prompt.txt`:
 
 ```
 Review the following git diff. Focus on: {focus_areas}.
@@ -77,34 +77,35 @@ Report issues as a list with severity (critical/warning/info), file, line, and d
 ---
 ```
 
-Save this to a temporary file path (e.g., `/tmp/bc_review_prompt.txt`) using `write_file`.
+**This prompt file is used by Claude and Gemini only.** Codex reads its own diff
+via `--base` / `--uncommitted`, so it does not need the diff embedded in the prompt.
 
 ### 3. Send to External AI CLIs
 
-Run each CLI via `run_shell` using the utility script. The user may specify which CLIs to use; default to all available.
+Each CLI handles the diff differently:
+
+**Claude / Gemini** — receive the full diff via stdin through the utility:
 
 ```bash
-# Check which CLIs are available
-python3 skills/_utils/run_ai_cli.py --detect
-
-# Send to each available CLI
 python3 skills/_utils/run_ai_cli.py --cli claude --prompt-file /tmp/bc_review_prompt.txt --timeout 120
-python3 skills/_utils/run_ai_cli.py --cli codex --mode review --prompt-file /tmp/bc_review_prompt.txt --timeout 120
 python3 skills/_utils/run_ai_cli.py --cli gemini --prompt-file /tmp/bc_review_prompt.txt --timeout 120
 ```
 
-**Codex shortcut**: For branch-based reviews, Codex has a built-in `review` mode that reads the diff internally:
+**Codex** — reads the diff from the repo directly:
 
 ```bash
-# Codex can review against a base branch directly (no diff needed)
-codex review --base main "Focus on security and error handling"
+# Codex review against a base branch (reads diff internally)
+python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main --timeout 120
+
+# Or review uncommitted changes
+python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-uncommitted --timeout 120
 ```
 
-If a CLI is not installed or fails, log the error and continue with the remaining CLIs. Do not abort the entire review.
+If a CLI is not installed or fails, log the error and continue with the rest.
 
 ### 4. Aggregate Results
 
-Compile results from all CLIs into a unified report:
+Compile results into a unified report:
 
 ```markdown
 ## Code Review Report
@@ -122,7 +123,6 @@ Compile results from all CLIs into a unified report:
 
 #### Codex
 - [warning] file.py:42 — Consider parameterized queries
-...
 
 #### Gemini
 ...
@@ -136,14 +136,19 @@ Items where reviewers differ (needs human judgment):
 - ...
 ```
 
+> **Aggregation caveat:** Claude/Gemini review the exact diff provided in the
+> prompt. Codex reviews the diff as determined by `--base`/`--uncommitted`.
+> If the working tree has changed since the diff was collected, the change sets
+> may differ. Run the review promptly after collecting the diff.
+
 ### 5. Store Results (Optional)
 
-If the user requests, store the review summary in memory via `memory_store` for future reference.
+If the user requests, store the review summary via `memory_store`.
 
 ## Guardrails
 
 - Never send `.env`, secrets, or credential files to external CLIs.
-- Strip any lines containing `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD` from diffs before sending.
+- Strip lines containing `API_KEY`, `SECRET`, `TOKEN`, `PASSWORD` from diffs.
 - Truncate very large diffs; review the most changed files first.
 - Timeout each CLI call at 120 seconds.
 - If no external CLI is available, fall back to performing the review internally.
@@ -151,12 +156,11 @@ If the user requests, store the review summary in memory via `memory_store` for 
 ## Usage Examples
 
 ```
-# Review current changes with all available CLIs
-skill_spawn("code-review", "Review my staged changes")
+# Review current changes with all available CLIs (root agent reads and follows)
+skill_execute("code-review")
+# then: "Review my staged changes"
 
 # Review with specific focus
-skill_spawn("code-review", "Security review of changes on feature/auth branch using Claude and Gemini")
-
-# Review a specific commit range
-skill_spawn("code-review", "Review commits abc123..def456 focusing on performance")
+skill_execute("code-review")
+# then: "Security review of changes on feature/auth branch using Claude and Gemini"
 ```

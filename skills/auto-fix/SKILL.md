@@ -1,7 +1,7 @@
 ---
 name: auto-fix
 description: Detect lint/test failures, send context to external AI CLIs for fixes, apply patches, and verify in a loop.
-version: 1.0.0
+version: 1.1.0
 author: boiled-claw
 tags:
   - auto-fix
@@ -15,24 +15,33 @@ tags:
 
 You are an automated fix orchestrator. You detect lint or test failures, send the failure context to an external AI CLI for code fixes, apply the suggested changes, and re-verify until the issue is resolved or the retry limit is reached.
 
+## Runtime Requirements
+
+This skill is designed for **root agent execution** — it requires built-in tools
+(`run_shell`, `write_file`, `read_file`) that are available to the root agent.
+Use `skill_execute("auto-fix")` to load the instructions, then follow them
+with the root agent's tools.
+
+> **Note:** `skill_spawn` creates dynamic agents with MCP toolsets only, which
+> do not include `run_shell` or `write_file`. Until built-in tool injection is
+> supported for dynamic agents, use `skill_execute` instead.
+
 ## Supported External CLIs
 
-| CLI | Non-interactive Command | Notes |
-|-----|------------------------|-------|
-| Claude Code | `claude -p "prompt"` | `--print` mode for non-interactive output |
-| OpenAI Codex | `codex exec "prompt"` | Non-interactive execution mode |
-| Gemini CLI | `gemini "prompt"` | Positional prompt argument |
+| CLI | Non-interactive Command | Prompt Transport |
+|-----|------------------------|-----------------|
+| Claude Code | `claude -p` | stdin |
+| OpenAI Codex | `codex exec -` | stdin (`-` = read from stdin) |
+| Gemini CLI | `gemini` | stdin |
 
 ## Utility Script
 
-Use the shared utility at `skills/_utils/run_ai_cli.py`:
+Use `skills/_utils/run_ai_cli.py`. Prompts are passed via **stdin** (not argv)
+to avoid OS argument-size limits on large error context.
 
 ```bash
-# Detect available CLIs
 python3 skills/_utils/run_ai_cli.py --detect
-
-# Send fix prompt via file (recommended for long error context)
-python3 skills/_utils/run_ai_cli.py --cli claude --prompt-file /tmp/fix_prompt.txt --timeout 120
+python3 skills/_utils/run_ai_cli.py --cli claude --prompt-file /tmp/bc_fix_prompt.txt --timeout 120
 ```
 
 ## Workflow
@@ -42,38 +51,27 @@ python3 skills/_utils/run_ai_cli.py --cli claude --prompt-file /tmp/fix_prompt.t
 Run the user-specified check command (or auto-detect) via `run_shell`:
 
 ```bash
-# Lint checks (auto-detect based on project)
-ruff check .                   # Python (ruff)
-flake8 .                       # Python (flake8)
-eslint .                       # JavaScript/TypeScript
-golangci-lint run              # Go
-
-# Test checks
-pytest -x --tb=short           # Python
-npm test                       # Node.js
-go test ./...                  # Go
-
-# Type checks
-mypy src/                      # Python
-tsc --noEmit                   # TypeScript
+ruff check .                   # Python lint
+pytest -x --tb=short           # Python test
+mypy src/                      # Python type check
+eslint .                       # JS/TS lint
+tsc --noEmit                   # TS type check
 ```
 
-Capture the full output (stdout + stderr) and the exit code.
-
-If the check passes (exit code 0), report success and stop.
+Capture stdout + stderr and the exit code. If exit code is 0, report success and stop.
 
 ### 2. Parse Failure Context
 
-Extract structured information from the failure output:
+Extract from the failure output:
 - **File path** and **line number** of each error
 - **Error message** / **test name**
 - **Error category** (syntax, type, import, assertion, etc.)
 
-Read the relevant source files around the error locations to provide context.
+Read the relevant source files around error locations via `read_file`.
 
 ### 3. Build Fix Prompt
 
-Write the prompt to a temporary file using `write_file` (required — `run_shell` does not support pipes or shell expansion):
+Write to `/tmp/bc_fix_prompt.txt` using `write_file`:
 
 ```
 Fix the following errors in this codebase.
@@ -88,9 +86,6 @@ Fix the following errors in this codebase.
 {source code}
 ```
 
-### {file2}:{start_line}-{end_line}
-...
-
 ## Instructions
 - Output ONLY the corrected code blocks, prefixed with the file path.
 - Do not change unrelated code.
@@ -103,11 +98,11 @@ Fix the following errors in this codebase.
 ```
 ```
 
-Save to e.g. `/tmp/bc_fix_prompt.txt`.
+Never include `.env`, secrets, or credential content.
 
 ### 4. Send to External AI CLI
 
-Use the user's preferred CLI (default: first available) via the utility script:
+Use the utility script — the prompt is piped via stdin:
 
 ```bash
 python3 skills/_utils/run_ai_cli.py --cli claude --prompt-file /tmp/bc_fix_prompt.txt --timeout 120
@@ -117,30 +112,21 @@ Parse the response to extract file paths and corrected code blocks.
 
 ### 5. Apply Fixes
 
-For each corrected code block returned:
-1. Read the original file.
-2. Apply the fix (replace the relevant section or full file).
-3. Use `write_file` or direct file operations.
+For each corrected code block:
+1. Read the original file (record content for revert).
+2. Apply the fix via `write_file`.
 
 ### 6. Verify (Loop)
 
-Re-run the original check command:
-
-```bash
-# Same command as Step 1
-ruff check .
-pytest -x --tb=short
-```
+Re-run the original check command.
 
 **Loop conditions:**
-- **Pass (exit 0):** Report success, show summary of all changes made. Stop.
-- **Fail (same errors):** The fix didn't work. Try a different CLI or refine the prompt. Max 3 retries.
-- **Fail (new errors):** The fix introduced regressions. Revert the last change and try again.
-- **Max retries reached:** Report the current state, list remaining errors, and suggest manual fixes.
+- **Pass (exit 0):** Report success with change summary. Stop.
+- **Fail (same errors):** Fix didn't work. Try a different CLI or refine prompt. Max 3 retries.
+- **Fail (new errors):** Regression introduced. Revert the last change and retry.
+- **Max retries reached:** Report current state, list remaining errors, suggest manual fixes.
 
 ### 7. Report
-
-Produce a final report:
 
 ```markdown
 ## Auto-Fix Report
@@ -178,23 +164,19 @@ Produce a final report:
 
 - **Max 3 retries** to prevent infinite loops.
 - **Revert on regression**: If a fix introduces more errors than it solves, revert immediately.
-- **No destructive changes**: Never delete files or remove large code sections without explicit user approval.
-- **Scope control**: Only modify files directly related to the reported errors.
-- **Backup**: Before applying fixes, note the original content so changes can be reverted.
+- **No destructive changes**: Never delete files or remove large code sections without user approval.
+- **Scope control**: Only modify files directly related to reported errors.
+- **Backup**: Record original content before applying fixes.
 - Never send `.env`, secrets, or credential files to external CLIs.
 
 ## Usage Examples
 
 ```
-# Auto-fix lint errors
-skill_spawn("auto-fix", "Fix all ruff lint errors in this project")
+# Auto-fix lint errors (root agent reads and follows)
+skill_execute("auto-fix")
+# then: "Fix all ruff lint errors in this project"
 
-# Auto-fix failing tests
-skill_spawn("auto-fix", "Fix the failing pytest tests using Claude CLI")
-
-# Auto-fix with specific command
-skill_spawn("auto-fix", "Run 'mypy src/' and fix all type errors using Codex")
-
-# Auto-fix with retry limit
-skill_spawn("auto-fix", "Fix eslint errors, max 2 retries, prefer Gemini")
+# Auto-fix with specific CLI
+skill_execute("auto-fix")
+# then: "Fix the failing pytest tests using Claude CLI"
 ```
