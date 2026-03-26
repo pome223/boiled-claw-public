@@ -175,7 +175,68 @@ GOOGLE_API_KEY= python -m src.main 2>&1
 - `GOOGLE_API_KEY is not set` のエラーメッセージが表示されること（トレースバックではないこと）
 - chat がデフォルトで起動しようとしていることを確認
 
-### 7. 結果サマリを出力
+### 7. AI CLI スキルの動作確認
+
+外部 AI CLI 連携スキルのロードとユーティリティの動作を確認する。
+
+#### 7-1. スキルロード確認
+
+```bash
+python3 -c "
+import asyncio
+from src.skills.runtime import ensure_skills_loaded
+from src.skills.base import get_skill_registry
+
+async def main():
+    await ensure_skills_loaded()
+    registry = get_skill_registry()
+    names = [m.name for m in registry.list_skills()]
+    expected = {'coding-agent', 'e2e-test', 'code-review', 'multi-llm-judge', 'auto-fix'}
+    missing = expected - set(names)
+    if missing:
+        print(f'FAIL: missing skills: {missing}')
+        exit(1)
+    print(f'PASS: {len(names)} skills loaded')
+
+asyncio.run(main())
+" 2>&1
+```
+
+- 終了コード 0
+- 5 スキル全てが登録されていること: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`
+
+#### 7-2. CLI 検出ユーティリティ
+
+```bash
+python3 skills/_utils/run_ai_cli.py --detect 2>&1
+```
+
+- 終了コード 0
+- 少なくとも 1 つの CLI が見つかること（環境依存; フル構成なら claude, codex, gemini の 3 つ）
+
+#### 7-3. 基本 CLI 呼び出し（利用可能な CLI ごと）
+
+検出された各 CLI に対して、簡単なプロンプトで stdin 経由の応答を確認する:
+
+```bash
+python3 skills/_utils/run_ai_cli.py --cli claude --prompt "Say only: ok" --timeout 30 2>&1
+python3 skills/_utils/run_ai_cli.py --cli codex --prompt "Say only: ok" --timeout 60 2>&1
+python3 skills/_utils/run_ai_cli.py --cli gemini --prompt "Say only: ok" --timeout 120 2>&1
+```
+
+- 利用可能な CLI が終了コード 0 かつ stdout が空でないこと
+- 利用不可の CLI はスキップ（失敗ではない）
+
+#### 7-4. Codex review モード
+
+```bash
+python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main --timeout 60 2>&1
+```
+
+- 終了コード 0（diff なしの場合でも正常終了であれば OK）
+- 引数パースエラーが出ないこと
+
+### 8. 結果サマリを出力
 
 以下の形式で報告すること:
 
@@ -198,8 +259,15 @@ GOOGLE_API_KEY= python -m src.main 2>&1
 | CLI dry-run | OK / NG |
 | CLI status コマンド | OK / NG |
 | CLI デフォルト動作 | OK / NG |
+| AI スキルロード (5件) | OK / NG |
+| CLI 検出ユーティリティ | OK / NG (N件検出) |
+| Claude CLI 基本応答 | OK / NG / SKIP |
+| Codex CLI 基本応答 | OK / NG / SKIP |
+| Gemini CLI 基本応答 | OK / NG / SKIP |
+| Codex review モード | OK / NG / SKIP |
 
 （失敗がある場合は詳細と対処法を記載）
+（CLI 基本応答の SKIP は当該 CLI が未インストールの場合で、失敗とはみなさない）
 ```
 
 すべて OK の場合のみ「push OK」と報告すること。

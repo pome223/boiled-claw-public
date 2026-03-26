@@ -38,8 +38,72 @@ docker compose --profile dev run --rm boiled-claw-dev curl -sS http://boiled-cla
 
 Expected: JSON with `"status": "ok"`.
 
+## AI CLI Skills Smoke Test
+
+Verify that the external AI CLI integration skills load correctly and the utility works.
+
+### Skill Loading
+
+```bash
+python3 -c "
+import asyncio
+from src.skills.runtime import ensure_skills_loaded
+from src.skills.base import get_skill_registry
+
+async def main():
+    await ensure_skills_loaded()
+    registry = get_skill_registry()
+    names = [m.name for m in registry.list_skills()]
+    expected = {'coding-agent', 'e2e-test', 'code-review', 'multi-llm-judge', 'auto-fix'}
+    missing = expected - set(names)
+    if missing:
+        print(f'FAIL: missing skills: {missing}')
+        exit(1)
+    print(f'PASS: {len(names)} skills loaded — {sorted(names)}')
+
+asyncio.run(main())
+"
+```
+
+- Exit code `0`
+- All 5 skills present: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`
+
+### CLI Detection Utility
+
+```bash
+python3 skills/_utils/run_ai_cli.py --detect
+```
+
+- Exit code `0`
+- At least 1 CLI found (environment-dependent; all 3 if fully configured)
+
+### Basic CLI Invocation (per available CLI)
+
+For each CLI reported as available, run a trivial prompt to confirm stdin transport works:
+
+```bash
+python3 skills/_utils/run_ai_cli.py --cli claude --prompt "Say only: ok" --timeout 30
+python3 skills/_utils/run_ai_cli.py --cli codex --prompt "Say only: ok" --timeout 60
+python3 skills/_utils/run_ai_cli.py --cli gemini --prompt "Say only: ok" --timeout 120
+```
+
+- Each available CLI returns exit code `0` and non-empty stdout
+- Unavailable CLIs are skipped (not a failure)
+
+### Codex Review Mode
+
+```bash
+python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main --timeout 60
+```
+
+- Exit code `0` (may report "no diff" if branch is up to date — that is still a pass)
+- No argument parsing error
+
 ## Pass Criteria
 
 - `pytest` exits with code `0`
 - No test is skipped because the gateway is unreachable
 - If the quick smoke check is used, `/health` returns HTTP `200`
+- All 5 skills load via `ensure_skills_loaded()`
+- CLI detection utility exits `0` with at least 1 CLI found
+- Each available CLI responds to a trivial stdin prompt
