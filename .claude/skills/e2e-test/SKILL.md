@@ -227,14 +227,43 @@ python3 skills/_utils/run_ai_cli.py --cli gemini --prompt "Say only: ok" --timeo
 - 利用可能な CLI が終了コード 0 かつ stdout が空でないこと
 - 利用不可の CLI はスキップ（失敗ではない）
 
-#### 7-4. Codex review モード
+#### 7-4. argv 構築ユニットテスト（CLI 不要）
+
+外部 CLI を実際に呼ばず、`run_ai_cli.py` の引数組み立てだけを検証する。
+ネットワークや CLI の状態に依存しないため false negative が起きない:
 
 ```bash
-python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main --timeout 60 2>&1
+python3 -c "
+import sys, importlib.util
+spec = importlib.util.spec_from_file_location('run_ai_cli', 'skills/_utils/run_ai_cli.py')
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+# claude: stdin, no prompt in argv
+args, stdin = mod._build_args_and_input('claude', 'test', 'default', [], None, False)
+assert args == ['claude', '-p'] and stdin == 'test'
+
+# codex exec: stdin via '-'
+args, stdin = mod._build_args_and_input('codex', 'test', 'default', [], None, False)
+assert args == ['codex', 'exec', '-'] and stdin == 'test'
+
+# codex review --base: prompt excluded (mutually exclusive)
+args, stdin = mod._build_args_and_input('codex', 'ignored', 'review', [], 'main', False)
+assert args == ['codex', 'review', '--base', 'main'] and stdin is None
+
+# codex review --uncommitted: prompt excluded
+args, stdin = mod._build_args_and_input('codex', '', 'review', [], None, True)
+assert args == ['codex', 'review', '--uncommitted'] and stdin is None
+
+# gemini: stdin
+args, stdin = mod._build_args_and_input('gemini', 'test', 'default', [], None, False)
+assert args == ['gemini'] and stdin == 'test'
+
+print('PASS: all argv construction checks passed')
+" 2>&1
 ```
 
-- 終了コード 0（diff なしの場合でも正常終了であれば OK）
-- 引数パースエラーが出ないこと
+- 終了コード 0
+- 全 5 パターンの assertion が通ること
 
 ### 8. 結果サマリを出力
 
@@ -264,7 +293,7 @@ python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main
 | Claude CLI 基本応答 | OK / NG / SKIP |
 | Codex CLI 基本応答 | OK / NG / SKIP |
 | Gemini CLI 基本応答 | OK / NG / SKIP |
-| Codex review モード | OK / NG / SKIP |
+| argv 構築テスト | OK / NG |
 
 （失敗がある場合は詳細と対処法を記載）
 （CLI 基本応答の SKIP は当該 CLI が未インストールの場合で、失敗とはみなさない）

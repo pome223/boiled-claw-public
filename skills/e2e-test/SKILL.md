@@ -38,9 +38,10 @@ docker compose --profile dev run --rm boiled-claw-dev curl -sS http://boiled-cla
 
 Expected: JSON with `"status": "ok"`.
 
-## AI CLI Skills Smoke Test
+## AI CLI Skills Smoke Test (Docker container)
 
-Verify that the external AI CLI integration skills load correctly and the utility works.
+These checks run inside the Docker dev container and do **not** require external
+AI CLIs (claude/codex/gemini) to be installed.
 
 ### Skill Loading
 
@@ -68,36 +69,47 @@ asyncio.run(main())
 - Exit code `0`
 - All 5 skills present: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`
 
-### CLI Detection Utility
+### Utility argv Construction (unit test, no CLI required)
+
+Verify that `run_ai_cli.py` builds correct argument lists without invoking any CLI:
 
 ```bash
-python3 skills/_utils/run_ai_cli.py --detect
+python3 -c "
+import sys, importlib.util
+spec = importlib.util.spec_from_file_location('run_ai_cli', 'skills/_utils/run_ai_cli.py')
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+# claude: stdin transport, no prompt in argv
+args, stdin = mod._build_args_and_input('claude', 'test prompt', 'default', [], None, False)
+assert args == ['claude', '-p'], f'claude args: {args}'
+assert stdin == 'test prompt', f'claude stdin: {stdin}'
+
+# codex exec: stdin via '-'
+args, stdin = mod._build_args_and_input('codex', 'test prompt', 'default', [], None, False)
+assert args == ['codex', 'exec', '-'], f'codex exec args: {args}'
+assert stdin == 'test prompt', f'codex exec stdin: {stdin}'
+
+# codex review --base: no prompt in argv (mutually exclusive)
+args, stdin = mod._build_args_and_input('codex', 'ignored', 'review', [], 'main', False)
+assert args == ['codex', 'review', '--base', 'main'], f'codex review args: {args}'
+assert stdin is None, f'codex review stdin should be None: {stdin}'
+
+# codex review --uncommitted: no prompt in argv
+args, stdin = mod._build_args_and_input('codex', '', 'review', [], None, True)
+assert args == ['codex', 'review', '--uncommitted'], f'codex uncommitted args: {args}'
+assert stdin is None
+
+# gemini: stdin transport
+args, stdin = mod._build_args_and_input('gemini', 'test prompt', 'default', [], None, False)
+assert args == ['gemini'], f'gemini args: {args}'
+assert stdin == 'test prompt'
+
+print('PASS: all argv construction checks passed')
+"
 ```
 
 - Exit code `0`
-- At least 1 CLI found (environment-dependent; all 3 if fully configured)
-
-### Basic CLI Invocation (per available CLI)
-
-For each CLI reported as available, run a trivial prompt to confirm stdin transport works:
-
-```bash
-python3 skills/_utils/run_ai_cli.py --cli claude --prompt "Say only: ok" --timeout 30
-python3 skills/_utils/run_ai_cli.py --cli codex --prompt "Say only: ok" --timeout 60
-python3 skills/_utils/run_ai_cli.py --cli gemini --prompt "Say only: ok" --timeout 120
-```
-
-- Each available CLI returns exit code `0` and non-empty stdout
-- Unavailable CLIs are skipped (not a failure)
-
-### Codex Review Mode
-
-```bash
-python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main --timeout 60
-```
-
-- Exit code `0` (may report "no diff" if branch is up to date — that is still a pass)
-- No argument parsing error
+- All 5 assertions pass
 
 ## Pass Criteria
 
@@ -105,5 +117,4 @@ python3 skills/_utils/run_ai_cli.py --cli codex --mode review --review-base main
 - No test is skipped because the gateway is unreachable
 - If the quick smoke check is used, `/health` returns HTTP `200`
 - All 5 skills load via `ensure_skills_loaded()`
-- CLI detection utility exits `0` with at least 1 CLI found
-- Each available CLI responds to a trivial stdin prompt
+- Utility argv construction test passes (no external CLI needed)
