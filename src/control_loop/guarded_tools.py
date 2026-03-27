@@ -332,6 +332,77 @@ async def guarded_browser_navigate(
     return await browser_navigate(url)
 
 
+async def guarded_current_tab_info(
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "current_tab.navigate")
+        _check_capability_in_plan(tool_context, "current_tab.navigate")
+
+    from src.tools.current_tab import current_tab_info
+    return await current_tab_info()
+
+
+async def guarded_current_tab_navigate(
+    url: str,
+    timeout_ms: int = 15000,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "current_tab.navigate")
+        _check_capability_in_plan(tool_context, "current_tab.navigate")
+
+    from src.tools.current_tab import current_tab_navigate
+    return await current_tab_navigate(url, timeout_ms=timeout_ms)
+
+
+async def guarded_current_tab_extract_text(
+    selector: str | None = None,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        _check_approval(tool_context, "current_tab.navigate")
+        _check_capability_in_plan(tool_context, "current_tab.navigate")
+
+    from src.tools.current_tab import current_tab_extract_text
+    return await current_tab_extract_text(selector=selector)
+
+
+async def guarded_current_tab_click(
+    selector: str,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "current_tab.click requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "current_tab.navigate")
+
+    from src.tools.current_tab import current_tab_click
+    return await current_tab_click(selector)
+
+
+async def guarded_current_tab_fill(
+    selector: str,
+    text: str,
+    tool_context: ToolContext | None = None,
+) -> dict:
+    if tool_context is not None:
+        status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
+        if status != "human_approved":
+            raise PermissionError(
+                "current_tab.fill requires human_approved status. "
+                f"Current status: '{status}'"
+            )
+        _check_capability_in_plan(tool_context, "current_tab.navigate")
+
+    from src.tools.current_tab import current_tab_fill
+    return await current_tab_fill(selector, text)
+
+
 async def guarded_browser_extract_text(
     selector: str | None = None,
     tool_context: ToolContext | None = None,

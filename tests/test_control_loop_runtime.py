@@ -108,6 +108,8 @@ async def test_dynamic_instructions_render_custom_state_keys():
     assert '"plan_id": "plan-1"' in executor
     assert "policy_approved" in executor
     assert '"summary": "done"' in verifier
+    assert "current_tab.info / current_tab.navigate / current_tab.extract_text" in planner
+    assert "Prefer current_tab.info / current_tab.navigate / current_tab.extract_text" in executor
 
 
 @pytest.mark.asyncio
@@ -193,6 +195,57 @@ async def test_guarded_browser_fill_uses_browser_navigate_capability(monkeypatch
     assert result["success"] is True
     assert seen["selector"] == "textarea"
     assert seen["text"] == "Hello World"
+
+
+@pytest.mark.asyncio
+async def test_guarded_current_tab_extract_text_uses_current_tab_navigate_capability(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "current_tab.navigate"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_extract(selector=None, tool_context=None):
+        seen["selector"] = selector
+        return {"success": True, "text": "hello"}
+
+    monkeypatch.setattr("src.tools.current_tab.current_tab_extract_text", _fake_extract)
+
+    result = await guarded_tools_module.guarded_current_tab_extract_text(
+        selector="#main",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["selector"] == "#main"
+
+
+@pytest.mark.asyncio
+async def test_guarded_current_tab_fill_requires_human_approved(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "current_tab.navigate"}]
+            },
+        }
+    )
+
+    async def _fake_fill(selector, text, tool_context=None):
+        return {"success": True}
+
+    monkeypatch.setattr("src.tools.current_tab.current_tab_fill", _fake_fill)
+
+    with pytest.raises(PermissionError, match="current_tab.fill requires human_approved"):
+        await guarded_tools_module.guarded_current_tab_fill(
+            "#query",
+            "hello",
+            tool_context=tool_context,
+        )
 
 
 @pytest.mark.asyncio
