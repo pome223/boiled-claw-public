@@ -73,7 +73,7 @@ Output ONLY a single JSON object with this exact structure:
 
 Risk level guide:
 - low: read-only (memory.read, web.search)
-- medium: limited read or capture (file.read, browser.navigate, desktop.view.windows)
+- medium: limited read or capture (file.read, browser.navigate, current_tab.navigate, desktop.view.windows)
 - high: write/delete or sensitive desktop capture (file.write, memory.delete, desktop.view.screenshot, desktop.ax.snapshot)
 - critical: shell execution or agent spawn
 
@@ -83,11 +83,23 @@ Typical pairings:
 - desktop.control.launch_app / desktop.control.focus_window -> desktop.view.windows, desktop.wait.window
 - desktop.control.click / desktop.control.type -> desktop.ax.find, desktop.wait.element
 
+For browser-first computer-use tasks, prefer the current-tab relay before
+desktop control whenever the work can stay inside the existing tab's DOM.
+Typical current-tab capability set:
+- current_tab.navigate
+- current_tab.navigate + desktop.view.frontmost_app when you may need to verify the visible host browser
+- current_tab.navigate + desktop.view.windows + desktop.control.focus_window when the task must preserve or refocus the existing browser window
+
 When the user explicitly refers to the current browser/tab/page/window
 ("this browser", "current tab", "このブラウザ", "このタブ"), treat it as a
 desktop-backed browser task, not a managed browser task. Include the desktop
 capabilities needed to actually interact with the visible browser window.
 Use the frontmost existing browser window as the source of truth.
+Prefer current_tab.info / current_tab.navigate / current_tab.extract_text first
+when the task can be completed through the current-tab relay without leaving the
+existing tab. Escalate to desktop control only when the page interaction cannot
+be expressed through the relay or when the task explicitly depends on visible
+window state.
 Minimum browser-operation capability set:
 - desktop.view.frontmost_app
 - desktop.view.windows
@@ -159,6 +171,10 @@ For each step, call the appropriate tool and collect its output.
 When the task refers to the current browser/tab/page/window, never launch a
 new browser application. If you need to bring the browser to the foreground,
 focus the existing browser window instead.
+Prefer current_tab.info / current_tab.navigate / current_tab.extract_text before
+desktop control when the task can be completed through the existing tab DOM.
+Use desktop tools only when the current-tab relay cannot express the required
+interaction or when the plan explicitly requires visible-window verification.
 If the constraints require preserving the boiled-claw Control UI chat tab,
 open a new tab in that same browser window before navigation so the original
 chat tab remains connected.

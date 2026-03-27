@@ -73,6 +73,7 @@ _FRESHNESS_KEYWORDS = {
 
 _BROWSER_TOOL_NAMES = {
     "control_ui_chat_send_message",
+    "computer_observe",
     "current_tab_info",
     "current_tab_navigate",
     "current_tab_click",
@@ -108,6 +109,8 @@ _BROWSER_INFRA_ERROR_FRAGMENTS = (
     "current tab extension bridge",
     "current tab extension relay",
     "current tab extension is not connected",
+    "desktop bridge",
+    "desktop_bridge_enabled",
 )
 _USER_BROWSER_REQUIRED_CAPABILITIES = {
     "desktop.view.frontmost_app",
@@ -493,6 +496,15 @@ class GatewayServer:
                 "- 現在のリクエストでは、ブラウザを実際に操作せずに web_search へ自動フォールバックしません。\n"
                 "- 対応: Host Bridge を有効化して host 側で Playwright を実行するか、"
                 "この実行環境に Playwright をインストールしてください。"
+            )
+
+        if specialist_name == "computer_operator" and result.infrastructure_blocked:
+            return (
+                "computer use は実行できませんでした。\n"
+                f"- 原因: {first_error}\n"
+                "- 現在のリクエストでは、見えているブラウザや GUI を前提にした操作が必要です。\n"
+                "- 対応: Host Bridge / Current Tab relay / Desktop Bridge の必要な runtime を起動し、"
+                "現在のブラウザまたは対象 GUI が host 側で操作可能な状態にしてください。"
             )
 
         return (

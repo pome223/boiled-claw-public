@@ -773,6 +773,62 @@ def test_websocket_auto_routes_desktop_query_to_desktop_operator(monkeypatch, tm
             assert done["text"] == "desktop answer"
 
 
+def test_websocket_auto_routes_computer_use_query_to_computer_operator(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_routing_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        text=(
+                            '{"target":"specialist","specialist":"computer_operator",'
+                            '"handoff_mode":"direct",'
+                            '"reason":"computer use request","confidence":0.93,'
+                            '"dynamic_agent":{"instruction":"","mcp_servers":[],"mode":"run"}}'
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _fake_specialist_run_async(*, user_id, session_id, new_message):
+        text = new_message.parts[0].text
+        assert "このブラウザの画面を見て" in text
+        yield Event(
+            author="computer_operator",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="computer operator answer")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing_run_async)
+    monkeypatch.setattr(
+        gateway.specialist_runners["computer_operator"],
+        "run_async",
+        _fake_specialist_run_async,
+    )
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.send", "text": "このブラウザの画面を見て押せるボタンを教えて"})
+
+            route_selected = ws.receive_json()
+            done = ws.receive_json()
+
+            assert route_selected["event"] == "system.event"
+            assert route_selected["source"] == "router"
+            assert route_selected["agent_name"] == "computer_operator"
+            assert done["event"] == "chat.done"
+            assert done["text"] == "computer operator answer"
+
+
 @pytest.mark.asyncio
 async def test_spawn_cron_target_auto_uses_routing_agent(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
