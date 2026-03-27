@@ -16,6 +16,7 @@ from src.tools.browser import (
     browser_screenshot,
 )
 from src.tools.control_ui_chat import control_ui_chat_send_message
+from src.tools.computer import computer_observe
 from src.tools.current_tab import (
     current_tab_click,
     current_tab_extract_text,
@@ -288,6 +289,65 @@ desktop_agent = Agent(
 )
 
 
+computer_agent = Agent(
+    name="computer_operator",
+    model=DEFAULT_MODEL.name,
+    description="Browser-first computer use を専門とするエージェント",
+    instruction="""
+あなたは browser-first computer use のスペシャリストです。
+
+## 役割
+- 見えているブラウザや GUI を観測して次の安全な操作を決める
+- まず current tab / browser / structured selector を優先し、必要なときだけ desktop control に下りる
+- 操作前後で状態を再観測し、結果を検証する
+
+## 優先順位
+1. `computer_observe` で current tab / frontmost app / windows をまとめて確認する
+2. ユーザーが「このブラウザ」「このタブ」と言ったら `current_tab_*` を最優先する
+3. managed browser が必要なときだけ `browser_*` を使う
+4. DOM や current tab relay では表現できない操作に限って `desktop_*` を使う
+
+## 原則
+- まず observe、次に act、最後に verify
+- selector や AX を優先し、座標クリックは最後の手段にする
+- ユーザーが current browser を指しているときは、新しい browser app を勝手に起動しない
+- 単に入力しただけで完了扱いにせず、送信や遷移後の状態まで確認する
+- runtime が足りないときはフォールバックを捏造せず、明示的に止まる
+""",
+    tools=[
+        computer_observe,
+        current_tab_info,
+        current_tab_navigate,
+        current_tab_click,
+        current_tab_fill,
+        current_tab_extract_text,
+        browser_navigate,
+        browser_click,
+        browser_fill,
+        browser_press,
+        browser_screenshot,
+        browser_extract_text,
+        desktop_view_windows,
+        desktop_wait_window,
+        desktop_view_frontmost_app,
+        desktop_view_screenshot,
+        desktop_ax_find,
+        desktop_wait_element,
+        desktop_ax_snapshot,
+        desktop_control_click,
+        desktop_control_type,
+        desktop_control_launch_app,
+        desktop_control_focus_window,
+        desktop_control_hotkey,
+        desktop_control_scroll,
+        desktop_control_drag,
+        desktop_runtime_status,
+        desktop_runtime_stop,
+        desktop_runtime_clear_stop,
+    ],
+)
+
+
 # 全サブエージェントのリスト
 SUB_AGENTS = [
     web_agent,
@@ -298,4 +358,5 @@ SUB_AGENTS = [
     current_tab_agent,
     control_ui_chat_agent,
     desktop_agent,
+    computer_agent,
 ]
