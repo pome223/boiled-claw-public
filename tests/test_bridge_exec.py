@@ -1,8 +1,7 @@
-from src.bridges.desktop_exec import _error_text as desktop_error_text
-from src.bridges.host_bridge_exec import _error_text as host_error_text
+from src.bridges.common_errors import flatten_exception_text
 
 
-def test_host_bridge_error_text_flattens_exception_group():
+def test_flatten_exception_text_deduplicates_exception_group_messages():
     exc = ExceptionGroup(
         "outer",
         [
@@ -12,10 +11,10 @@ def test_host_bridge_error_text_flattens_exception_group():
         ],
     )
 
-    assert host_error_text(exc) == "page has been closed; inner failure"
+    assert flatten_exception_text(exc) == "page has been closed; inner failure"
 
 
-def test_desktop_error_text_flattens_nested_exception_group():
+def test_flatten_exception_text_flattens_nested_exception_group():
     exc = ExceptionGroup(
         "outer",
         [
@@ -23,4 +22,4 @@ def test_desktop_error_text_flattens_nested_exception_group():
         ],
     )
 
-    assert desktop_error_text(exc) == "Desktop Bridge is not enabled"
+    assert flatten_exception_text(exc) == "Desktop Bridge is not enabled"

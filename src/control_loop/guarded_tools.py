@@ -70,6 +70,9 @@ _CURRENT_BROWSER_HOTKEY_REWRITES = {
     ("e", "meta"): ["meta", "l"],
     ("k", "meta"): ["meta", "l"],
 }
+# Keep current-tab planning coarse-grained for now, mirroring the existing
+# browser.navigate umbrella capability across this tool family.
+_CURRENT_TAB_CAPABILITY = "current_tab.navigate"
 _KNOWN_BROWSER_APPS = {
     "Google Chrome",
     "Chromium",
@@ -336,8 +339,8 @@ async def guarded_current_tab_info(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
-        _check_approval(tool_context, "current_tab.navigate")
-        _check_capability_in_plan(tool_context, "current_tab.navigate")
+        _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
+        _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_info
     return await current_tab_info()
@@ -349,8 +352,8 @@ async def guarded_current_tab_navigate(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
-        _check_approval(tool_context, "current_tab.navigate")
-        _check_capability_in_plan(tool_context, "current_tab.navigate")
+        _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
+        _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_navigate
     return await current_tab_navigate(url, timeout_ms=timeout_ms)
@@ -361,8 +364,8 @@ async def guarded_current_tab_extract_text(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
-        _check_approval(tool_context, "current_tab.navigate")
-        _check_capability_in_plan(tool_context, "current_tab.navigate")
+        _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
+        _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_extract_text
     return await current_tab_extract_text(selector=selector)
@@ -379,7 +382,7 @@ async def guarded_current_tab_click(
                 "current_tab.click requires human_approved status. "
                 f"Current status: '{status}'"
             )
-        _check_capability_in_plan(tool_context, "current_tab.navigate")
+        _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_click
     return await current_tab_click(selector)
@@ -397,7 +400,7 @@ async def guarded_current_tab_fill(
                 "current_tab.fill requires human_approved status. "
                 f"Current status: '{status}'"
             )
-        _check_capability_in_plan(tool_context, "current_tab.navigate")
+        _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_fill
     return await current_tab_fill(selector, text)

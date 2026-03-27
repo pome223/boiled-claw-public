@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.bridges.common_errors import flatten_exception_text
 from src.bridges.host_bridge_client import get_host_bridge_client
 from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import (
@@ -27,19 +28,6 @@ _CONTROL_UI_AGENT_BUBBLES_SELECTOR = "#messages .bubble.agent"
 _CONTROL_UI_CONNECT_SELECTOR = "#connectBtn"
 _CONTROL_UI_STATUS_SELECTOR = "#statusText"
 _CONTROL_UI_APPROVE_SELECTOR = "#approvalList .approve-btn"
-
-
-def _error_text(exc: BaseException) -> str:
-    nested = getattr(exc, "exceptions", None)
-    if isinstance(nested, tuple) and nested:
-        parts: list[str] = []
-        for item in nested:
-            text = _error_text(item)
-            if text and text not in parts:
-                parts.append(text)
-        if parts:
-            return "; ".join(parts)
-    return str(exc)
 
 
 def _control_ui_error_payload(
@@ -313,7 +301,11 @@ async def _control_ui_chat_send_message_local(
         )
         return payload
     except Exception as exc:
-        payload = _control_ui_error_payload(_error_text(exc), url=url, message=message)
+        payload = _control_ui_error_payload(
+            flatten_exception_text(exc),
+            url=url,
+            message=message,
+        )
         browser_tools._audit_browser_event(
             action="control_ui_chat.send_message",
             resource=url,

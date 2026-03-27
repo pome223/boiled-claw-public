@@ -53,6 +53,14 @@ def test_heuristic_decision_routes_computer_use_request_to_specialist():
     assert decision.handoff_mode == "direct"
 
 
+def test_heuristic_decision_routes_current_browser_click_to_computer_operator():
+    decision = heuristic_decision("このブラウザのボタンをクリックして")
+
+    assert decision.target == "specialist"
+    assert decision.specialist == "computer_operator"
+    assert decision.handoff_mode == "direct"
+
+
 def test_targets_user_browser_detects_current_browser_language():
     assert targets_user_browser(
         "私が開いているブラウザのスプレッドシートにまとめて"
@@ -114,6 +122,24 @@ def test_decision_from_payload_routes_screen_aware_current_browser_request_to_co
             "dynamic_agent": {},
         },
         fallback_message="このブラウザの画面を見ながら押せるボタンを教えて",
+    )
+
+    assert decision.target == "specialist"
+    assert decision.specialist == "computer_operator"
+    assert decision.handoff_mode == "direct"
+
+
+def test_decision_from_payload_routes_current_browser_click_to_computer_operator():
+    decision = decision_from_payload(
+        {
+            "target": "specialist",
+            "specialist": "desktop_operator",
+            "handoff_mode": "direct",
+            "reason": "desktop control request",
+            "confidence": 0.83,
+            "dynamic_agent": {},
+        },
+        fallback_message="このブラウザのボタンをクリックして",
     )
 
     assert decision.target == "specialist"

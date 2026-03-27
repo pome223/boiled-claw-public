@@ -342,12 +342,12 @@ def heuristic_decision(message: str) -> RoutingDecision:
             confidence=0.9,
         )
 
-    if has_computer_use:
+    if _is_computer_use_specialist_flow(normalized):
         return RoutingDecision(
             target="specialist",
             specialist="computer_operator",
             handoff_mode="direct",
-            reason="computer-use request should use the browser-first computer operator",
+            reason="browser-first or screen-aware GUI request should use the computer operator",
             confidence=0.86,
         )
 
@@ -561,12 +561,20 @@ def _is_computer_use_specialist_flow(text: str) -> bool:
     has_current_browser = targets_user_browser(normalized)
     has_explicit_computer_use = _contains_any(normalized, COMPUTER_USE_KEYWORDS)
     has_visible_surface = _contains_any(normalized, _COMPUTER_SURFACE_KEYWORDS)
+    has_desktop_surface = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
     has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
+    has_research = _contains_any(normalized, _RESEARCH_KEYWORDS)
     has_sequence = _contains_any(normalized, _SEQUENCE_KEYWORDS | _LONGFORM_KEYWORDS)
 
     return (
-        (has_current_browser or has_explicit_computer_use)
-        and (has_explicit_computer_use or has_visible_surface)
+        (
+            has_explicit_computer_use
+            or (
+                has_current_browser
+                and (has_visible_surface or has_desktop_surface)
+                and not has_research
+            )
+        )
         and not has_spreadsheet
         and not has_sequence
     )
