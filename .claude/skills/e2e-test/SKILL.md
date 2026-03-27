@@ -191,7 +191,7 @@ async def main():
     await ensure_skills_loaded()
     registry = get_skill_registry()
     names = [m.name for m in registry.list_skills()]
-    expected = {'coding-agent', 'e2e-test', 'code-review', 'multi-llm-judge', 'auto-fix'}
+    expected = {'coding-agent', 'e2e-test', 'code-review', 'multi-llm-judge', 'auto-fix', 'computer-use'}
     missing = expected - set(names)
     if missing:
         print(f'FAIL: missing skills: {missing}')
@@ -203,7 +203,7 @@ asyncio.run(main())
 ```
 
 - 終了コード 0
-- 5 スキル全てが登録されていること: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`
+- 6 スキル全てが登録されていること: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`, `computer-use`
 
 #### 7-2. CLI 検出ユーティリティ
 

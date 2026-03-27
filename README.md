@@ -569,7 +569,7 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - After the Gateway starts, check loading status via `GET /skills`.
 - Use `skill_execute` to inspect and run a skill's content.
 - Use `skill_spawn` to delegate task execution using the skill content as a dynamic agent's instruction.
-- Sample skills are bundled: `skills/coding-agent/SKILL.md` and `skills/e2e-test/SKILL.md`.
+- Sample skills are bundled: `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, and `skills/e2e-test/SKILL.md`.
 
 ### Security
 
