@@ -11,6 +11,19 @@ ClientT = TypeVar("ClientT")
 ResultT = TypeVar("ResultT")
 
 
+def _error_text(exc: BaseException) -> str:
+    nested = getattr(exc, "exceptions", None)
+    if isinstance(nested, tuple) and nested:
+        parts: list[str] = []
+        for item in nested:
+            text = _error_text(item)
+            if text and text not in parts:
+                parts.append(text)
+        if parts:
+            return "; ".join(parts)
+    return str(exc)
+
+
 async def execute_host_bridge_call(
     *,
     request: Any,
@@ -52,7 +65,7 @@ async def execute_host_bridge_call(
         )
         return result, payload
     except Exception as exc:
-        payload = error_payload(str(exc))
+        payload = error_payload(_error_text(exc))
         await emit_tool_result(
             session_id=request.session_id,
             tool_name=tool_name,

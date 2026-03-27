@@ -29,6 +29,19 @@ _CONTROL_UI_STATUS_SELECTOR = "#statusText"
 _CONTROL_UI_APPROVE_SELECTOR = "#approvalList .approve-btn"
 
 
+def _error_text(exc: BaseException) -> str:
+    nested = getattr(exc, "exceptions", None)
+    if isinstance(nested, tuple) and nested:
+        parts: list[str] = []
+        for item in nested:
+            text = _error_text(item)
+            if text and text not in parts:
+                parts.append(text)
+        if parts:
+            return "; ".join(parts)
+    return str(exc)
+
+
 def _control_ui_error_payload(
     error: str,
     *,
@@ -300,7 +313,7 @@ async def _control_ui_chat_send_message_local(
         )
         return payload
     except Exception as exc:
-        payload = _control_ui_error_payload(str(exc), url=url, message=message)
+        payload = _control_ui_error_payload(_error_text(exc), url=url, message=message)
         browser_tools._audit_browser_event(
             action="control_ui_chat.send_message",
             resource=url,
