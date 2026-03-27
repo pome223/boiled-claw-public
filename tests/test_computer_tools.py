@@ -116,3 +116,97 @@ async def test_computer_observe_returns_failure_when_no_surface_is_available(mon
     assert result["available_surfaces"] == []
     assert result["errors"]["current_tab"] == "host bridge unavailable"
     assert result["errors"]["frontmost_app"] == "desktop bridge unavailable"
+
+
+@pytest.mark.asyncio
+async def test_computer_click_prefers_current_tab_selector(monkeypatch):
+    async def _observe(**kwargs):
+        return {
+            "preferred_surface": "current_tab",
+            "available_surfaces": ["current_tab", "desktop"],
+            "success": True,
+        }
+
+    async def _current_tab_click(selector, tool_context=None):
+        return {"selector": selector, "success": True}
+
+    async def _browser_click(selector, tool_context=None):
+        raise AssertionError("browser_click should not be used when current_tab is available")
+
+    async def _desktop_click(**kwargs):
+        raise AssertionError("desktop_control_click should not be used for selector-only click")
+
+    monkeypatch.setattr(computer, "computer_observe", _observe)
+    monkeypatch.setattr(computer, "current_tab_click", _current_tab_click)
+    monkeypatch.setattr(computer, "browser_click", _browser_click)
+    monkeypatch.setattr(computer, "desktop_control_click", _desktop_click)
+
+    result = await computer.computer_click(selector="#submit")
+
+    assert result["success"] is True
+    assert result["surface"] == "current_tab"
+    assert result["strategy"] == "current_tab_selector"
+    assert result["result"]["selector"] == "#submit"
+
+
+@pytest.mark.asyncio
+async def test_computer_click_falls_back_to_managed_browser(monkeypatch):
+    async def _observe(**kwargs):
+        return {
+            "preferred_surface": "desktop",
+            "available_surfaces": ["desktop"],
+            "errors": {"current_tab": "relay unavailable"},
+            "success": True,
+        }
+
+    async def _browser_click(selector, tool_context=None):
+        return {"selector": selector, "success": True}
+
+    async def _desktop_click(**kwargs):
+        raise AssertionError("desktop_control_click should not be used without desktop target fields")
+
+    monkeypatch.setattr(computer, "computer_observe", _observe)
+    monkeypatch.setattr(computer, "browser_click", _browser_click)
+    monkeypatch.setattr(computer, "desktop_control_click", _desktop_click)
+
+    result = await computer.computer_click(selector="#submit")
+
+    assert result["success"] is True
+    assert result["surface"] == "browser"
+    assert result["strategy"] == "managed_browser_selector"
+    assert result["observation"]["errors"]["current_tab"] == "relay unavailable"
+
+
+@pytest.mark.asyncio
+async def test_computer_fill_uses_desktop_selector_when_available(monkeypatch):
+    async def _observe(**kwargs):
+        return {
+            "preferred_surface": "desktop",
+            "available_surfaces": ["desktop"],
+            "success": True,
+        }
+
+    async def _desktop_type(**kwargs):
+        return {
+            "success": True,
+            "target": {"role": kwargs["role"], "title": kwargs["title"]},
+        }
+
+    async def _browser_fill(selector, text, tool_context=None):
+        raise AssertionError("browser_fill should not be used when desktop target is available")
+
+    monkeypatch.setattr(computer, "computer_observe", _observe)
+    monkeypatch.setattr(computer, "desktop_control_type", _desktop_type)
+    monkeypatch.setattr(computer, "browser_fill", _browser_fill)
+
+    result = await computer.computer_fill(
+        text="hello",
+        role="text_field",
+        title="Search",
+        app_name="Google Chrome",
+    )
+
+    assert result["success"] is True
+    assert result["surface"] == "desktop"
+    assert result["strategy"] == "desktop_selector"
+    assert result["result"]["target"]["title"] == "Search"

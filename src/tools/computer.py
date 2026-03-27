@@ -6,10 +6,18 @@ from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
-from src.tools.current_tab import current_tab_extract_text, current_tab_info
+from src.tools.browser import browser_click, browser_fill
+from src.tools.current_tab import (
+    current_tab_click,
+    current_tab_extract_text,
+    current_tab_fill,
+    current_tab_info,
+)
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
+    desktop_control_click,
+    desktop_control_type,
     desktop_view_frontmost_app,
     desktop_view_screenshot,
     desktop_view_windows,
@@ -37,6 +45,47 @@ def _is_success(payload: dict[str, Any] | None) -> bool:
     if "ok" in payload:
         return bool(payload.get("ok"))
     return True
+
+
+def _has_desktop_target(
+    *,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+) -> bool:
+    return any((window_id, role, title, identifier, value_contains))
+
+
+def _observation_summary(observation: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "preferred_surface": observation.get("preferred_surface"),
+        "available_surfaces": observation.get("available_surfaces", []),
+        **({"errors": observation.get("errors", {})} if observation.get("errors") else {}),
+    }
+
+
+def _action_payload(
+    *,
+    action: str,
+    surface: str | None,
+    strategy: str,
+    observation: dict[str, Any],
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    payload = {
+        "action": action,
+        "surface": surface,
+        "strategy": strategy,
+        "observation": _observation_summary(observation),
+        "result": result,
+        "success": _is_success(result),
+    }
+    error = _tool_error(result)
+    if error:
+        payload["error"] = error
+    return payload
 
 
 async def computer_observe(
@@ -155,3 +204,189 @@ async def computer_observe(
         else None
     )
     return result
+
+
+async def computer_click(
+    selector: Optional[str] = None,
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+    index: int = 0,
+    allow_managed_browser: bool = True,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    """Click the best available browser/desktop surface using browser-first fallback."""
+
+    has_desktop_target = _has_desktop_target(
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+    )
+    if not selector and not has_desktop_target:
+        return {
+            "action": "click",
+            "success": False,
+            "error": "computer_click requires a CSS selector or desktop target fields",
+        }
+
+    observation = await computer_observe(
+        include_current_tab=selector is not None,
+        include_frontmost_app=True,
+        include_windows=True,
+        ax_app_name=app_name,
+        ax_window_id=window_id,
+        ax_role=role,
+        ax_title=title,
+        ax_identifier=identifier,
+        ax_value_contains=value_contains,
+        tool_context=tool_context,
+    )
+
+    if selector and "current_tab" in observation.get("available_surfaces", []):
+        result = await current_tab_click(selector, tool_context=tool_context)
+        return _action_payload(
+            action="click",
+            surface="current_tab",
+            strategy="current_tab_selector",
+            observation=observation,
+            result=result,
+        )
+
+    if has_desktop_target and "desktop" in observation.get("available_surfaces", []):
+        result = await desktop_control_click(
+            app_name=app_name,
+            window_id=window_id,
+            role=role,
+            title=title,
+            identifier=identifier,
+            value_contains=value_contains,
+            index=index,
+            tool_context=tool_context,
+        )
+        return _action_payload(
+            action="click",
+            surface="desktop",
+            strategy="desktop_selector",
+            observation=observation,
+            result=result,
+        )
+
+    if selector and allow_managed_browser:
+        result = await browser_click(selector, tool_context=tool_context)
+        return _action_payload(
+            action="click",
+            surface="browser",
+            strategy="managed_browser_selector",
+            observation=observation,
+            result=result,
+        )
+
+    return _action_payload(
+        action="click",
+        surface=None,
+        strategy="no_available_surface",
+        observation=observation,
+        result={
+            "error": "No browser or desktop surface could satisfy computer_click",
+            "success": False,
+        },
+    )
+
+
+async def computer_fill(
+    selector: Optional[str] = None,
+    text: str = "",
+    app_name: Optional[str] = None,
+    window_id: Optional[str] = None,
+    role: Optional[str] = None,
+    title: Optional[str] = None,
+    identifier: Optional[str] = None,
+    value_contains: Optional[str] = None,
+    index: int = 0,
+    allow_managed_browser: bool = True,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    """Fill the best available browser/desktop surface using browser-first fallback."""
+
+    has_desktop_target = _has_desktop_target(
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+    )
+    if not selector and not has_desktop_target:
+        return {
+            "action": "fill",
+            "success": False,
+            "error": "computer_fill requires a CSS selector or desktop target fields",
+        }
+
+    observation = await computer_observe(
+        include_current_tab=selector is not None,
+        include_frontmost_app=True,
+        include_windows=True,
+        ax_app_name=app_name,
+        ax_window_id=window_id,
+        ax_role=role,
+        ax_title=title,
+        ax_identifier=identifier,
+        ax_value_contains=value_contains,
+        tool_context=tool_context,
+    )
+
+    if selector and "current_tab" in observation.get("available_surfaces", []):
+        result = await current_tab_fill(selector, text, tool_context=tool_context)
+        return _action_payload(
+            action="fill",
+            surface="current_tab",
+            strategy="current_tab_selector",
+            observation=observation,
+            result=result,
+        )
+
+    if has_desktop_target and "desktop" in observation.get("available_surfaces", []):
+        result = await desktop_control_type(
+            text=text,
+            app_name=app_name,
+            window_id=window_id,
+            role=role,
+            title=title,
+            identifier=identifier,
+            value_contains=value_contains,
+            index=index,
+            tool_context=tool_context,
+        )
+        return _action_payload(
+            action="fill",
+            surface="desktop",
+            strategy="desktop_selector",
+            observation=observation,
+            result=result,
+        )
+
+    if selector and allow_managed_browser:
+        result = await browser_fill(selector, text, tool_context=tool_context)
+        return _action_payload(
+            action="fill",
+            surface="browser",
+            strategy="managed_browser_selector",
+            observation=observation,
+            result=result,
+        )
+
+    return _action_payload(
+        action="fill",
+        surface=None,
+        strategy="no_available_surface",
+        observation=observation,
+        result={
+            "error": "No browser or desktop surface could satisfy computer_fill",
+            "success": False,
+        },
+    )

@@ -74,6 +74,8 @@ _FRESHNESS_KEYWORDS = {
 _BROWSER_TOOL_NAMES = {
     "control_ui_chat_send_message",
     "computer_observe",
+    "computer_click",
+    "computer_fill",
     "current_tab_info",
     "current_tab_navigate",
     "current_tab_click",
