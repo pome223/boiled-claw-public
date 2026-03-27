@@ -26,6 +26,7 @@ Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstrea
 - 🔍 **Web Search** - Via DuckDuckGo API
 - 🌐 **Browser Automation** - Scraping and screenshots with Playwright
 - 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
+- 🖥️ **Browser-First Computer Use** - Observe and operate visible browser/UI flows with current-tab first and desktop fallback
 - 💻 **Shell Execution** - Secure command execution with security policies
 - 📁 **File Operations** - Read and write support
 - 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
@@ -242,6 +243,7 @@ The extension continuously reconnects to the relay, so it is easiest to start Ho
 - Selector text extraction
 
 This is the minimal implementation for routing current-tab research flows like "use this browser to look up ..." through the browser natively rather than through the desktop control loop.
+For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient.
 Bridges bind to loopback only by default. DNS rebinding protection is also enabled on Host/Desktop Bridge.
 Only set `BRIDGE_ALLOW_REMOTE_BIND=true` explicitly if you need to allow binding to addresses like `0.0.0.0`.
 
@@ -260,6 +262,7 @@ Desktop request routing is split as follows:
 
 - Single-shot desktop view / runtime safety: `desktop_operator`
 - Single-shot desktop control: `desktop_operator`
+- Browser-first visible UI operation with current-tab preference: `computer_operator`
 - Multi-step desktop automation with verification: `control_loop`
 
 ```bash
