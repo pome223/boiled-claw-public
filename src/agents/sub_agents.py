@@ -16,7 +16,7 @@ from src.tools.browser import (
     browser_screenshot,
 )
 from src.tools.control_ui_chat import control_ui_chat_send_message
-from src.tools.computer import computer_observe
+from src.tools.computer import computer_click, computer_fill, computer_observe
 from src.tools.current_tab import (
     current_tab_click,
     current_tab_extract_text,
@@ -303,9 +303,10 @@ computer_agent = Agent(
 
 ## 優先順位
 1. `computer_observe` で current tab / frontmost app / windows をまとめて確認する
-2. ユーザーが「このブラウザ」「このタブ」と言ったら `current_tab_*` を最優先する
-3. managed browser が必要なときだけ `browser_*` を使う
-4. DOM や current tab relay では表現できない操作に限って `desktop_*` を使う
+2. 直前に `computer_observe` を呼んだなら、その observation を `computer_click` / `computer_fill` に渡して再観測を避ける
+3. ユーザーが「このブラウザ」「このタブ」と言ったら `current_tab_*` を最優先する
+4. managed browser が必要なときだけ `browser_*` を使う
+5. DOM や current tab relay では表現できない操作に限って `desktop_*` を使う
 
 ## 原則
 - まず observe、次に act、最後に verify
@@ -316,6 +317,8 @@ computer_agent = Agent(
 """,
     tools=[
         computer_observe,
+        computer_click,
+        computer_fill,
         current_tab_info,
         current_tab_navigate,
         current_tab_click,

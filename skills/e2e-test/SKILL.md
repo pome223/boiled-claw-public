@@ -55,7 +55,7 @@ async def main():
     await ensure_skills_loaded()
     registry = get_skill_registry()
     names = [m.name for m in registry.list_skills()]
-    expected = {'coding-agent', 'e2e-test', 'code-review', 'multi-llm-judge', 'auto-fix'}
+    expected = {'coding-agent', 'e2e-test', 'code-review', 'multi-llm-judge', 'auto-fix', 'computer-use'}
     missing = expected - set(names)
     if missing:
         print(f'FAIL: missing skills: {missing}')
@@ -67,7 +67,7 @@ asyncio.run(main())
 ```
 
 - Exit code `0`
-- All 5 skills present: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`
+- All 6 skills present: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`, `computer-use`
 
 ### Utility argv Construction (unit test, no CLI required)
 

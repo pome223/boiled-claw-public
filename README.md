@@ -243,7 +243,7 @@ The extension continuously reconnects to the relay, so it is easiest to start Ho
 - Selector text extraction
 
 This is the minimal implementation for routing current-tab research flows like "use this browser to look up ..." through the browser natively rather than through the desktop control loop.
-For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient.
+For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient. The higher-level `computer_observe`, `computer_click`, and `computer_fill` tools bundle that browser-first selection so a caller can observe once and act on the best available surface.
 Bridges bind to loopback only by default. DNS rebinding protection is also enabled on Host/Desktop Bridge.
 Only set `BRIDGE_ALLOW_REMOTE_BIND=true` explicitly if you need to allow binding to addresses like `0.0.0.0`.
 
@@ -569,7 +569,7 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - After the Gateway starts, check loading status via `GET /skills`.
 - Use `skill_execute` to inspect and run a skill's content.
 - Use `skill_spawn` to delegate task execution using the skill content as a dynamic agent's instruction.
-- Sample skills are bundled: `skills/coding-agent/SKILL.md` and `skills/e2e-test/SKILL.md`.
+- Sample skills are bundled: `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, and `skills/e2e-test/SKILL.md`.
 
 ### Security
 
