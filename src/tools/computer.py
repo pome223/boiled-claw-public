@@ -88,9 +88,26 @@ def _action_payload(
     return payload
 
 
+def _normalize_observation_input(
+    observed_available_surfaces: list[str] | None,
+    observed_preferred_surface: Optional[str],
+) -> dict[str, Any] | None:
+    if observed_available_surfaces is None and observed_preferred_surface is None:
+        return None
+    return {
+        "available_surfaces": list(observed_available_surfaces or []),
+        **(
+            {"preferred_surface": observed_preferred_surface}
+            if observed_preferred_surface is not None
+            else {}
+        ),
+    }
+
+
 async def _resolve_observation(
     *,
-    observation: dict[str, Any] | None,
+    observed_available_surfaces: list[str] | None,
+    observed_preferred_surface: Optional[str],
     selector: Optional[str],
     app_name: Optional[str],
     window_id: Optional[str],
@@ -100,8 +117,12 @@ async def _resolve_observation(
     value_contains: Optional[str],
     tool_context: Optional[ToolContext],
 ) -> dict[str, Any]:
-    if observation is not None:
-        return observation
+    normalized_observation = _normalize_observation_input(
+        observed_available_surfaces,
+        observed_preferred_surface,
+    )
+    if normalized_observation is not None:
+        return normalized_observation
 
     return await computer_observe(
         include_current_tab=selector is not None,
@@ -245,7 +266,8 @@ async def computer_click(
     value_contains: Optional[str] = None,
     index: int = 0,
     allow_managed_browser: bool = True,
-    observation: dict[str, Any] | None = None,
+    observed_available_surfaces: list[str] | None = None,
+    observed_preferred_surface: Optional[str] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     """Click the best available browser/desktop surface using browser-first fallback."""
@@ -265,7 +287,8 @@ async def computer_click(
         }
 
     observation = await _resolve_observation(
-        observation=observation,
+        observed_available_surfaces=observed_available_surfaces,
+        observed_preferred_surface=observed_preferred_surface,
         selector=selector,
         app_name=app_name,
         window_id=window_id,
@@ -338,7 +361,8 @@ async def computer_fill(
     value_contains: Optional[str] = None,
     index: int = 0,
     allow_managed_browser: bool = True,
-    observation: dict[str, Any] | None = None,
+    observed_available_surfaces: list[str] | None = None,
+    observed_preferred_surface: Optional[str] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     """Fill the best available browser/desktop surface using browser-first fallback."""
@@ -358,7 +382,8 @@ async def computer_fill(
         }
 
     observation = await _resolve_observation(
-        observation=observation,
+        observed_available_surfaces=observed_available_surfaces,
+        observed_preferred_surface=observed_preferred_surface,
         selector=selector,
         app_name=app_name,
         window_id=window_id,
