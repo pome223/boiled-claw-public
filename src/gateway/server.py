@@ -151,6 +151,7 @@ class SpecialistPrepassResult:
     text: str = ""
     tool_failures: list[SpecialistToolFailure] = field(default_factory=list)
     used_tools: set[str] = field(default_factory=set)
+    evidence_blocks: list[str] = field(default_factory=list)
 
     @property
     def infrastructure_blocked(self) -> bool:
@@ -615,6 +616,20 @@ class GatewayServer:
                 lines.append(f"   Snippet: {snippet}")
         return "\n".join(lines)
 
+    @staticmethod
+    def _extract_grounding_block(message: str) -> str:
+        marker = "[Grounding from web_search]\n"
+        if marker not in message:
+            return ""
+        tail = message.split(marker, 1)[1]
+        footer = (
+            "\n\nUse the web_search grounding above as the primary evidence. "
+            "If it is insufficient or contradictory, say so explicitly and avoid guessing."
+        )
+        if footer in tail:
+            tail = tail.split(footer, 1)[0]
+        return tail.strip()
+
     async def _compose_grounded_agent_message(
         self,
         session_id: str,
@@ -712,6 +727,7 @@ class GatewayServer:
         original_message: str,
         decision: RoutingDecision,
         specialist_output: str | None = None,
+        specialist_evidence: list[str] | None = None,
     ) -> str:
         lines = [
             "[Gateway routing]",
@@ -722,12 +738,29 @@ class GatewayServer:
         lines.append(
             "You are still the root_agent. Use the routing context below to decide delegation and synthesis."
         )
+        if specialist_evidence:
+            lines.append(
+                "If specialist evidence is provided, treat it as the primary factual source "
+                "for this reply and restate the concrete facts in your answer."
+            )
+        lines.append(
+            "Do not imply that forecast details were already shared unless you actually include "
+            "those details in this response."
+        )
         if specialist_output:
             lines.extend(
                 [
                     "",
                     f"[Specialist output from {decision.specialist}]",
                     specialist_output.strip(),
+                ]
+            )
+        for evidence in specialist_evidence or []:
+            lines.extend(
+                [
+                    "",
+                    f"[Specialist evidence from {decision.specialist}]",
+                    evidence.strip(),
                 ]
             )
         lines.extend(["", "[Original user request]", original_message])
@@ -761,6 +794,10 @@ class GatewayServer:
         content = types.Content(role="user", parts=[types.Part(text=full_message)])
         partial = ""
         result = SpecialistPrepassResult()
+        if specialist_name == "web_researcher":
+            grounding = self._extract_grounding_block(full_message)
+            if grounding:
+                result.evidence_blocks.append(grounding)
         async for event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
@@ -777,6 +814,12 @@ class GatewayServer:
             for function_response in event.get_function_responses():
                 if function_response.name:
                     result.used_tools.add(function_response.name)
+                if function_response.name == "web_search":
+                    response = function_response.response or {}
+                    query = str(response.get("query") or message).strip()
+                    grounding = self._format_web_grounding(query, response)
+                    if grounding and grounding not in result.evidence_blocks:
+                        result.evidence_blocks.append(grounding)
                 error = self._tool_response_error(function_response.response or {})
                 if not error:
                     continue
@@ -2079,6 +2122,7 @@ class GatewayServer:
                     message,
                     decision,
                     specialist_output=prepass.text,
+                    specialist_evidence=prepass.evidence_blocks,
                 )
                 await self._emit_routing_event(
                     session_id,
@@ -2489,6 +2533,7 @@ class GatewayServer:
                 message,
                 decision,
                 specialist_output=prepass.text,
+                specialist_evidence=prepass.evidence_blocks,
             )
             await self._emit_routing_event(
                 session_id,
