@@ -82,6 +82,7 @@ const MAX_EVENT_ROWS = 200;
 let _streamingBubble = null;
 let _streamingText = "";
 let _runInProgress = false;
+let _messageInputComposing = false;
 
 // -----------------------------------------------------------------------
 // Settings
@@ -1167,7 +1168,14 @@ chatForm.addEventListener("submit", (e) => {
   sendMessage(text);
   messageInputEl.value = "";
 });
+messageInputEl.addEventListener("compositionstart", () => {
+  _messageInputComposing = true;
+});
+messageInputEl.addEventListener("compositionend", () => {
+  _messageInputComposing = false;
+});
 messageInputEl.addEventListener("keydown", (e) => {
+  if (e.isComposing || _messageInputComposing || e.keyCode === 229) return;
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatForm.requestSubmit(); }
 });
 document.addEventListener("keydown", (e) => {

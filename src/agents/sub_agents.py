@@ -303,7 +303,7 @@ computer_agent = Agent(
 
 ## 優先順位
 1. `computer_observe` で current tab / frontmost app / windows をまとめて確認する
-2. 直前に `computer_observe` を呼んだなら、その observation を `computer_click` / `computer_fill` に渡して再観測を避ける
+2. 直前に `computer_observe` を呼んだなら、その `available_surfaces` / `preferred_surface` を `computer_click` / `computer_fill` に渡して再観測を避ける
 3. ユーザーが「このブラウザ」「このタブ」と言ったら `current_tab_*` を最優先する
 4. managed browser が必要なときだけ `browser_*` を使う
 5. DOM や current tab relay では表現できない操作に限って `desktop_*` を使う

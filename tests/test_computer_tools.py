@@ -1,4 +1,5 @@
 import pytest
+from google.adk.tools import FunctionTool
 
 from src.tools import computer
 
@@ -277,7 +278,7 @@ async def test_computer_click_returns_no_surface_error_when_managed_browser_disa
 @pytest.mark.asyncio
 async def test_computer_fill_uses_provided_observation_without_reobserve(monkeypatch):
     async def _observe(**kwargs):
-        raise AssertionError("computer_observe should not be called when observation is provided")
+        raise AssertionError("computer_observe should not be called when observed surfaces are provided")
 
     async def _current_tab_fill(selector, text, tool_context=None):
         return {"selector": selector, "text_length": len(text), "success": True}
@@ -288,11 +289,8 @@ async def test_computer_fill_uses_provided_observation_without_reobserve(monkeyp
     result = await computer.computer_fill(
         selector="#search",
         text="hello",
-        observation={
-            "preferred_surface": "current_tab",
-            "available_surfaces": ["current_tab"],
-            "success": True,
-        },
+        observed_preferred_surface="current_tab",
+        observed_available_surfaces=["current_tab"],
     )
 
     assert result["success"] is True
@@ -333,3 +331,18 @@ async def test_computer_click_prefers_desktop_target_over_managed_browser(monkey
     assert result["surface"] == "desktop"
     assert result["strategy"] == "desktop_selector"
     assert result["result"]["target"]["title"] == "Submit"
+
+
+def test_computer_action_tool_schema_avoids_additional_properties():
+    for tool in (computer.computer_click, computer.computer_fill):
+        declaration = FunctionTool(tool)._get_declaration()
+        properties = declaration.parameters.properties
+        array_variant = next(
+            variant
+            for variant in properties["observed_available_surfaces"].any_of
+            if getattr(variant.type, "value", variant.type) == "ARRAY"
+        )
+
+        assert properties["observed_available_surfaces"].additional_properties is None
+        assert getattr(array_variant.items.type, "value", array_variant.items.type) == "STRING"
+        assert properties["observed_preferred_surface"].additional_properties is None

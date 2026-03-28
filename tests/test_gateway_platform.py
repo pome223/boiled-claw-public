@@ -599,6 +599,8 @@ def test_websocket_forces_web_search_for_fresh_query(monkeypatch, tmp_path):
         assert "Primary specialist: web_researcher" in text
         assert "[Specialist output from web_researcher]" in text
         assert "specialist findings" in text
+        assert "[Specialist evidence from web_researcher]" in text
+        assert "Summer Sonic lineup" in text
         yield Event(
             author="boiled_claw",
             content=types.Content(
@@ -645,6 +647,63 @@ def test_websocket_forces_web_search_for_fresh_query(monkeypatch, tmp_path):
             assert route_forwarded["agent_name"] == "root_agent"
             assert done["event"] == "chat.done"
             assert done["text"] == "researched answer"
+
+
+@pytest.mark.asyncio
+async def test_run_specialist_prepass_captures_web_search_evidence_for_root_handoff(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="web_researcher",
+            content=types.Content(
+                role="tool",
+                parts=[
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id="search-1",
+                            name="web_search",
+                            response={
+                                "query": "2026年3月29日 静岡県 天気予報",
+                                "results": [
+                                    {
+                                        "title": "静岡市の天気予報(1時間・今日明日・週間) - ウェザーニュース",
+                                        "snippet": "静岡市の明日の天気と気温を確認できます。",
+                                        "url": "https://weathernews.jp/onebox/tenki/shizuoka/22100/",
+                                    }
+                                ],
+                                "meta": {"region": "jp-jp", "timelimit": ""},
+                            },
+                        )
+                    )
+                ],
+            ),
+        )
+        yield Event(
+            author="web_researcher",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text="静岡の明日の天気を調べました。")],
+            ),
+        )
+
+    monkeypatch.setattr(
+        gateway.specialist_runners["web_researcher"],
+        "run_async",
+        _fake_run_async,
+    )
+
+    result = await gateway._run_specialist_prepass(
+        session_id="sess-1",
+        user_id="alice",
+        message="今静岡にいます",
+        specialist_name="web_researcher",
+    )
+
+    assert result.text == "静岡の明日の天気を調べました。"
+    assert result.evidence_blocks
+    assert "web_search query: 2026年3月29日 静岡県 天気予報" in result.evidence_blocks[-1]
+    assert "静岡市の天気予報" in result.evidence_blocks[-1]
 
 
 def test_websocket_auto_routes_longform_research_to_control_loop(monkeypatch, tmp_path):
