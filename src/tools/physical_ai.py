@@ -11,14 +11,16 @@ import httpx
 from google.adk.agents.context import Context as ToolContext
 
 from src.config.settings import get_settings
+from src.physical_ai.validation_store import (
+    get_physical_ai_validation_store,
+    reset_physical_ai_validation_store,
+)
 from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
 
-_validation_runs: dict[str, dict[str, Any]] = {}
-
-
 def reset_physical_ai_validation_runs() -> None:
-    _validation_runs.clear()
+    get_physical_ai_validation_store().clear()
+    reset_physical_ai_validation_store()
 
 
 def _adapter_url(adapter: str) -> str | None:
@@ -39,11 +41,21 @@ async def _post_adapter_json(url: str, payload: dict[str, Any]) -> dict[str, Any
 
 
 def _record_validation_run(run: dict[str, Any]) -> None:
-    _validation_runs[run["run_id"]] = run
+    get_physical_ai_validation_store().upsert(run)
 
 
 def _validation_status_payload(run_id: str) -> dict[str, Any] | None:
-    return _validation_runs.get(run_id)
+    return get_physical_ai_validation_store().get(run_id)
+
+
+def _is_validated_response(response: dict[str, Any]) -> bool:
+    if response.get("validated") is True:
+        return True
+    validation_status = str(response.get("validation_status") or "").strip().lower()
+    if validation_status in {"pass", "validated"}:
+        return True
+    status = str(response.get("status") or "").strip().lower()
+    return status in {"pass", "validated"}
 
 
 def _ros2_topics(namespace: str, action_name: str) -> dict[str, str]:
@@ -90,7 +102,7 @@ async def physical_ai_submit_simulation(
     response = await _post_adapter_json(url, request)
     run_id = str(response.get("run_id") or response.get("id") or f"sim-{uuid.uuid4().hex[:12]}")
     status = str(response.get("status") or "queued")
-    validated = bool(response.get("validated")) or status in {"pass", "validated", "ready"}
+    validated = _is_validated_response(response)
     payload = {
         "success": True,
         "adapter": adapter_name,
@@ -110,7 +122,7 @@ async def physical_ai_submit_simulation(
         }
     )
     audit_logger.log(
-        event_type=AuditEventType.SHELL_COMMAND,
+        event_type=AuditEventType.PHYSICAL_AI,
         user_id=ctx.get("user_id") or None,
         session_id=ctx.get("session_id") or None,
         action="physical_ai_submit_simulation",
@@ -188,7 +200,7 @@ async def physical_ai_dispatch_ros2_action(
 
     response = await _post_adapter_json(settings.physical_ai_ros2_bridge_url, dispatch_payload)
     audit_logger.log(
-        event_type=AuditEventType.SHELL_COMMAND,
+        event_type=AuditEventType.PHYSICAL_AI,
         user_id=ctx.get("user_id") or None,
         session_id=ctx.get("session_id") or None,
         action="physical_ai_dispatch_ros2_action",
