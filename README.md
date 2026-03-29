@@ -318,12 +318,17 @@ boiled-claw/
 │   │   └── factory.py          # Runtime factory
 │   ├── tools/
 │   │   ├── web_search.py       # Web search
+│   │   ├── finance.py          # Stock price lookup
 │   │   ├── shell.py            # Shell execution
 │   │   ├── file_manager.py     # File operations
 │   │   ├── context.py          # ToolContext common resolution
-│   │   ├── browser.py          # Browser automation
+│   │   ├── browser.py          # Managed browser automation
 │   │   ├── current_tab.py      # Current-tab browser tools
+│   │   ├── control_ui_chat.py  # Control UI chat relay
+│   │   ├── computer.py         # Browser-first computer-use tools
+│   │   ├── desktop.py          # Desktop observation and control
 │   │   ├── memory.py           # Memory tools
+│   │   ├── skills.py           # Skill listing / execution
 │   │   └── subagents.py        # Sub-agent / dynamic agent management
 │   ├── mcp_servers/
 │   │   ├── sample_server.py         # Sample MCP server
@@ -492,27 +497,17 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 
 ### Tools
 
-- **web_search** - Web search via DuckDuckGo API
-- **browser_navigate** - Navigate to a URL
-- **browser_click** - Click an element
-- **browser_fill** - Fill a form field
-- **browser_press** - Send a key press (e.g., Enter)
-- **browser_screenshot** - Take a screenshot
-- **browser_extract_text** - Extract text
-- **run_shell** - Execute a shell command
-- **read_file** - Read a file
-- **write_file** - Write a file
-- **memory_store** - Save to memory
-- **memory_search** - Search memory
-- **agents_list** - List available sub-agents
-- **sessions_spawn** - Launch a sub-agent in the background
-- **sessions_spawn_dynamic** - Generate and launch a dynamic agent with MCP servers
-- **subagents_list** - Check sub-agent execution status
-- **subagents_steer** - Send additional input to a mode=session sub-agent
-- **subagents_kill** - Stop a sub-agent execution
-- **skill_list** - List loaded skills
-- **skill_execute** - Execute a specified skill
-- **skill_spawn** - Launch a dynamic agent using skill content as its instruction
+The default root agent exposes these tool families:
+
+- `web_search`, `stock_price`
+- `browser_navigate`, `browser_click`, `browser_fill`, `browser_press`, `browser_screenshot`, `browser_extract_text`
+- `control_ui_chat_send_message`
+- `computer_observe`, `computer_click`, `computer_fill`
+- `desktop_view_*`, `desktop_wait_*`, `desktop_runtime_*`, `desktop_control_*`
+- `run_shell`, `read_file`, `write_file`
+- `memory_store`, `memory_search`, `memory_stats`, `memory_delete`
+- `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
+- `skill_list`, `skill_execute`
 
 ### Dynamic Agent Generation (sessions_spawn_dynamic)
 
@@ -567,9 +562,8 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - Adding `skills/<name>/SKILL.md` will auto-load it at startup (OpenClaw format).
 - For backward compatibility, the legacy `skills/*.py` format is still loaded.
 - After the Gateway starts, check loading status via `GET /skills`.
-- Use `skill_execute` to inspect and run a skill's content.
-- Use `skill_spawn` to delegate task execution using the skill content as a dynamic agent's instruction.
-- Sample skills are bundled: `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, and `skills/e2e-test/SKILL.md`.
+- Use `skill_list` and `skill_execute` to inspect and run bundled skill content.
+- Bundled skills include `skills/auto-fix/SKILL.md`, `skills/code-review/SKILL.md`, `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, `skills/e2e-test/SKILL.md`, and `skills/multi-llm-judge/SKILL.md`.
 
 ### Security
 
