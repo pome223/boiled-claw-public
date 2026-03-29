@@ -51,3 +51,24 @@ SPREADSHEET_KEYWORDS: frozenset[str] = frozenset(
         "スプレッドシーート",
     }
 )
+
+COMPUTER_USE_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "computer use",
+        "computer using",
+        "computer operator",
+        "gui automation",
+        "gui operator",
+        "visible browser",
+        "visible ui",
+        "画面を見て",
+        "画面を見ながら",
+        "画面を確認しながら",
+        "見えているブラウザ",
+        "見えてるブラウザ",
+        "見えている画面",
+        "guiを見て",
+        "uiを見て",
+        "目で見て操作",
+    }
+)

@@ -576,6 +576,49 @@ class TestWebSocketProtocol:
             assert len(done_payload["text"]) > 0
 
     @pytest.mark.asyncio
+    async def test_ws_computer_operator_observes_before_answering(self):
+        """Browser-first computer-use flow should route to computer_operator and call computer_observe."""
+        url = f"{WS_URL}/ws/e2e_ws_computer_observe"
+        done_payload, events = await _ws_run_with_auto_approvals(
+            url,
+            send={
+                "event": "chat.send",
+                "text": "computer use としてこのブラウザの画面を見て押せるボタンを教えて",
+            },
+            timeout=90.0,
+        )
+
+        route_selected = next(
+            (
+                event for event in events
+                if event.get("event") == "system.event" and event.get("source") == "router"
+            ),
+            None,
+        )
+        assert route_selected is not None
+        assert route_selected["agent_name"] == "computer_operator"
+
+        tool_starts = [event for event in events if event.get("event") == "tool.start"]
+        tool_results = [event for event in events if event.get("event") == "tool.result"]
+        tool_names = {event.get("tool_name") for event in tool_starts}
+
+        assert "computer_observe" in tool_names
+
+        computer_observe_result = next(
+            (event for event in tool_results if event.get("tool_name") == "computer_observe"),
+            None,
+        )
+        assert computer_observe_result is not None
+        observe_payload = computer_observe_result["result"]
+        assert observe_payload.get("mode") == "browser_first"
+        assert observe_payload.get("surface_order") == ["current_tab", "desktop"]
+        assert "preferred_surface" in observe_payload
+        assert "available_surfaces" in observe_payload
+
+        assert done_payload["aborted"] is False
+        assert len(done_payload["text"]) > 0
+
+    @pytest.mark.asyncio
     async def test_ws_chat_inject(self):
         """chat.inject should be recorded and acknowledged."""
         url = f"{WS_URL}/ws/e2e_ws_inject"

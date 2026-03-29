@@ -30,6 +30,7 @@ Start with [ARCHITECTURE.md](ARCHITECTURE.md) if you want the design rationale b
 - 🔍 **Web Search** - Via DuckDuckGo API
 - 🌐 **Browser Automation** - Scraping and screenshots with Playwright
 - 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
+- 🖥️ **Browser-First Computer Use** - Observe and operate visible browser/UI flows with current-tab first and desktop fallback
 - 💻 **Shell Execution** - Secure command execution with security policies
 - 📁 **File Operations** - Read and write support
 - 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
@@ -144,8 +145,10 @@ Endpoints available after Gateway startup:
 #### CLI Mode
 
 ```bash
-docker compose --profile cli run --rm boiled-claw-cli cli
+docker compose --profile cli run --rm boiled-claw-cli chat
 ```
+
+> **Note:** The legacy `cli` command name still works as an alias for `chat`.
 
 #### Channel Mode (Telegram, Discord)
 
@@ -184,11 +187,13 @@ This standalone bridge does not require `GOOGLE_API_KEY`.
 
 ```bash
 # Start with SSE
-python -m src.main host-bridge --host 127.0.0.1 --port 8766
+python -m src.main bridge host --host 127.0.0.1 --port 8766
 
 # Or via console script
 boiled-claw-host-bridge --sse --host 127.0.0.1 --port 8766
 ```
+
+> **Note:** The legacy `host-bridge` command name still works as an alias for `bridge host`.
 
 Set these in `.env` or pass them as shell environment variables when running `docker compose up`.
 The current `docker-compose.yml` explicitly forwards `HOST_BRIDGE_*` / `DESKTOP_BRIDGE_*` variables to the gateway / cli / dev containers, so either method works.
@@ -242,6 +247,7 @@ The extension continuously reconnects to the relay, so it is easiest to start Ho
 - Selector text extraction
 
 This is the minimal implementation for routing current-tab research flows like "use this browser to look up ..." through the browser natively rather than through the desktop control loop.
+For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient. The higher-level `computer_observe`, `computer_click`, and `computer_fill` tools bundle that browser-first selection so a caller can observe once and act on the best available surface.
 Bridges bind to loopback only by default. DNS rebinding protection is also enabled on Host/Desktop Bridge.
 Only set `BRIDGE_ALLOW_REMOTE_BIND=true` explicitly if you need to allow binding to addresses like `0.0.0.0`.
 
@@ -260,6 +266,7 @@ Desktop request routing is split as follows:
 
 - Single-shot desktop view / runtime safety: `desktop_operator`
 - Single-shot desktop control: `desktop_operator`
+- Browser-first visible UI operation with current-tab preference: `computer_operator`
 - Multi-step desktop automation with verification: `control_loop`
 
 ```bash
@@ -269,11 +276,13 @@ pip install -e '.[desktop]'
 The desktop extra uses `pyobjc-framework-Cocoa`. In PyObjC's current structure, AppKit / Foundation are resolved through this umbrella package. If your existing environment pins a separate `pyobjc-framework-AppKit`, reinstalling the desktop extra is recommended.
 
 ```bash
-python -m src.main desktop-bridge --host 127.0.0.1 --port 8767
+python -m src.main bridge desktop --host 127.0.0.1 --port 8767
 
 # Or via console script
 boiled-claw-desktop-bridge --sse --host 127.0.0.1 --port 8767
 ```
+
+> **Note:** The legacy `desktop-bridge` command name still works as an alias for `bridge desktop`.
 
 To use Desktop Bridge from the Gateway, set the following in `.env`:
 
@@ -338,10 +347,12 @@ boiled-claw/
 │   ├── config/
 │   │   ├── settings.py         # Pydantic settings
 │   │   └── schema.py           # Configuration schema
+│   ├── cli/
+│   │   └── repl.py             # REPL slash commands & handler
 │   ├── skills/
 │   │   ├── loader.py           # Skill loader
 │   │   └── base.py             # Skill base class
-│   └── main.py                 # Entry point
+│   └── main.py                 # Entry point (click-based CLI)
 ├── tests/
 │   ├── test_sample_mcp_server.py  # MCP server tests
 │   └── ...
@@ -354,15 +365,42 @@ boiled-claw/
 
 ## Usage
 
-### Using via CLI
+### CLI Commands
+
+```
+boiled-claw [OPTIONS] COMMAND [ARGS]...
+
+Options:
+  --version       Show the version and exit.
+  -v, --verbose   Enable verbose output.
+
+Commands:
+  chat       Start an interactive chat session (REPL).
+  web        Start the WebSocket Gateway server.
+  channels   Start multi-channel mode (Telegram, Discord).
+  bridge     Manage bridge services (host, desktop).
+  status     Show configuration, bridge connectivity, and registered tools.
+```
+
+The REPL supports slash commands (`/help`, `/status`, `/tools`, `/clear`) and readline history.
+
+Legacy command names (`cli`, `host-bridge`, `desktop-bridge`) are supported as aliases.
+
+#### Example: Interactive Chat
 
 ```bash
-$ docker compose --profile cli run --rm boiled-claw-cli cli
+$ docker compose --profile cli run --rm boiled-claw-cli chat
 
 You: Search for the latest Python news
 
 boiled-claw 🦀 [Running web search...]
 Python 3.12 has been released...
+```
+
+#### Example: Check Status
+
+```bash
+$ boiled-claw status
 ```
 
 ### Using via WebSocket
@@ -535,7 +573,7 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - After the Gateway starts, check loading status via `GET /skills`.
 - Use `skill_execute` to inspect and run a skill's content.
 - Use `skill_spawn` to delegate task execution using the skill content as a dynamic agent's instruction.
-- Sample skills are bundled: `skills/coding-agent/SKILL.md` and `skills/e2e-test/SKILL.md`.
+- Sample skills are bundled: `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, and `skills/e2e-test/SKILL.md`.
 
 ### Security
 
