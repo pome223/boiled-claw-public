@@ -44,6 +44,11 @@ from src.tools.desktop import (
     desktop_view_windows,
 )
 from src.tools.memory import memory_store, memory_search
+from src.tools.physical_ai import (
+    physical_ai_build_ros2_action,
+    physical_ai_dispatch_ros2_action,
+    physical_ai_submit_simulation,
+)
 from src.agents.model_config import DEFAULT_MODEL
 
 
@@ -351,6 +356,32 @@ computer_agent = Agent(
 )
 
 
+physical_agent = Agent(
+    name="physical_operator",
+    model=DEFAULT_MODEL.name,
+    description="Simulation-first physical AI adapter flows を専門とするエージェント",
+    instruction="""
+あなたは physical AI adapter のスペシャリストです。
+
+## 役割
+- Isaac Sim / OSMO adapter に simulation job を投げる
+- ROS2-friendly action envelope を組み立てる
+- simulation validation を通ったものだけ real-world dispatch 候補に進める
+
+## 原則
+- まず `physical_ai_submit_simulation`
+- 次に `physical_ai_build_ros2_action`
+- 実世界 dispatch は validation 済み run_id がある場合に限る
+- `dry_run=true` を使って simulation-first の検証を保つ
+""",
+    tools=[
+        physical_ai_submit_simulation,
+        physical_ai_build_ros2_action,
+        physical_ai_dispatch_ros2_action,
+    ],
+)
+
+
 # 全サブエージェントのリスト
 SUB_AGENTS = [
     web_agent,
@@ -362,4 +393,5 @@ SUB_AGENTS = [
     control_ui_chat_agent,
     desktop_agent,
     computer_agent,
+    physical_agent,
 ]

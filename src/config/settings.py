@@ -136,6 +136,24 @@ class Settings(BaseSettings):
         description="SSE read timeout for Desktop Bridge MCP connection",
     )
 
+    # Physical AI adapter settings
+    physical_ai_isaac_sim_url: Optional[str] = Field(
+        default=None,
+        description="Adapter endpoint for Isaac Sim simulation validation",
+    )
+    physical_ai_osmo_url: Optional[str] = Field(
+        default=None,
+        description="Adapter endpoint for OSMO workflow orchestration",
+    )
+    physical_ai_ros2_bridge_url: Optional[str] = Field(
+        default=None,
+        description="Adapter endpoint for ROS2 action dispatch",
+    )
+    physical_ai_timeout_seconds: int = Field(
+        default=20,
+        description="HTTP timeout for physical AI adapter calls",
+    )
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # ディレクトリ作成

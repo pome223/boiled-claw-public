@@ -31,6 +31,9 @@ def test_root_agent_tools():
     assert "computer_observe" in tool_names
     assert "computer_click" in tool_names
     assert "computer_fill" in tool_names
+    assert "physical_ai_submit_simulation" in tool_names
+    assert "physical_ai_build_ros2_action" in tool_names
+    assert "physical_ai_dispatch_ros2_action" in tool_names
 
 
 def test_root_agent_sub_agents_connected():
