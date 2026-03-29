@@ -12,7 +12,7 @@
   Browser-first. Policy-bounded. Physical-ready.
 </p>
 
-**Browser-first computer use needs more than tool calling.** boiled-claw is an open, lightweight reference system for agents that can plan, execute, verify, repair, and improve across browsers, desktop apps, and future physical AI environments.
+**Browser-first computer use needs more than tool calling.** boiled-claw is an open, lightweight reference system for agents that can plan, execute, verify, repair, and improve across browsers, desktop apps, and simulation-first physical AI environments.
 
 Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstream-curated.
 
@@ -37,7 +37,8 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 - A browser-first computer-use system with current-tab preference and desktop fallback
 - A closed-loop execution runtime with verification and repair
 - A local-first, Docker-ready reference system for skills, MCP servers, and agent orchestration
-- A trajectory-aware substrate for future self-improvement workflows
+- A trajectory-aware computer-use runtime with recovery-aware tooling and inspection
+- A self-improvement workflow with offline canaries, benchmark gates, and typed memory
 - A physical-ready adapter surface for simulators and robotics runtimes
 
 ## What boiled-claw Is Not
@@ -62,6 +63,8 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 - Self-improving agents: add benchmark-gated canary worktrees and typed memory for failures, facts, and approved improvements
 - Physical AI adapters: extend toward NVIDIA Isaac Sim / GR00T-style environments and ROS2-friendly action surfaces with a simulation-first posture
 
+The current tree already ships a first slice of all three layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state.
+
 ## The Bet
 
 The next important open agent framework will not be the biggest model wrapper. It will be the most editable closed-loop system that can move from browser tasks toward real-world operations without changing its core philosophy.
@@ -72,7 +75,9 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🔍 **Web Search** - Via DuckDuckGo API
 - 🌐 **Browser Automation** - Scraping and screenshots with Playwright
 - 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
-- 🖥️ **Browser-First Computer Use** - Observe and operate visible browser/UI flows with current-tab first and desktop fallback
+- 🖥️ **Reliable Computer Use** - Browser-first observe / evaluate / act / recover flows with SQLite trajectory capture
+- 🧪 **Offline Self-Improvement** - Canary worktrees, benchmark gating, candidate packaging, and cleanup
+- 🤖 **Simulation-First Physical AI** - Isaac Sim / OSMO submission, persisted validation, and ROS2-friendly dispatch envelopes
 - 💻 **Shell Execution** - Secure command execution with security policies
 - 📁 **File Operations** - Read and write support
 - 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
@@ -289,7 +294,7 @@ The extension continuously reconnects to the relay, so it is easiest to start Ho
 - Selector text extraction
 
 This is the minimal implementation for routing current-tab research flows like "use this browser to look up ..." through the browser natively rather than through the desktop control loop.
-For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient. The higher-level `computer_observe`, `computer_click`, and `computer_fill` tools bundle that browser-first selection so a caller can observe once and act on the best available surface.
+For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient. The higher-level `computer_observe`, `computer_evaluate`, `computer_click`, `computer_fill`, and `computer_trajectory_recent` tools bundle that browser-first selection so a caller can observe once, verify expectations, recover across surfaces, and inspect recent trajectories.
 Bridges bind to loopback only by default. DNS rebinding protection is also enabled on Host/Desktop Bridge.
 Only set `BRIDGE_ALLOW_REMOTE_BIND=true` explicitly if you need to allow binding to addresses like `0.0.0.0`.
 
@@ -333,6 +338,64 @@ DESKTOP_BRIDGE_ENABLED=true
 DESKTOP_BRIDGE_URL=http://127.0.0.1:8767/sse
 ```
 
+### 7. Reliable Computer Use
+
+The browser-first computer-use stack now exposes an explicit observe / evaluate / act / recover loop:
+
+- `computer_observe` gathers current-tab and desktop context in one bundle
+- `computer_evaluate` checks explicit URL / text / frontmost-app / window-title expectations
+- `computer_click` and `computer_fill` prefer current-tab first, then retry across desktop or managed browser when verification fails
+- `computer_trajectory_recent` returns recent `success`, `recovered`, or `failed` runs from the local trajectory store
+
+Optional `.env`:
+
+```bash
+COMPUTER_TRAJECTORY_DB_PATH=data/computer_trajectories.db
+```
+
+Trajectories persist the request, observation summary, attempts, verification result, and final surface. This makes recovery debugging and future repair loops inspectable instead of hidden in prompt state.
+
+### 8. Offline Self-Improvement Canaries
+
+The self-improvement slice is intentionally offline and benchmark-gated:
+
+- `self_improvement_prepare_canary` creates an isolated git worktree for a candidate change
+- `self_improvement_run_benchmarks` executes guarded shell commands inside that canary
+- `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, and can record approved changes into memory
+- `self_improvement_cleanup_canary` removes the worktree and deletes the canary branch when finished
+
+Optional `.env`:
+
+```bash
+SELF_IMPROVEMENT_CANARY_ROOT=data/canaries
+SELF_IMPROVEMENT_BENCHMARK_TIMEOUT_SECONDS=900
+```
+
+Typed memory kinds are used to keep long-lived facts separate from execution traces and promotions:
+
+- `fact`
+- `trajectory`
+- `approved_improvement`
+
+### 9. Physical AI Adapters
+
+The physical AI slice is simulation-first by design:
+
+- `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
+- `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges
+- `physical_ai_dispatch_ros2_action` only allows real dispatch when a persisted validation run is explicitly marked as validated
+
+Optional `.env`:
+
+```bash
+PHYSICAL_AI_ISAAC_SIM_URL=http://127.0.0.1:9001/sim
+PHYSICAL_AI_OSMO_URL=http://127.0.0.1:9002/workflows
+PHYSICAL_AI_ROS2_BRIDGE_URL=http://127.0.0.1:9003/dispatch
+PHYSICAL_AI_VALIDATION_DB_PATH=data/physical_ai_validation.db
+```
+
+Validation runs are stored in SQLite so simulation approvals survive process restarts. Status values like `ready` are not treated as validated; real dispatch requires an explicit pass / validated signal.
+
 ## Project Structure
 
 ```
@@ -356,12 +419,16 @@ boiled-claw/
 │   │   └── desktop_bridge_schema.py  # Desktop Bridge contract
 │   ├── browser/
 │   │   └── current_tab_bridge.py     # Chrome extension relay server
+│   ├── computer_use/
+│   │   └── trajectory_store.py       # Browser-first computer-use trajectory storage
 │   ├── desktop/
 │   │   ├── client.py           # Desktop runtime interface
 │   │   ├── runtime.py          # Emergency stop / runtime state
 │   │   ├── fake_client.py      # Fake runtime for contract tests
 │   │   ├── pyobjc_client.py    # macOS pyobjc implementation
 │   │   └── factory.py          # Runtime factory
+│   ├── physical_ai/
+│   │   └── validation_store.py # Persisted simulation validation store
 │   ├── tools/
 │   │   ├── web_search.py       # Web search
 │   │   ├── finance.py          # Stock price lookup
@@ -374,6 +441,8 @@ boiled-claw/
 │   │   ├── computer.py         # Browser-first computer-use tools
 │   │   ├── desktop.py          # Desktop observation and control
 │   │   ├── memory.py           # Memory tools
+│   │   ├── self_improvement.py # Offline canary self-improvement tools
+│   │   ├── physical_ai.py      # Simulation-first physical AI adapter tools
 │   │   ├── skills.py           # Skill listing / execution
 │   │   └── subagents.py        # Sub-agent / dynamic agent management
 │   ├── mcp_servers/
@@ -548,10 +617,12 @@ The default root agent exposes these tool families:
 - `web_search`, `stock_price`
 - `browser_navigate`, `browser_click`, `browser_fill`, `browser_press`, `browser_screenshot`, `browser_extract_text`
 - `control_ui_chat_send_message`
-- `computer_observe`, `computer_click`, `computer_fill`
+- `computer_observe`, `computer_evaluate`, `computer_click`, `computer_fill`, `computer_trajectory_recent`
 - `desktop_view_*`, `desktop_wait_*`, `desktop_runtime_*`, `desktop_control_*`
 - `run_shell`, `read_file`, `write_file`
 - `memory_store`, `memory_search`, `memory_stats`, `memory_delete`
+- `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
+- `physical_ai_submit_simulation`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`
 - `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
 - `skill_list`, `skill_execute`
 
@@ -610,6 +681,8 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - After the Gateway starts, check loading status via `GET /skills`.
 - Use `skill_list` and `skill_execute` to inspect and run bundled skill content.
 - Bundled skills include `skills/auto-fix/SKILL.md`, `skills/code-review/SKILL.md`, `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, `skills/e2e-test/SKILL.md`, and `skills/multi-llm-judge/SKILL.md`.
+- `skills/computer-use/SKILL.md` is the repo-local entry point for the browser-first computer-use stack.
+- `skills/e2e-test/SKILL.md` includes smoke checks for skill loading and recent computer-use / CLI surfaces.
 
 ### Security
 
@@ -663,6 +736,9 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - [x] Skill plugin system
 - [x] Dynamic agent generation (sessions_spawn_dynamic)
 - [x] MCP support (SSE / HTTP / stdio) + sample server
+- [x] Reliable computer use (evaluation, recovery, trajectory capture)
+- [x] Offline canary self-improvement workflow
+- [x] Simulation-first physical AI adapters
 - [ ] Redis sessions
 - [ ] Slack channel
 - [ ] WhatsApp channel
