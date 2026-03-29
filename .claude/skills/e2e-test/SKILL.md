@@ -107,7 +107,165 @@ curl -s http://localhost:18789/sessions/e2e-skill 2>&1
 - ステータスコード 200 であること
 - `"sessions"` キーが存在すること
 
-### 6. 結果サマリを出力
+### 6. CLI 動作確認
+
+CLIのサブコマンド体系・エイリアス・フラグが正しく動作することを確認する。
+
+#### 6-1. ヘルプ表示
+
+```bash
+python -m src.main --help 2>&1
+```
+
+- `chat`, `web`, `channels`, `bridge`, `status` の5コマンドが表示されること
+- `--version`, `-v, --verbose` オプションが表示されること
+
+#### 6-2. レガシーエイリアスの互換性
+
+```bash
+python -m src.main cli --help 2>&1
+python -m src.main host-bridge --help 2>&1
+python -m src.main desktop-bridge --help 2>&1
+```
+
+- `cli` → `chat` のヘルプが表示されること
+- `host-bridge` → `bridge host` のヘルプが表示されること
+- `desktop-bridge` → `bridge desktop` のヘルプが表示されること
+- いずれも `No such command` エラーにならないこと
+
+#### 6-3. bridge サブコマンド
+
+```bash
+python -m src.main bridge --help 2>&1
+```
+
+- `host`, `desktop` のサブコマンドが表示されること
+
+#### 6-4. chat フラグ
+
+```bash
+python -m src.main chat --help 2>&1
+```
+
+- `--model`, `--dry-run` オプションが表示されること
+
+#### 6-5. dry-run テスト
+
+```bash
+python -m src.main chat --dry-run 2>&1
+```
+
+- `Config OK. Dry-run mode` が表示されてエラーなく終了すること
+
+#### 6-6. status コマンド
+
+```bash
+python -m src.main status 2>&1
+```
+
+- Configuration / Bridge Status / Channels の3テーブルが表示されること
+- エラーなく終了すること
+
+#### 6-7. 引数なし実行（デフォルト動作）
+
+```bash
+GOOGLE_API_KEY= python -m src.main 2>&1
+```
+
+- `GOOGLE_API_KEY is not set` のエラーメッセージが表示されること（トレースバックではないこと）
+- chat がデフォルトで起動しようとしていることを確認
+
+### 7. AI CLI スキルの動作確認
+
+外部 AI CLI 連携スキルのロードとユーティリティの動作を確認する。
+
+#### 7-1. スキルロード確認
+
+```bash
+python3 -c "
+import asyncio
+from src.skills.runtime import ensure_skills_loaded
+from src.skills.base import get_skill_registry
+
+async def main():
+    await ensure_skills_loaded()
+    registry = get_skill_registry()
+    names = [m.name for m in registry.list_skills()]
+    expected = {'coding-agent', 'e2e-test', 'code-review', 'multi-llm-judge', 'auto-fix', 'computer-use'}
+    missing = expected - set(names)
+    if missing:
+        print(f'FAIL: missing skills: {missing}')
+        exit(1)
+    print(f'PASS: {len(names)} skills loaded')
+
+asyncio.run(main())
+" 2>&1
+```
+
+- 終了コード 0
+- 6 スキル全てが登録されていること: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`, `computer-use`
+
+#### 7-2. CLI 検出ユーティリティ
+
+```bash
+python3 skills/_utils/run_ai_cli.py --detect 2>&1
+```
+
+- 終了コード 0
+- 少なくとも 1 つの CLI が見つかること（環境依存; フル構成なら claude, codex, gemini の 3 つ）
+
+#### 7-3. 基本 CLI 呼び出し（利用可能な CLI ごと）
+
+検出された各 CLI に対して、簡単なプロンプトで stdin 経由の応答を確認する:
+
+```bash
+python3 skills/_utils/run_ai_cli.py --cli claude --prompt "Say only: ok" --timeout 30 2>&1
+python3 skills/_utils/run_ai_cli.py --cli codex --prompt "Say only: ok" --timeout 60 2>&1
+python3 skills/_utils/run_ai_cli.py --cli gemini --prompt "Say only: ok" --timeout 120 2>&1
+```
+
+- 利用可能な CLI が終了コード 0 かつ stdout が空でないこと
+- 利用不可の CLI はスキップ（失敗ではない）
+
+#### 7-4. argv 構築ユニットテスト（CLI 不要）
+
+外部 CLI を実際に呼ばず、`run_ai_cli.py` の引数組み立てだけを検証する。
+ネットワークや CLI の状態に依存しないため false negative が起きない:
+
+```bash
+python3 -c "
+import sys, importlib.util
+spec = importlib.util.spec_from_file_location('run_ai_cli', 'skills/_utils/run_ai_cli.py')
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+
+# claude: stdin, no prompt in argv
+args, stdin = mod._build_args_and_input('claude', 'test', 'default', [], None, False)
+assert args == ['claude', '-p'] and stdin == 'test'
+
+# codex exec: stdin via '-'
+args, stdin = mod._build_args_and_input('codex', 'test', 'default', [], None, False)
+assert args == ['codex', 'exec', '-'] and stdin == 'test'
+
+# codex review --base: prompt excluded (mutually exclusive)
+args, stdin = mod._build_args_and_input('codex', 'ignored', 'review', [], 'main', False)
+assert args == ['codex', 'review', '--base', 'main'] and stdin is None
+
+# codex review --uncommitted: prompt excluded
+args, stdin = mod._build_args_and_input('codex', '', 'review', [], None, True)
+assert args == ['codex', 'review', '--uncommitted'] and stdin is None
+
+# gemini: stdin
+args, stdin = mod._build_args_and_input('gemini', 'test', 'default', [], None, False)
+assert args == ['gemini'] and stdin == 'test'
+
+print('PASS: all argv construction checks passed')
+" 2>&1
+```
+
+- 終了コード 0
+- 全 5 パターンの assertion が通ること
+
+### 8. 結果サマリを出力
 
 以下の形式で報告すること:
 
@@ -123,8 +281,22 @@ curl -s http://localhost:18789/sessions/e2e-skill 2>&1
 | API 基本応答 | OK / NG |
 | API セッション継続 | OK / NG |
 | API セッション一覧 | OK / NG |
+| CLI ヘルプ表示 | OK / NG |
+| CLI レガシーエイリアス | OK / NG |
+| CLI bridge サブコマンド | OK / NG |
+| CLI chat フラグ | OK / NG |
+| CLI dry-run | OK / NG |
+| CLI status コマンド | OK / NG |
+| CLI デフォルト動作 | OK / NG |
+| AI スキルロード (5件) | OK / NG |
+| CLI 検出ユーティリティ | OK / NG (N件検出) |
+| Claude CLI 基本応答 | OK / NG / SKIP |
+| Codex CLI 基本応答 | OK / NG / SKIP |
+| Gemini CLI 基本応答 | OK / NG / SKIP |
+| argv 構築テスト | OK / NG |
 
 （失敗がある場合は詳細と対処法を記載）
+（CLI 基本応答の SKIP は当該 CLI が未インストールの場合で、失敗とはみなさない）
 ```
 
 すべて OK の場合のみ「push OK」と報告すること。

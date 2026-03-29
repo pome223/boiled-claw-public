@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.bridges.common_errors import flatten_exception_text
 from src.bridges.host_bridge_client import get_host_bridge_client
 from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import (
@@ -300,7 +301,11 @@ async def _control_ui_chat_send_message_local(
         )
         return payload
     except Exception as exc:
-        payload = _control_ui_error_payload(str(exc), url=url, message=message)
+        payload = _control_ui_error_payload(
+            flatten_exception_text(exc),
+            url=url,
+            message=message,
+        )
         browser_tools._audit_browser_event(
             action="control_ui_chat.send_message",
             resource=url,
