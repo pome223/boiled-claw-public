@@ -45,6 +45,18 @@ class Settings(BaseSettings):
         default="gemini-embedding-001",
         description="Embedding model for memory vectors",
     )
+    self_improvement_canary_root: Path = Field(
+        default=Path("data/canaries"),
+        description="Root directory for offline self-improvement worktrees",
+    )
+    self_improvement_benchmark_timeout_seconds: int = Field(
+        default=900,
+        description="Default timeout for canary benchmark commands",
+    )
+    computer_trajectory_db_path: Path = Field(
+        default=Path("data/computer_trajectories.db"),
+        description="Browser-first computer-use trajectory DB path",
+    )
 
     # Subagent settings
     subagent_max_concurrent: int = Field(default=8, description="Max concurrent subagent runs globally")
@@ -136,11 +148,36 @@ class Settings(BaseSettings):
         description="SSE read timeout for Desktop Bridge MCP connection",
     )
 
+    # Physical AI adapter settings
+    physical_ai_isaac_sim_url: Optional[str] = Field(
+        default=None,
+        description="Adapter endpoint for Isaac Sim simulation validation",
+    )
+    physical_ai_osmo_url: Optional[str] = Field(
+        default=None,
+        description="Adapter endpoint for OSMO workflow orchestration",
+    )
+    physical_ai_ros2_bridge_url: Optional[str] = Field(
+        default=None,
+        description="Adapter endpoint for ROS2 action dispatch",
+    )
+    physical_ai_timeout_seconds: int = Field(
+        default=20,
+        description="HTTP timeout for physical AI adapter calls",
+    )
+    physical_ai_validation_db_path: Path = Field(
+        default=Path("data/physical_ai_validation.db"),
+        description="SQLite DB path for persisted physical AI validation runs",
+    )
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         # ディレクトリ作成
         self.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.self_improvement_canary_root.mkdir(parents=True, exist_ok=True)
+        self.computer_trajectory_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
+        self.physical_ai_validation_db_path.parent.mkdir(parents=True, exist_ok=True)
 
 
 # グローバルインスタンス

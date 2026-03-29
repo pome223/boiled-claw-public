@@ -16,7 +16,13 @@ from src.tools.browser import (
     browser_screenshot,
 )
 from src.tools.control_ui_chat import control_ui_chat_send_message
-from src.tools.computer import computer_click, computer_fill, computer_observe
+from src.tools.computer import (
+    computer_click,
+    computer_evaluate,
+    computer_fill,
+    computer_observe,
+    computer_trajectory_recent,
+)
 from src.tools.current_tab import (
     current_tab_click,
     current_tab_extract_text,
@@ -44,6 +50,17 @@ from src.tools.desktop import (
     desktop_view_windows,
 )
 from src.tools.memory import memory_store, memory_search
+from src.tools.self_improvement import (
+    self_improvement_cleanup_canary,
+    self_improvement_package_candidate,
+    self_improvement_prepare_canary,
+    self_improvement_run_benchmarks,
+)
+from src.tools.physical_ai import (
+    physical_ai_build_ros2_action,
+    physical_ai_dispatch_ros2_action,
+    physical_ai_submit_simulation,
+)
 from src.agents.model_config import DEFAULT_MODEL
 
 
@@ -310,15 +327,19 @@ computer_agent = Agent(
 
 ## 原則
 - まず observe、次に act、最後に verify
+- verify 条件が明確なら `computer_click` / `computer_fill` の verify 引数を使い、失敗時は別 surface への recovery を許可する
 - selector や AX を優先し、座標クリックは最後の手段にする
 - ユーザーが current browser を指しているときは、新しい browser app を勝手に起動しない
 - 単に入力しただけで完了扱いにせず、送信や遷移後の状態まで確認する
 - runtime が足りないときはフォールバックを捏造せず、明示的に止まる
+- failure / repair の分析が必要なら `computer_trajectory_recent` を確認する
 """,
     tools=[
         computer_observe,
+        computer_evaluate,
         computer_click,
         computer_fill,
+        computer_trajectory_recent,
         current_tab_info,
         current_tab_navigate,
         current_tab_click,
@@ -351,6 +372,66 @@ computer_agent = Agent(
 )
 
 
+self_improver_agent = Agent(
+    name="self_improver",
+    model=DEFAULT_MODEL.name,
+    description="Offline canary self-improvement を専門とするエージェント",
+    instruction="""
+あなたは self-improvement のスペシャリストです。
+
+## 役割
+- 本線を壊さず、offline canary worktree 上で改善案を試す
+- benchmark を先に通し、通過した候補だけを package する
+- facts / trajectories / approved improvements を分けて扱う
+
+## 原則
+- 直接 main を編集しない
+- まず `self_improvement_prepare_canary`
+- 次に `self_improvement_run_benchmarks`
+- 合格した候補だけ `self_improvement_package_candidate` でまとめる
+- 終わった canary は `self_improvement_cleanup_canary` で片付ける
+- 記録するときは `memory_store(kind=...)` を使い分ける
+""",
+    tools=[
+        self_improvement_prepare_canary,
+        self_improvement_run_benchmarks,
+        self_improvement_package_candidate,
+        self_improvement_cleanup_canary,
+        memory_store,
+        memory_search,
+        read_file,
+        write_file,
+        run_shell,
+    ],
+)
+
+
+physical_agent = Agent(
+    name="physical_operator",
+    model=DEFAULT_MODEL.name,
+    description="Simulation-first physical AI adapter flows を専門とするエージェント",
+    instruction="""
+あなたは physical AI adapter のスペシャリストです。
+
+## 役割
+- Isaac Sim / OSMO adapter に simulation job を投げる
+- ROS2-friendly action envelope を組み立てる
+- simulation validation を通ったものだけ real-world dispatch 候補に進める
+
+## 原則
+- まず `physical_ai_submit_simulation`
+- 次に `physical_ai_build_ros2_action`
+- 実世界 dispatch は validation 済み run_id がある場合に限る
+- `dry_run=true` を使って simulation-first の検証を保つ
+""",
+    tools=[
+        physical_ai_submit_simulation,
+        physical_ai_build_ros2_action,
+        physical_ai_dispatch_ros2_action,
+    ],
+)
+
+
 # 全サブエージェントのリスト
 SUB_AGENTS = [
     web_agent,
@@ -362,4 +443,6 @@ SUB_AGENTS = [
     control_ui_chat_agent,
     desktop_agent,
     computer_agent,
+    self_improver_agent,
+    physical_agent,
 ]

@@ -48,9 +48,10 @@ async def _check_tool_policy(
     return f"Tool approval denied: {detail}", approval_token
 
 
-async def run_shell(
+async def run_shell_guarded(
     command: str,
     timeout: int = 30,
+    cwd: Optional[str] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> dict:
     """
@@ -115,12 +116,13 @@ async def run_shell(
             approval_token=approval_token,
             command=normalized,
             timeout_seconds=timeout,
-            cwd=None,
+            cwd=cwd,
         )
         audit_metadata = {
             "executor": "host_bridge",
             "request_id": request.request_id,
             "approval_token": approval_token,
+            **({"cwd": cwd} if cwd else {}),
         }
         result, payload = await execute_host_bridge_call(
             request=request,
@@ -128,6 +130,7 @@ async def run_shell(
             args={
                 "command": request.command,
                 "timeout_seconds": request.timeout_seconds,
+                **({"cwd": request.cwd} if request.cwd else {}),
             },
             get_client=get_host_bridge_client,
             invoke=lambda client, req: client.run_shell(req),
@@ -192,6 +195,7 @@ async def run_shell(
         # shell=False 相当: シェルメタキャラクタ（; | && $() 等）をインジェクションに使えない
         process = await asyncio.create_subprocess_exec(
             *tokens,
+            cwd=cwd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -234,3 +238,16 @@ async def run_shell(
             "stderr": "",
             "return_code": -1,
         }
+
+
+async def run_shell(
+    command: str,
+    timeout: int = 30,
+    tool_context: Optional[ToolContext] = None,
+) -> dict:
+    return await run_shell_guarded(
+        command=command,
+        timeout=timeout,
+        cwd=None,
+        tool_context=tool_context,
+    )
