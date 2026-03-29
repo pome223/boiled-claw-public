@@ -44,6 +44,12 @@ from src.tools.desktop import (
     desktop_view_windows,
 )
 from src.tools.memory import memory_store, memory_search, memory_stats, memory_delete
+from src.tools.self_improvement import (
+    self_improvement_cleanup_canary,
+    self_improvement_package_candidate,
+    self_improvement_prepare_canary,
+    self_improvement_run_benchmarks,
+)
 from src.tools.finance import stock_price
 from src.tools.physical_ai import (
     physical_ai_build_ros2_action,
@@ -219,6 +225,10 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         memory_search,
         memory_stats,
         memory_delete,
+        self_improvement_prepare_canary,
+        self_improvement_run_benchmarks,
+        self_improvement_package_candidate,
+        self_improvement_cleanup_canary,
         physical_ai_submit_simulation,
         physical_ai_build_ros2_action,
         physical_ai_dispatch_ros2_action,
