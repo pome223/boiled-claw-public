@@ -44,6 +44,11 @@ from src.tools.desktop import (
     desktop_view_windows,
 )
 from src.tools.memory import memory_store, memory_search
+from src.tools.self_improvement import (
+    self_improvement_package_candidate,
+    self_improvement_prepare_canary,
+    self_improvement_run_benchmarks,
+)
 from src.agents.model_config import DEFAULT_MODEL
 
 
@@ -351,6 +356,38 @@ computer_agent = Agent(
 )
 
 
+self_improver_agent = Agent(
+    name="self_improver",
+    model=DEFAULT_MODEL.name,
+    description="Offline canary self-improvement を専門とするエージェント",
+    instruction="""
+あなたは self-improvement のスペシャリストです。
+
+## 役割
+- 本線を壊さず、offline canary worktree 上で改善案を試す
+- benchmark を先に通し、通過した候補だけを package する
+- facts / trajectories / approved improvements を分けて扱う
+
+## 原則
+- 直接 main を編集しない
+- まず `self_improvement_prepare_canary`
+- 次に `self_improvement_run_benchmarks`
+- 合格した候補だけ `self_improvement_package_candidate` でまとめる
+- 記録するときは `memory_store(kind=...)` を使い分ける
+""",
+    tools=[
+        self_improvement_prepare_canary,
+        self_improvement_run_benchmarks,
+        self_improvement_package_candidate,
+        memory_store,
+        memory_search,
+        read_file,
+        write_file,
+        run_shell,
+    ],
+)
+
+
 # 全サブエージェントのリスト
 SUB_AGENTS = [
     web_agent,
@@ -362,4 +399,5 @@ SUB_AGENTS = [
     control_ui_chat_agent,
     desktop_agent,
     computer_agent,
+    self_improver_agent,
 ]

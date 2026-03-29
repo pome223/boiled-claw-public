@@ -38,6 +38,11 @@ from src.tools.desktop import (
     desktop_view_windows,
 )
 from src.tools.memory import memory_store, memory_search, memory_stats, memory_delete
+from src.tools.self_improvement import (
+    self_improvement_package_candidate,
+    self_improvement_prepare_canary,
+    self_improvement_run_benchmarks,
+)
 from src.tools.finance import stock_price
 from src.tools.skills import skill_list, skill_execute
 from src.tools.subagents import (
@@ -206,6 +211,9 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         memory_search,
         memory_stats,
         memory_delete,
+        self_improvement_prepare_canary,
+        self_improvement_run_benchmarks,
+        self_improvement_package_candidate,
         skill_list,
         skill_execute,
     ],

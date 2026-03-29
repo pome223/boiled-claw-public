@@ -31,6 +31,9 @@ def test_root_agent_tools():
     assert "computer_observe" in tool_names
     assert "computer_click" in tool_names
     assert "computer_fill" in tool_names
+    assert "self_improvement_prepare_canary" in tool_names
+    assert "self_improvement_run_benchmarks" in tool_names
+    assert "self_improvement_package_candidate" in tool_names
 
 
 def test_root_agent_sub_agents_connected():
@@ -191,13 +194,16 @@ async def test_memory_store(monkeypatch):
         result = await memory_module.memory_store(
             content="テスト情報",
             tags="test,pytest",
+            kind="trajectory",
         )
         assert result.get("success")
+        assert result["kind"] == "trajectory"
 
         # 検索
-        search_result = await memory_module.memory_search(tags="test", limit=5)
+        search_result = await memory_module.memory_search(tags="test", kind="trajectory", limit=5)
         assert search_result.get("success")
         assert "results" in search_result
+        assert search_result["results"][0]["kind"] == "trajectory"
     finally:
         memory_module._memory_store = old_store
         if os.path.exists(db_path):
@@ -228,16 +234,17 @@ async def test_memory_vector_search_ranks_semantic_match(monkeypatch):
     memory_module._memory_store = memory_module.MemoryStore(db_path=db_path)
 
     try:
-        await memory_module.memory_store("PythonとFastAPIでWeb APIを実装した", tags="dev")
-        await memory_module.memory_store("週末にカレーを作って食べた", tags="life")
-        await memory_module.memory_store("REST APIのエンドポイント設計メモ", tags="dev")
+        await memory_module.memory_store("PythonとFastAPIでWeb APIを実装した", tags="dev", kind="fact")
+        await memory_module.memory_store("週末にカレーを作って食べた", tags="life", kind="fact")
+        await memory_module.memory_store("REST APIのエンドポイント設計メモ", tags="dev", kind="approved_improvement")
 
-        result = await memory_module.memory_search(query="API 開発", limit=2)
+        result = await memory_module.memory_search(query="API 開発", kind="approved_improvement", limit=2)
 
         assert result.get("success")
         assert result["count"] >= 1
         assert "score" in result["results"][0]
         assert result["results"][0]["score"] >= 0.0
+        assert all(item["kind"] == "approved_improvement" for item in result["results"])
         assert any(
             "API" in item["content"] or "FastAPI" in item["content"]
             for item in result["results"]

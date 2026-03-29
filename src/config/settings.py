@@ -45,6 +45,14 @@ class Settings(BaseSettings):
         default="gemini-embedding-001",
         description="Embedding model for memory vectors",
     )
+    self_improvement_canary_root: Path = Field(
+        default=Path("data/canaries"),
+        description="Root directory for offline self-improvement worktrees",
+    )
+    self_improvement_benchmark_timeout_seconds: int = Field(
+        default=900,
+        description="Default timeout for canary benchmark commands",
+    )
 
     # Subagent settings
     subagent_max_concurrent: int = Field(default=8, description="Max concurrent subagent runs globally")
@@ -140,6 +148,7 @@ class Settings(BaseSettings):
         super().__init__(**kwargs)
         # ディレクトリ作成
         self.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.self_improvement_canary_root.mkdir(parents=True, exist_ok=True)
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
 
 
