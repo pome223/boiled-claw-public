@@ -18,6 +18,7 @@ from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
 
 DEFAULT_VECTOR_DIM = 768
+VALID_MEMORY_KINDS = {"fact", "trajectory", "approved_improvement"}
 
 
 def _safe_json_loads(value: Optional[str], fallback: Any) -> Any:
@@ -114,6 +115,7 @@ class MemoryStore:
             CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 content TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'fact',
                 embedding TEXT,
                 metadata TEXT,
                 tags TEXT,
@@ -121,10 +123,19 @@ class MemoryStore:
                 updated_at REAL NOT NULL
             )
         """)
+        columns = {
+            row[1]
+            for row in cursor.execute("PRAGMA table_info(memories)").fetchall()
+        }
+        if "kind" not in columns:
+            cursor.execute("ALTER TABLE memories ADD COLUMN kind TEXT NOT NULL DEFAULT 'fact'")
 
         # タグインデックス
         cursor.execute("""
             CREATE INDEX IF NOT EXISTS idx_tags ON memories(tags)
+        """)
+        cursor.execute("""
+            CREATE INDEX IF NOT EXISTS idx_kind ON memories(kind)
         """)
 
         # 作成日インデックス
@@ -138,11 +149,14 @@ class MemoryStore:
     def store(
         self,
         content: str,
+        kind: str = "fact",
         tags: Optional[List[str]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         embedding: Optional[List[float]] = None,
     ) -> int:
         """メモリを保存"""
+        if kind not in VALID_MEMORY_KINDS:
+            raise ValueError(f"Unsupported memory kind: {kind}")
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
@@ -152,9 +166,9 @@ class MemoryStore:
         embedding_str = json.dumps(embedding) if embedding else None
 
         cursor.execute("""
-            INSERT INTO memories (content, embedding, metadata, tags, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (content, embedding_str, metadata_str, tags_str, now, now))
+            INSERT INTO memories (content, kind, embedding, metadata, tags, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        """, (content, kind, embedding_str, metadata_str, tags_str, now, now))
 
         memory_id = cursor.lastrowid
         conn.commit()
@@ -166,6 +180,7 @@ class MemoryStore:
         self,
         query: Optional[str] = None,
         tags: Optional[List[str]] = None,
+        kinds: Optional[List[str]] = None,
         limit: int = 10,
         embedding: Optional[List[float]] = None,
     ) -> List[Dict[str, Any]]:
@@ -174,29 +189,39 @@ class MemoryStore:
         cursor = conn.cursor()
 
         tag_params: List[Any] = []
-        where_clause = ""
+        conditions: List[str] = []
         if tags:
             tag_conditions = " OR ".join(["tags LIKE ?" for _ in tags])
-            where_clause = f"WHERE ({tag_conditions})"
+            conditions.append(f"({tag_conditions})")
             tag_params = [f'%"{tag}"%' for tag in tags]
+        kind_params: List[Any] = []
+        if kinds:
+            invalid = [kind for kind in kinds if kind not in VALID_MEMORY_KINDS]
+            if invalid:
+                raise ValueError(f"Unsupported memory kind(s): {', '.join(invalid)}")
+            kind_conditions = " OR ".join(["kind = ?" for _ in kinds])
+            conditions.append(f"({kind_conditions})")
+            kind_params = list(kinds)
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        where_params = [*tag_params, *kind_params]
 
         # クエリ埋め込みがある場合は、候補集合に対してコサイン類似度でランキング
         if embedding:
             candidate_limit = max(limit * 25, 200)
             vector_sql = f"""
-                SELECT id, content, embedding, metadata, tags, created_at
+                SELECT id, content, kind, embedding, metadata, tags, created_at
                 FROM memories
                 {where_clause}
                 ORDER BY created_at DESC
                 LIMIT ?
             """
-            cursor.execute(vector_sql, [*tag_params, candidate_limit])
+            cursor.execute(vector_sql, [*where_params, candidate_limit])
             rows = cursor.fetchall()
             conn.close()
 
             scored_results: List[Dict[str, Any]] = []
             for row in rows:
-                row_embedding = _safe_json_loads(row[2], None)
+                row_embedding = _safe_json_loads(row[3], None)
                 if not row_embedding:
                     continue
                 if not isinstance(row_embedding, list):
@@ -206,9 +231,10 @@ class MemoryStore:
                 scored_results.append({
                     "id": row[0],
                     "content": row[1],
-                    "metadata": _safe_json_loads(row[3], {}),
-                    "tags": _safe_json_loads(row[4], []),
-                    "created_at": row[5],
+                    "kind": row[2],
+                    "metadata": _safe_json_loads(row[4], {}),
+                    "tags": _safe_json_loads(row[5], []),
+                    "created_at": row[6],
                     "score": round(score, 6),
                 })
 
@@ -223,7 +249,7 @@ class MemoryStore:
             # 既存データに埋め込みが無いケース向けフォールバック
             if query:
                 text_sql = f"""
-                    SELECT id, content, metadata, tags, created_at
+                    SELECT id, content, kind, metadata, tags, created_at
                     FROM memories
                     {where_clause}
                     {"AND" if where_clause else "WHERE"} content LIKE ?
@@ -231,16 +257,17 @@ class MemoryStore:
                     LIMIT ?
                 """
                 cursor = sqlite3.connect(self.db_path).cursor()
-                cursor.execute(text_sql, [*tag_params, f"%{query}%", limit])
+                cursor.execute(text_sql, [*where_params, f"%{query}%", limit])
                 text_rows = cursor.fetchall()
                 cursor.connection.close()
                 return [
                     {
                         "id": row[0],
                         "content": row[1],
-                        "metadata": _safe_json_loads(row[2], {}),
-                        "tags": _safe_json_loads(row[3], []),
-                        "created_at": row[4],
+                        "kind": row[2],
+                        "metadata": _safe_json_loads(row[3], {}),
+                        "tags": _safe_json_loads(row[4], []),
+                        "created_at": row[5],
                         "score": 0.0,
                     }
                     for row in text_rows
@@ -251,23 +278,23 @@ class MemoryStore:
         # 埋め込み検索なし: 従来のテキスト/タグ検索
         if query:
             text_sql = f"""
-                SELECT id, content, metadata, tags, created_at
+                SELECT id, content, kind, metadata, tags, created_at
                 FROM memories
                 {where_clause}
                 {"AND" if where_clause else "WHERE"} content LIKE ?
                 ORDER BY created_at DESC
                 LIMIT ?
             """
-            cursor.execute(text_sql, [*tag_params, f"%{query}%", limit])
+            cursor.execute(text_sql, [*where_params, f"%{query}%", limit])
         else:
             list_sql = f"""
-                SELECT id, content, metadata, tags, created_at
+                SELECT id, content, kind, metadata, tags, created_at
                 FROM memories
                 {where_clause}
                 ORDER BY created_at DESC
                 LIMIT ?
             """
-            cursor.execute(list_sql, [*tag_params, limit])
+            cursor.execute(list_sql, [*where_params, limit])
 
         rows = cursor.fetchall()
         conn.close()
@@ -276,9 +303,10 @@ class MemoryStore:
             {
                 "id": row[0],
                 "content": row[1],
-                "metadata": _safe_json_loads(row[2], {}),
-                "tags": _safe_json_loads(row[3], []),
-                "created_at": row[4],
+                "kind": row[2],
+                "metadata": _safe_json_loads(row[3], {}),
+                "tags": _safe_json_loads(row[4], []),
+                "created_at": row[5],
             }
             for row in rows
         ]
@@ -307,6 +335,9 @@ class MemoryStore:
         cursor.execute("SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL")
         with_embedding = cursor.fetchone()[0]
 
+        cursor.execute("SELECT kind, COUNT(*) FROM memories GROUP BY kind")
+        by_kind = {row[0]: row[1] for row in cursor.fetchall()}
+
         cursor.execute("SELECT created_at FROM memories ORDER BY created_at ASC LIMIT 1")
         oldest = cursor.fetchone()
 
@@ -318,6 +349,7 @@ class MemoryStore:
         return {
             "total_memories": total,
             "with_embedding": with_embedding,
+            "by_kind": by_kind,
             "oldest": oldest[0] if oldest else None,
             "newest": newest[0] if newest else None,
         }
@@ -346,6 +378,7 @@ async def memory_store(
     content: str,
     tags: Optional[str] = None,
     metadata: Optional[str] = None,
+    kind: str = "fact",
     tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
     """
@@ -367,6 +400,8 @@ async def memory_store(
 
         tags_list = [t.strip() for t in tags.split(",")] if tags else None
         metadata_dict = json.loads(metadata) if metadata else None
+        if kind not in VALID_MEMORY_KINDS:
+            raise ValueError(f"Unsupported memory kind: {kind}")
         embedding = await _embed_with_google(
             content,
             task_type="RETRIEVAL_DOCUMENT",
@@ -375,6 +410,7 @@ async def memory_store(
 
         memory_id = store.store(
             content=content,
+            kind=kind,
             tags=tags_list,
             metadata=metadata_dict,
             embedding=embedding,
@@ -383,6 +419,7 @@ async def memory_store(
         payload = {
             "memory_id": memory_id,
             "content": content,
+            "kind": kind,
             "tags": tags_list,
             "success": True,
         }
@@ -393,7 +430,7 @@ async def memory_store(
             action="store",
             resource=str(memory_id),
             result="success",
-            metadata={"tags": tags_list or []},
+            metadata={"tags": tags_list or [], "kind": kind},
         )
         return payload
 
@@ -409,7 +446,7 @@ async def memory_store(
             action="store",
             resource=None,
             result=f"error:{e}",
-            metadata={"tags": tags or ""},
+            metadata={"tags": tags or "", "kind": kind},
         )
         return payload
 
@@ -417,6 +454,7 @@ async def memory_store(
 async def memory_search(
     query: Optional[str] = None,
     tags: Optional[str] = None,
+    kind: Optional[str] = None,
     limit: int = 10,
     tool_context: Optional[ToolContext] = None,
 ) -> Dict[str, Any]:
@@ -438,6 +476,7 @@ async def memory_search(
         store = get_memory_store()
 
         tags_list = [t.strip() for t in tags.split(",")] if tags else None
+        kinds_list = [t.strip() for t in kind.split(",")] if kind else None
         query_embedding = (
             await _embed_with_google(
                 query,
@@ -450,6 +489,7 @@ async def memory_search(
         results = store.search(
             query=query,
             tags=tags_list,
+            kinds=kinds_list,
             limit=limit,
             embedding=query_embedding,
         )
@@ -459,6 +499,7 @@ async def memory_search(
             "count": len(results),
             "query": query,
             "tags": tags_list,
+            "kind": kinds_list,
             "success": True,
         }
         audit_logger.log(
@@ -468,7 +509,7 @@ async def memory_search(
             action="search",
             resource=query or "",
             result="success",
-            metadata={"tags": tags_list or [], "count": len(results), "limit": limit},
+            metadata={"tags": tags_list or [], "kind": kinds_list or [], "count": len(results), "limit": limit},
         )
         return payload
 
@@ -484,7 +525,7 @@ async def memory_search(
             action="search",
             resource=query or "",
             result=f"error:{e}",
-            metadata={"tags": tags or "", "limit": limit},
+            metadata={"tags": tags or "", "kind": kind or "", "limit": limit},
         )
         return payload
 
