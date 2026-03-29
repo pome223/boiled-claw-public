@@ -1,10 +1,17 @@
 # boiled-claw アーキテクチャ
 
-OpenClaw にインスパイアされた、Google ADK + Gemini 3.0 Flash ベースのAIエージェントシステム。
+OpenClaw にインスパイアされた、Google ADK ベースの browser-first closed-loop agent system。computer use、verification-driven recovery、future self-improvement、physical-ready adapters を一つの制御プレーンにまとめる。
 
 ## 概要
 
-boiled-claw は、OpenClaw (1,500-2,000 ファイルの TypeScript プロジェクト) の本質的アーキテクチャを Python で再実装したものです。
+boiled-claw は、OpenClaw の control plane / execution plane separation を Python で再構成しつつ、2026 年のエージェント設計で重要な 4 つの軸をまとめたものです。
+
+- browser-first computer use
+- desktop fallback と policy-bounded control loop
+- trajectory-aware verify / repair / future self-improvement
+- simulator / robotics runtime に伸ばせる physical-ready adapter surface
+
+このドキュメントは現在実装されている構成を中心に説明します。physical AI 方向は forward path であり、現時点でフル robotics stack を提供するものではありません。
 
 ### 主要コンポーネント
 
@@ -15,8 +22,8 @@ boiled-claw は、OpenClaw (1,500-2,000 ファイルの TypeScript プロジェ�
 │                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
 │  │   Gateway    │  │   Channels   │  │    Agents    │     │
-│  │  (WebSocket) │  │ (Telegram,   │  │   (Gemini    │     │
-│  │              │  │  Discord)    │  │  3.0 Flash)  │     │
+│  │  (WebSocket) │  │ (Telegram,   │  │    (ADK)     │     │
+│  │              │  │  Discord)    │  │              │     │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
 │         │                 │                 │               │
 │         └─────────────────┴─────────────────┘               │
@@ -37,7 +44,7 @@ boiled-claw は、OpenClaw (1,500-2,000 ファイルの TypeScript プロジェ�
 ```
 src/
 ├── agents/                  # エージェント定義
-│   ├── root_agent.py        # メインエージェント (Gemini 3.0 Flash)
+│   ├── root_agent.py        # メインエージェント (default model)
 │   ├── sub_agents.py        # サブエージェント (Web, File, System, Memory, Browser)
 │   └── model_config.py      # モデル設定
 │
@@ -244,7 +251,7 @@ main.py (run_cli)
     ↓
 Runner.run_async()
     ↓
-root_agent (Gemini 3.0 Flash)
+root_agent (configured default model)
     ↓
 Tools (web_search, shell, etc.)
     ↓
@@ -327,7 +334,7 @@ Security Policy Check
 
 ## パフォーマンス
 
-- **モデル**: Gemini 3.0 Flash (高速)
+- **モデル**: configurable default model (高速寄り設定)
 - **非同期**: 全 I/O 操作は async/await
 - **セッション**: InMemory (将来: Redis)
 - **メモリ**: SQLite (軽量)
@@ -394,4 +401,4 @@ boiled-claw は、OpenClaw の思想を継承しつつ、Python と Google ADK �
 - **パワフル**: 12+ チャネル対応可能
 - **拡張可能**: プラグインシステム
 - **安全**: セキュリティポリシー + 監査ログ
-- **高速**: Gemini 3.0 Flash
+- **高速**: 軽量な default model を前提
