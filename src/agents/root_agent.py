@@ -17,7 +17,13 @@ from src.tools.browser import (
     browser_screenshot,
 )
 from src.tools.control_ui_chat import control_ui_chat_send_message
-from src.tools.computer import computer_click, computer_fill, computer_observe
+from src.tools.computer import (
+    computer_click,
+    computer_evaluate,
+    computer_fill,
+    computer_observe,
+    computer_trajectory_recent,
+)
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
@@ -185,8 +191,10 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         browser_extract_text,
         control_ui_chat_send_message,
         computer_observe,
+        computer_evaluate,
         computer_click,
         computer_fill,
+        computer_trajectory_recent,
         desktop_view_windows,
         desktop_wait_window,
         desktop_view_frontmost_app,

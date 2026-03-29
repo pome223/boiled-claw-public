@@ -16,7 +16,13 @@ from src.tools.browser import (
     browser_screenshot,
 )
 from src.tools.control_ui_chat import control_ui_chat_send_message
-from src.tools.computer import computer_click, computer_fill, computer_observe
+from src.tools.computer import (
+    computer_click,
+    computer_evaluate,
+    computer_fill,
+    computer_observe,
+    computer_trajectory_recent,
+)
 from src.tools.current_tab import (
     current_tab_click,
     current_tab_extract_text,
@@ -315,15 +321,19 @@ computer_agent = Agent(
 
 ## 原則
 - まず observe、次に act、最後に verify
+- verify 条件が明確なら `computer_click` / `computer_fill` の verify 引数を使い、失敗時は別 surface への recovery を許可する
 - selector や AX を優先し、座標クリックは最後の手段にする
 - ユーザーが current browser を指しているときは、新しい browser app を勝手に起動しない
 - 単に入力しただけで完了扱いにせず、送信や遷移後の状態まで確認する
 - runtime が足りないときはフォールバックを捏造せず、明示的に止まる
+- failure / repair の分析が必要なら `computer_trajectory_recent` を確認する
 """,
     tools=[
         computer_observe,
+        computer_evaluate,
         computer_click,
         computer_fill,
+        computer_trajectory_recent,
         current_tab_info,
         current_tab_navigate,
         current_tab_click,

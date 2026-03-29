@@ -45,6 +45,10 @@ class Settings(BaseSettings):
         default="gemini-embedding-001",
         description="Embedding model for memory vectors",
     )
+    computer_trajectory_db_path: Path = Field(
+        default=Path("data/computer_trajectories.db"),
+        description="Browser-first computer-use trajectory DB path",
+    )
 
     # Subagent settings
     subagent_max_concurrent: int = Field(default=8, description="Max concurrent subagent runs globally")
@@ -162,6 +166,7 @@ class Settings(BaseSettings):
         super().__init__(**kwargs)
         # ディレクトリ作成
         self.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.computer_trajectory_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.physical_ai_validation_db_path.parent.mkdir(parents=True, exist_ok=True)
 
