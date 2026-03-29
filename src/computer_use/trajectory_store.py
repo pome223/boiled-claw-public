@@ -20,37 +20,36 @@ class ComputerTrajectoryStore:
         self._init_db()
 
     def _init_db(self) -> None:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS computer_trajectories (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                action TEXT NOT NULL,
-                status TEXT NOT NULL,
-                final_surface TEXT,
-                attempts_json TEXT NOT NULL,
-                verification_json TEXT,
-                request_json TEXT,
-                observation_json TEXT,
-                created_at REAL NOT NULL
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS computer_trajectories (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    action TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    final_surface TEXT,
+                    attempts_json TEXT NOT NULL,
+                    verification_json TEXT,
+                    request_json TEXT,
+                    observation_json TEXT,
+                    created_at REAL NOT NULL
+                )
+                """
             )
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_computer_trajectories_created_at
-            ON computer_trajectories(created_at DESC)
-            """
-        )
-        cursor.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_computer_trajectories_status
-            ON computer_trajectories(status)
-            """
-        )
-        conn.commit()
-        conn.close()
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_computer_trajectories_created_at
+                ON computer_trajectories(created_at DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_computer_trajectories_status
+                ON computer_trajectories(status)
+                """
+            )
+            conn.commit()
 
     def record(
         self,
@@ -63,66 +62,64 @@ class ComputerTrajectoryStore:
         request: dict[str, Any],
         observation: dict[str, Any],
     ) -> int:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO computer_trajectories (
-                action,
-                status,
-                final_surface,
-                attempts_json,
-                verification_json,
-                request_json,
-                observation_json,
-                created_at
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO computer_trajectories (
+                    action,
+                    status,
+                    final_surface,
+                    attempts_json,
+                    verification_json,
+                    request_json,
+                    observation_json,
+                    created_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    action,
+                    status,
+                    final_surface,
+                    json.dumps(attempts, ensure_ascii=True),
+                    json.dumps(verification, ensure_ascii=True) if verification is not None else None,
+                    json.dumps(request, ensure_ascii=True),
+                    json.dumps(observation, ensure_ascii=True),
+                    time.time(),
+                ),
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                action,
-                status,
-                final_surface,
-                json.dumps(attempts, ensure_ascii=True),
-                json.dumps(verification, ensure_ascii=True) if verification is not None else None,
-                json.dumps(request, ensure_ascii=True),
-                json.dumps(observation, ensure_ascii=True),
-                time.time(),
-            ),
-        )
-        trajectory_id = cursor.lastrowid
-        conn.commit()
-        conn.close()
+            trajectory_id = cursor.lastrowid
+            conn.commit()
         return int(trajectory_id)
 
     def recent(self, *, status: Optional[str] = None, limit: int = 20) -> list[dict[str, Any]]:
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        if status:
-            cursor.execute(
-                """
-                SELECT id, action, status, final_surface, attempts_json, verification_json,
-                       request_json, observation_json, created_at
-                FROM computer_trajectories
-                WHERE status = ?
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (status, limit),
-            )
-        else:
-            cursor.execute(
-                """
-                SELECT id, action, status, final_surface, attempts_json, verification_json,
-                       request_json, observation_json, created_at
-                FROM computer_trajectories
-                ORDER BY created_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
-        rows = cursor.fetchall()
-        conn.close()
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            if status:
+                cursor.execute(
+                    """
+                    SELECT id, action, status, final_surface, attempts_json, verification_json,
+                           request_json, observation_json, created_at
+                    FROM computer_trajectories
+                    WHERE status = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (status, limit),
+                )
+            else:
+                cursor.execute(
+                    """
+                    SELECT id, action, status, final_surface, attempts_json, verification_json,
+                           request_json, observation_json, created_at
+                    FROM computer_trajectories
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            rows = cursor.fetchall()
         result: list[dict[str, Any]] = []
         for row in rows:
             result.append(

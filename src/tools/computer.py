@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
@@ -159,6 +160,9 @@ def _candidate_strategies(
     if selector and allow_managed_browser:
         strategies.append(("browser", "managed_browser_selector"))
     return strategies
+
+
+ActionExecutor = Callable[[str], Awaitable[dict[str, Any]]]
 
 
 async def _verification_snapshot(
@@ -365,6 +369,137 @@ async def _resolve_observation(
     )
 
 
+async def _execute_with_recovery(
+    *,
+    action: str,
+    request: dict[str, Any],
+    selector: Optional[str],
+    expected: dict[str, str],
+    has_desktop_target: bool,
+    allow_managed_browser: bool,
+    observed_available_surfaces: list[str] | None,
+    observed_preferred_surface: Optional[str],
+    app_name: Optional[str],
+    window_id: Optional[str],
+    role: Optional[str],
+    title: Optional[str],
+    identifier: Optional[str],
+    value_contains: Optional[str],
+    tool_context: Optional[ToolContext],
+    execute_surface: ActionExecutor,
+) -> dict[str, Any]:
+    fixed_observation = (
+        observed_available_surfaces is not None or observed_preferred_surface is not None
+    )
+    observation = await _resolve_observation(
+        observed_available_surfaces=observed_available_surfaces,
+        observed_preferred_surface=observed_preferred_surface,
+        selector=selector,
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        tool_context=tool_context,
+    )
+    attempts: list[dict[str, Any]] = []
+    attempted_strategies: set[tuple[str, str]] = set()
+    final_result: dict[str, Any] = {
+        "error": f"No browser or desktop surface could satisfy computer_{action}",
+        "success": False,
+    }
+    final_surface: str | None = None
+    final_strategy = "no_available_surface"
+    final_verification: dict[str, Any] | None = None
+
+    while True:
+        candidates = [
+            candidate
+            for candidate in _candidate_strategies(
+                selector=selector,
+                has_desktop_target=has_desktop_target,
+                allow_managed_browser=allow_managed_browser,
+                available_surfaces=observation.get("available_surfaces", []),
+            )
+            if candidate not in attempted_strategies
+        ]
+        if not candidates:
+            break
+
+        surface, strategy = candidates[0]
+        attempted_strategies.add((surface, strategy))
+        result = await execute_surface(surface)
+        attempt: dict[str, Any] = {
+            "surface": surface,
+            "strategy": strategy,
+            "result": result,
+            "success": _is_success(result),
+        }
+        if expected and _is_success(result):
+            verification = await _evaluate_expectations(
+                surface=surface,
+                selector=selector,
+                expected=expected,
+                tool_context=tool_context,
+            )
+            attempt["verification"] = verification
+            if verification["success"]:
+                attempts.append(attempt)
+                final_result = result
+                final_surface = surface
+                final_strategy = strategy
+                final_verification = verification
+                break
+        elif _is_success(result):
+            attempts.append(attempt)
+            final_result = result
+            final_surface = surface
+            final_strategy = strategy
+            break
+
+        attempts.append(attempt)
+        final_result = result
+        final_surface = surface
+        final_strategy = strategy
+        if attempt.get("verification"):
+            final_verification = attempt["verification"]
+
+        if not fixed_observation:
+            observation = await _resolve_observation(
+                observed_available_surfaces=None,
+                observed_preferred_surface=None,
+                selector=selector,
+                app_name=app_name,
+                window_id=window_id,
+                role=role,
+                title=title,
+                identifier=identifier,
+                value_contains=value_contains,
+                tool_context=tool_context,
+            )
+
+    trajectory_id = _record_trajectory(
+        action=action,
+        request=request,
+        observation=observation,
+        attempts=attempts,
+        verification=final_verification,
+        final_surface=final_surface,
+        success=_is_success(final_result) and (final_verification or {"success": True})["success"],
+    )
+    return _action_payload(
+        action=action,
+        surface=final_surface,
+        strategy=final_strategy,
+        observation=observation,
+        result=final_result,
+        attempts=attempts,
+        verification=final_verification,
+        trajectory_id=trajectory_id,
+    )
+
+
 async def computer_evaluate(
     selector: Optional[str] = None,
     expected_text_contains: Optional[str] = None,
@@ -548,18 +683,6 @@ async def computer_click(
             "error": "computer_click requires a CSS selector or desktop target fields",
         }
 
-    observation = await _resolve_observation(
-        observed_available_surfaces=observed_available_surfaces,
-        observed_preferred_surface=observed_preferred_surface,
-        selector=selector,
-        app_name=app_name,
-        window_id=window_id,
-        role=role,
-        title=title,
-        identifier=identifier,
-        value_contains=value_contains,
-        tool_context=tool_context,
-    )
     expected = _expected_verification(
         text_contains=verify_text_contains,
         text_not_contains=verify_text_not_contains,
@@ -567,25 +690,11 @@ async def computer_click(
         frontmost_app=verify_frontmost_app,
         window_title_contains=verify_window_title_contains,
     )
-    attempts: list[dict[str, Any]] = []
-    final_result: dict[str, Any] = {
-        "error": "No browser or desktop surface could satisfy computer_click",
-        "success": False,
-    }
-    final_surface: str | None = None
-    final_strategy = "no_available_surface"
-    final_verification: dict[str, Any] | None = None
-
-    for surface, strategy in _candidate_strategies(
-        selector=selector,
-        has_desktop_target=has_desktop_target,
-        allow_managed_browser=allow_managed_browser,
-        available_surfaces=observation.get("available_surfaces", []),
-    ):
+    async def _execute_surface(surface: str) -> dict[str, Any]:
         if surface == "current_tab":
-            result = await current_tab_click(selector, tool_context=tool_context)
-        elif surface == "desktop":
-            result = await desktop_control_click(
+            return await current_tab_click(selector, tool_context=tool_context)
+        if surface == "desktop":
+            return await desktop_control_click(
                 app_name=app_name,
                 window_id=window_id,
                 role=role,
@@ -595,44 +704,9 @@ async def computer_click(
                 index=index,
                 tool_context=tool_context,
             )
-        else:
-            result = await browser_click(selector, tool_context=tool_context)
+        return await browser_click(selector, tool_context=tool_context)
 
-        attempt: dict[str, Any] = {
-            "surface": surface,
-            "strategy": strategy,
-            "result": result,
-            "success": _is_success(result),
-        }
-        if expected and _is_success(result):
-            verification = await _evaluate_expectations(
-                surface=surface,
-                selector=selector,
-                expected=expected,
-                tool_context=tool_context,
-            )
-            attempt["verification"] = verification
-            if verification["success"]:
-                attempts.append(attempt)
-                final_result = result
-                final_surface = surface
-                final_strategy = strategy
-                final_verification = verification
-                break
-        elif _is_success(result):
-            attempts.append(attempt)
-            final_result = result
-            final_surface = surface
-            final_strategy = strategy
-            break
-        attempts.append(attempt)
-        final_result = result
-        final_surface = surface
-        final_strategy = strategy
-        if attempt.get("verification"):
-            final_verification = attempt["verification"]
-
-    trajectory_id = _record_trajectory(
+    return await _execute_with_recovery(
         action="click",
         request={
             "selector": selector,
@@ -645,22 +719,20 @@ async def computer_click(
             "allow_managed_browser": allow_managed_browser,
             "verify": expected,
         },
-        observation=observation,
-        attempts=attempts,
-        verification=final_verification,
-        final_surface=final_surface,
-        success=_is_success(final_result) and (final_verification or {"success": True})["success"],
-    )
-
-    return _action_payload(
-        action="click",
-        surface=final_surface,
-        strategy=final_strategy,
-        observation=observation,
-        result=final_result,
-        attempts=attempts,
-        verification=final_verification,
-        trajectory_id=trajectory_id,
+        selector=selector,
+        expected=expected,
+        has_desktop_target=has_desktop_target,
+        allow_managed_browser=allow_managed_browser,
+        observed_available_surfaces=observed_available_surfaces,
+        observed_preferred_surface=observed_preferred_surface,
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        tool_context=tool_context,
+        execute_surface=_execute_surface,
     )
 
 
@@ -700,18 +772,6 @@ async def computer_fill(
             "error": "computer_fill requires a CSS selector or desktop target fields",
         }
 
-    observation = await _resolve_observation(
-        observed_available_surfaces=observed_available_surfaces,
-        observed_preferred_surface=observed_preferred_surface,
-        selector=selector,
-        app_name=app_name,
-        window_id=window_id,
-        role=role,
-        title=title,
-        identifier=identifier,
-        value_contains=value_contains,
-        tool_context=tool_context,
-    )
     expected = _expected_verification(
         text_contains=verify_text_contains,
         text_not_contains=verify_text_not_contains,
@@ -719,25 +779,11 @@ async def computer_fill(
         frontmost_app=verify_frontmost_app,
         window_title_contains=verify_window_title_contains,
     )
-    attempts: list[dict[str, Any]] = []
-    final_result: dict[str, Any] = {
-        "error": "No browser or desktop surface could satisfy computer_fill",
-        "success": False,
-    }
-    final_surface: str | None = None
-    final_strategy = "no_available_surface"
-    final_verification: dict[str, Any] | None = None
-
-    for surface, strategy in _candidate_strategies(
-        selector=selector,
-        has_desktop_target=has_desktop_target,
-        allow_managed_browser=allow_managed_browser,
-        available_surfaces=observation.get("available_surfaces", []),
-    ):
+    async def _execute_surface(surface: str) -> dict[str, Any]:
         if surface == "current_tab":
-            result = await current_tab_fill(selector, text, tool_context=tool_context)
-        elif surface == "desktop":
-            result = await desktop_control_type(
+            return await current_tab_fill(selector, text, tool_context=tool_context)
+        if surface == "desktop":
+            return await desktop_control_type(
                 text=text,
                 app_name=app_name,
                 window_id=window_id,
@@ -748,44 +794,9 @@ async def computer_fill(
                 index=index,
                 tool_context=tool_context,
             )
-        else:
-            result = await browser_fill(selector, text, tool_context=tool_context)
+        return await browser_fill(selector, text, tool_context=tool_context)
 
-        attempt: dict[str, Any] = {
-            "surface": surface,
-            "strategy": strategy,
-            "result": result,
-            "success": _is_success(result),
-        }
-        if expected and _is_success(result):
-            verification = await _evaluate_expectations(
-                surface=surface,
-                selector=selector,
-                expected=expected,
-                tool_context=tool_context,
-            )
-            attempt["verification"] = verification
-            if verification["success"]:
-                attempts.append(attempt)
-                final_result = result
-                final_surface = surface
-                final_strategy = strategy
-                final_verification = verification
-                break
-        elif _is_success(result):
-            attempts.append(attempt)
-            final_result = result
-            final_surface = surface
-            final_strategy = strategy
-            break
-        attempts.append(attempt)
-        final_result = result
-        final_surface = surface
-        final_strategy = strategy
-        if attempt.get("verification"):
-            final_verification = attempt["verification"]
-
-    trajectory_id = _record_trajectory(
+    return await _execute_with_recovery(
         action="fill",
         request={
             "selector": selector,
@@ -799,22 +810,20 @@ async def computer_fill(
             "allow_managed_browser": allow_managed_browser,
             "verify": expected,
         },
-        observation=observation,
-        attempts=attempts,
-        verification=final_verification,
-        final_surface=final_surface,
-        success=_is_success(final_result) and (final_verification or {"success": True})["success"],
-    )
-
-    return _action_payload(
-        action="fill",
-        surface=final_surface,
-        strategy=final_strategy,
-        observation=observation,
-        result=final_result,
-        attempts=attempts,
-        verification=final_verification,
-        trajectory_id=trajectory_id,
+        selector=selector,
+        expected=expected,
+        has_desktop_target=has_desktop_target,
+        allow_managed_browser=allow_managed_browser,
+        observed_available_surfaces=observed_available_surfaces,
+        observed_preferred_surface=observed_preferred_surface,
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+        tool_context=tool_context,
+        execute_surface=_execute_surface,
     )
 
 

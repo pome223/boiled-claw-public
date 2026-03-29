@@ -424,6 +424,56 @@ async def test_computer_click_recovers_to_browser_after_verification_failure(mon
 
 
 @pytest.mark.asyncio
+async def test_computer_click_reobserves_before_recovery_attempt(monkeypatch):
+    observe_calls = 0
+    verification_calls = 0
+
+    async def _observe(**kwargs):
+        nonlocal observe_calls
+        observe_calls += 1
+        if observe_calls == 1:
+            return {
+                "preferred_surface": "current_tab",
+                "available_surfaces": ["current_tab"],
+                "success": True,
+            }
+        return {
+            "preferred_surface": "desktop",
+            "available_surfaces": ["desktop"],
+            "success": True,
+        }
+
+    async def _current_tab_click(selector, tool_context=None):
+        return {"selector": selector, "success": True}
+
+    async def _desktop_click(**kwargs):
+        return {"success": True, "target": {"title": kwargs["title"]}}
+
+    async def _frontmost_app(*, tool_context=None):
+        nonlocal verification_calls
+        verification_calls += 1
+        app_name = "Safari" if verification_calls == 1 else "Notes"
+        return {"app_name": app_name, "ok": True}
+
+    monkeypatch.setattr(computer, "computer_observe", _observe)
+    monkeypatch.setattr(computer, "current_tab_click", _current_tab_click)
+    monkeypatch.setattr(computer, "desktop_control_click", _desktop_click)
+    monkeypatch.setattr(computer, "desktop_view_frontmost_app", _frontmost_app)
+
+    result = await computer.computer_click(
+        selector="#save",
+        role="button",
+        title="Save",
+        verify_frontmost_app="Notes",
+    )
+
+    assert result["success"] is True
+    assert result["surface"] == "desktop"
+    assert len(result["attempts"]) == 2
+    assert observe_calls == 2
+
+
+@pytest.mark.asyncio
 async def test_computer_fill_records_failed_trajectory_when_verification_never_passes(monkeypatch, trajectory_store):
     async def _observe(**kwargs):
         return {
