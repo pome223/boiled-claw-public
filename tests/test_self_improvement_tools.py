@@ -66,6 +66,41 @@ async def test_run_benchmarks_reports_failures(git_repo, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_package_candidate_reuses_cached_benchmark_results(git_repo, tmp_path, monkeypatch):
+    prepare = await self_improvement.self_improvement_prepare_canary(
+        goal="Reuse benchmark result",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+    canary = Path(prepare["canary_path"])
+    (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+
+    run_calls = 0
+
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        nonlocal run_calls
+        run_calls += 1
+        return {"stdout": "ok", "stderr": "", "return_code": 0}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+
+    first = await self_improvement.self_improvement_run_benchmarks(
+        canary_path=str(canary),
+        commands="printf ok",
+    )
+    packaged = await self_improvement.self_improvement_package_candidate(
+        canary_path=str(canary),
+        benchmark_commands="printf ok",
+        improvement_summary="Reuse benchmark output",
+    )
+
+    assert first["all_passed"] is True
+    assert packaged["success"] is True
+    assert packaged["benchmark_reused"] is True
+    assert run_calls == 1
+
+
+@pytest.mark.asyncio
 async def test_package_candidate_is_benchmark_gated_and_can_record_approved_memory(git_repo, tmp_path, monkeypatch):
     prepare = await self_improvement.self_improvement_prepare_canary(
         goal="Package candidate",
@@ -96,3 +131,19 @@ async def test_package_candidate_is_benchmark_gated_and_can_record_approved_memo
     assert "README.md" in result["diff_stat"]
     assert recorded["kind"] == "approved_improvement"
 
+
+@pytest.mark.asyncio
+async def test_cleanup_canary_removes_worktree_and_branch(git_repo, tmp_path):
+    prepare = await self_improvement.self_improvement_prepare_canary(
+        goal="Cleanup candidate",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+
+    cleanup = await self_improvement.self_improvement_cleanup_canary(
+        canary_path=prepare["canary_path"],
+    )
+
+    assert cleanup["success"] is True
+    assert cleanup["worktree_removed"] is True
+    assert Path(prepare["canary_path"]).exists() is False

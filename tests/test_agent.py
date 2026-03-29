@@ -34,6 +34,7 @@ def test_root_agent_tools():
     assert "self_improvement_prepare_canary" in tool_names
     assert "self_improvement_run_benchmarks" in tool_names
     assert "self_improvement_package_candidate" in tool_names
+    assert "self_improvement_cleanup_canary" in tool_names
 
 
 def test_root_agent_sub_agents_connected():
