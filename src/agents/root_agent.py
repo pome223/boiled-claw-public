@@ -17,7 +17,13 @@ from src.tools.browser import (
     browser_screenshot,
 )
 from src.tools.control_ui_chat import control_ui_chat_send_message
-from src.tools.computer import computer_click, computer_fill, computer_observe
+from src.tools.computer import (
+    computer_click,
+    computer_evaluate,
+    computer_fill,
+    computer_observe,
+    computer_trajectory_recent,
+)
 from src.tools.desktop import (
     desktop_ax_find,
     desktop_ax_snapshot,
@@ -45,6 +51,11 @@ from src.tools.self_improvement import (
     self_improvement_run_benchmarks,
 )
 from src.tools.finance import stock_price
+from src.tools.physical_ai import (
+    physical_ai_build_ros2_action,
+    physical_ai_dispatch_ros2_action,
+    physical_ai_submit_simulation,
+)
 from src.tools.skills import skill_list, skill_execute
 from src.tools.subagents import (
     agents_list,
@@ -186,8 +197,10 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         browser_extract_text,
         control_ui_chat_send_message,
         computer_observe,
+        computer_evaluate,
         computer_click,
         computer_fill,
+        computer_trajectory_recent,
         desktop_view_windows,
         desktop_wait_window,
         desktop_view_frontmost_app,
@@ -216,6 +229,9 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         self_improvement_run_benchmarks,
         self_improvement_package_candidate,
         self_improvement_cleanup_canary,
+        physical_ai_submit_simulation,
+        physical_ai_build_ros2_action,
+        physical_ai_dispatch_ros2_action,
         skill_list,
         skill_execute,
     ],
