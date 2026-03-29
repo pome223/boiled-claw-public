@@ -5,10 +5,14 @@
 <h1 align="center">boiled-claw</h1>
 
 <p align="center">
-  A reference architecture for closed-loop AI agents — plan, execute, verify, repair.
+  A hackable self-improving closed-loop agent bridging computer use and physical AI.
 </p>
 
-**Agents without a verification loop can't be trusted in production.** boiled-claw is an AI agent architecture with a closed-loop execution cycle: Planner → PolicyJudge → Executor → Verifier → Repair.
+<p align="center">
+  Browser-first. Policy-bounded. Physical-ready.
+</p>
+
+**Browser-first computer use needs more than tool calling.** boiled-claw is an open, lightweight reference system for agents that can plan, execute, verify, repair, and improve across browsers, desktop apps, and future physical AI environments.
 
 Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstream-curated.
 
@@ -19,6 +23,48 @@ Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstrea
 > By using or running this code, you accept all risk. To the maximum extent permitted by law, the author disclaims all liability for any damage, data loss, security incident, account action, system instability, or other harm resulting from its use, misuse, or modification.
 
 > **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## Thesis
+
+boiled-claw keeps the OpenClaw spirit of local-first, composable, inspectable tooling, but reframes it around the agent stack that matters in 2026: browser-first computer use, verification-driven recovery, measured improvement, and a clear adapter path toward physical AI environments.
+
+The winning agent stack in 2026 is not just "LLM + tools." It is a Karpathy-style AutoResearch closed loop: observe -> act -> verify -> store trajectory -> improve.
+
+Most open agents stop at browser automation. Most physical AI stacks stop at simulation and robotics infrastructure. boiled-claw sits between them as a policy-bounded control plane that can operate current tabs, managed browsers, desktop UI, and future simulator / robotics adapters without changing its core philosophy.
+
+## What boiled-claw Is
+
+- A browser-first computer-use system with current-tab preference and desktop fallback
+- A closed-loop execution runtime with verification and repair
+- A local-first, Docker-ready reference system for skills, MCP servers, and agent orchestration
+- A trajectory-aware substrate for future self-improvement workflows
+- A physical-ready adapter surface for simulators and robotics runtimes
+
+## What boiled-claw Is Not
+
+- An unstoppable agent without a kill switch
+- A fully autonomous robotics stack
+- A safety-free self-modifying runtime
+- A polished SaaS abstraction that hides the internals
+
+## Design Principles
+
+- Browser first: prefer structured current-tab and browser actions before pixel-only desktop control
+- Recovery over bravado: detect failure, retry carefully, escalate when needed
+- Improvement through evidence: keep trajectories, score outcomes, and learn from measured failures
+- Self-improvement with boundaries: candidate changes belong in isolated canaries before promotion
+- Physical-ready, not robotics-bloated: start with simulator and adapter surfaces before claiming end-to-end autonomy
+- Small enough to fork: keep the system understandable, inspectable, and hackable
+
+## Near-Term Direction
+
+- Reliable computer use: strengthen browser and desktop evals, recovery loops, and trajectory capture
+- Self-improving agents: add benchmark-gated canary worktrees and typed memory for failures, facts, and approved improvements
+- Physical AI adapters: extend toward NVIDIA Isaac Sim / GR00T-style environments and ROS2-friendly action surfaces with a simulation-first posture
+
+## The Bet
+
+The next important open agent framework will not be the biggest model wrapper. It will be the most editable closed-loop system that can move from browser tasks toward real-world operations without changing its core philosophy.
 
 ## Features
 
