@@ -29,8 +29,10 @@ def test_root_agent_tools():
     ]
     assert "web_search" in tool_names
     assert "computer_observe" in tool_names
+    assert "computer_evaluate" in tool_names
     assert "computer_click" in tool_names
     assert "computer_fill" in tool_names
+    assert "computer_trajectory_recent" in tool_names
 
 
 def test_root_agent_sub_agents_connected():

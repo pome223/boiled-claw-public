@@ -6,7 +6,8 @@ from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
-from src.tools.browser import browser_click, browser_fill
+from src.computer_use.trajectory_store import get_computer_trajectory_store
+from src.tools.browser import browser_click, browser_extract_text, browser_fill
 from src.tools.current_tab import (
     current_tab_click,
     current_tab_extract_text,
@@ -73,18 +74,33 @@ def _action_payload(
     strategy: str,
     observation: dict[str, Any],
     result: dict[str, Any],
+    attempts: list[dict[str, Any]] | None = None,
+    verification: dict[str, Any] | None = None,
+    trajectory_id: int | None = None,
 ) -> dict[str, Any]:
+    success = _is_success(result)
+    if verification is not None:
+        success = success and bool(verification.get("success"))
     payload = {
         "action": action,
         "surface": surface,
         "strategy": strategy,
         "observation": _observation_summary(observation),
         "result": result,
-        "success": _is_success(result),
+        "success": success,
     }
+    if attempts is not None:
+        payload["attempts"] = attempts
+        payload["recovered"] = bool(payload["success"] and len(attempts) > 1)
+    if verification is not None:
+        payload["verification"] = verification
+    if trajectory_id is not None:
+        payload["trajectory_id"] = trajectory_id
     error = _tool_error(result)
     if error:
         payload["error"] = error
+    elif verification is not None and not verification.get("success"):
+        payload["error"] = f"verification {verification.get('status', 'failed')}"
     return payload
 
 
@@ -102,6 +118,217 @@ def _normalize_observation_input(
             else {}
         ),
     }
+
+
+def _expected_verification(
+    *,
+    text_contains: Optional[str] = None,
+    text_not_contains: Optional[str] = None,
+    url_contains: Optional[str] = None,
+    frontmost_app: Optional[str] = None,
+    window_title_contains: Optional[str] = None,
+) -> dict[str, str]:
+    expected = {
+        "text_contains": text_contains or "",
+        "text_not_contains": text_not_contains or "",
+        "url_contains": url_contains or "",
+        "frontmost_app": frontmost_app or "",
+        "window_title_contains": window_title_contains or "",
+    }
+    return {key: value for key, value in expected.items() if value}
+
+
+def _contains_casefold(value: Any, expected: str) -> bool:
+    if not expected:
+        return True
+    return expected.casefold() in str(value or "").casefold()
+
+
+def _candidate_strategies(
+    *,
+    selector: Optional[str],
+    has_desktop_target: bool,
+    allow_managed_browser: bool,
+    available_surfaces: list[str],
+) -> list[tuple[str, str]]:
+    strategies: list[tuple[str, str]] = []
+    if selector and "current_tab" in available_surfaces:
+        strategies.append(("current_tab", "current_tab_selector"))
+    if has_desktop_target and "desktop" in available_surfaces:
+        strategies.append(("desktop", "desktop_selector"))
+    if selector and allow_managed_browser:
+        strategies.append(("browser", "managed_browser_selector"))
+    return strategies
+
+
+async def _verification_snapshot(
+    *,
+    surface: Optional[str],
+    selector: Optional[str],
+    needs_text: bool,
+    needs_url: bool,
+    needs_frontmost_app: bool,
+    needs_window_title: bool,
+    tool_context: Optional[ToolContext],
+) -> dict[str, Any]:
+    snapshot: dict[str, Any] = {"surface": surface}
+
+    if needs_url or surface == "current_tab":
+        current_tab = await current_tab_info(tool_context=tool_context)
+        snapshot["current_tab"] = current_tab
+
+    if needs_text:
+        if surface == "browser":
+            browser_text = await browser_extract_text(
+                selector=selector,
+                tool_context=tool_context,
+            )
+            snapshot["browser_text"] = browser_text
+        else:
+            current_tab_text = await current_tab_extract_text(
+                selector=selector,
+                tool_context=tool_context,
+            )
+            snapshot["current_tab_text"] = current_tab_text
+
+    if needs_frontmost_app:
+        snapshot["frontmost_app"] = await desktop_view_frontmost_app(tool_context=tool_context)
+
+    if needs_window_title:
+        snapshot["windows"] = await desktop_view_windows(
+            include_minimized=False,
+            tool_context=tool_context,
+        )
+
+    return snapshot
+
+
+def _verification_status(checks: list[dict[str, Any]]) -> str:
+    if not checks:
+        return "skipped"
+    passes = sum(1 for check in checks if check["passed"])
+    if passes == len(checks):
+        return "pass"
+    if passes > 0:
+        return "partial_pass"
+    return "fail"
+
+
+async def _evaluate_expectations(
+    *,
+    surface: Optional[str],
+    selector: Optional[str],
+    expected: dict[str, str],
+    tool_context: Optional[ToolContext],
+) -> dict[str, Any]:
+    if not expected:
+        return {"status": "skipped", "checks": [], "success": True}
+
+    snapshot = await _verification_snapshot(
+        surface=surface,
+        selector=selector,
+        needs_text=bool(expected.get("text_contains") or expected.get("text_not_contains")),
+        needs_url=bool(expected.get("url_contains")),
+        needs_frontmost_app=bool(expected.get("frontmost_app")),
+        needs_window_title=bool(expected.get("window_title_contains")),
+        tool_context=tool_context,
+    )
+
+    checks: list[dict[str, Any]] = []
+    if expected.get("text_contains"):
+        text_payload = snapshot.get("browser_text") if surface == "browser" else snapshot.get("current_tab_text")
+        text_value = text_payload.get("text") if isinstance(text_payload, dict) else ""
+        checks.append(
+            {
+                "name": "text_contains",
+                "expected": expected["text_contains"],
+                "actual": text_value,
+                "passed": _contains_casefold(text_value, expected["text_contains"]),
+            }
+        )
+
+    if expected.get("text_not_contains"):
+        text_payload = snapshot.get("browser_text") if surface == "browser" else snapshot.get("current_tab_text")
+        text_value = text_payload.get("text") if isinstance(text_payload, dict) else ""
+        checks.append(
+            {
+                "name": "text_not_contains",
+                "expected": expected["text_not_contains"],
+                "actual": text_value,
+                "passed": not _contains_casefold(text_value, expected["text_not_contains"]),
+            }
+        )
+
+    if expected.get("url_contains"):
+        current_tab = snapshot.get("current_tab", {})
+        url_value = current_tab.get("url") if isinstance(current_tab, dict) else ""
+        checks.append(
+            {
+                "name": "url_contains",
+                "expected": expected["url_contains"],
+                "actual": url_value,
+                "passed": _contains_casefold(url_value, expected["url_contains"]),
+            }
+        )
+
+    if expected.get("frontmost_app"):
+        frontmost = snapshot.get("frontmost_app", {})
+        app_name = frontmost.get("app_name") if isinstance(frontmost, dict) else ""
+        checks.append(
+            {
+                "name": "frontmost_app",
+                "expected": expected["frontmost_app"],
+                "actual": app_name,
+                "passed": _contains_casefold(app_name, expected["frontmost_app"]),
+            }
+        )
+
+    if expected.get("window_title_contains"):
+        windows_payload = snapshot.get("windows", {})
+        windows = windows_payload.get("windows", []) if isinstance(windows_payload, dict) else []
+        titles = [window.get("title", "") for window in windows if isinstance(window, dict)]
+        checks.append(
+            {
+                "name": "window_title_contains",
+                "expected": expected["window_title_contains"],
+                "actual": titles,
+                "passed": any(_contains_casefold(title, expected["window_title_contains"]) for title in titles),
+            }
+        )
+
+    status = _verification_status(checks)
+    return {
+        "status": status,
+        "checks": checks,
+        "success": status in {"pass", "skipped"},
+        "snapshot": snapshot,
+    }
+
+
+def _record_trajectory(
+    *,
+    action: str,
+    request: dict[str, Any],
+    observation: dict[str, Any],
+    attempts: list[dict[str, Any]],
+    verification: dict[str, Any] | None,
+    final_surface: Optional[str],
+    success: bool,
+) -> int:
+    if success:
+        status = "recovered" if len(attempts) > 1 else "success"
+    else:
+        status = "failed"
+    store = get_computer_trajectory_store()
+    return store.record(
+        action=action,
+        status=status,
+        final_surface=final_surface,
+        attempts=attempts,
+        verification=verification,
+        request=request,
+        observation=_observation_summary(observation),
+    )
 
 
 async def _resolve_observation(
@@ -136,6 +363,36 @@ async def _resolve_observation(
         ax_value_contains=value_contains,
         tool_context=tool_context,
     )
+
+
+async def computer_evaluate(
+    selector: Optional[str] = None,
+    expected_text_contains: Optional[str] = None,
+    expected_text_not_contains: Optional[str] = None,
+    expected_url_contains: Optional[str] = None,
+    expected_frontmost_app: Optional[str] = None,
+    expected_window_title_contains: Optional[str] = None,
+    surface: Optional[str] = None,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    """Evaluate browser / desktop state against explicit expectations."""
+
+    expected = _expected_verification(
+        text_contains=expected_text_contains,
+        text_not_contains=expected_text_not_contains,
+        url_contains=expected_url_contains,
+        frontmost_app=expected_frontmost_app,
+        window_title_contains=expected_window_title_contains,
+    )
+    evaluation = await _evaluate_expectations(
+        surface=surface,
+        selector=selector,
+        expected=expected,
+        tool_context=tool_context,
+    )
+    evaluation["surface"] = surface
+    evaluation["expected"] = expected
+    return evaluation
 
 
 async def computer_observe(
@@ -266,6 +523,11 @@ async def computer_click(
     value_contains: Optional[str] = None,
     index: int = 0,
     allow_managed_browser: bool = True,
+    verify_text_contains: Optional[str] = None,
+    verify_text_not_contains: Optional[str] = None,
+    verify_url_contains: Optional[str] = None,
+    verify_frontmost_app: Optional[str] = None,
+    verify_window_title_contains: Optional[str] = None,
     observed_available_surfaces: list[str] | None = None,
     observed_preferred_surface: Optional[str] = None,
     tool_context: Optional[ToolContext] = None,
@@ -298,55 +560,107 @@ async def computer_click(
         value_contains=value_contains,
         tool_context=tool_context,
     )
+    expected = _expected_verification(
+        text_contains=verify_text_contains,
+        text_not_contains=verify_text_not_contains,
+        url_contains=verify_url_contains,
+        frontmost_app=verify_frontmost_app,
+        window_title_contains=verify_window_title_contains,
+    )
+    attempts: list[dict[str, Any]] = []
+    final_result: dict[str, Any] = {
+        "error": "No browser or desktop surface could satisfy computer_click",
+        "success": False,
+    }
+    final_surface: str | None = None
+    final_strategy = "no_available_surface"
+    final_verification: dict[str, Any] | None = None
 
-    if selector and "current_tab" in observation.get("available_surfaces", []):
-        result = await current_tab_click(selector, tool_context=tool_context)
-        return _action_payload(
-            action="click",
-            surface="current_tab",
-            strategy="current_tab_selector",
-            observation=observation,
-            result=result,
-        )
+    for surface, strategy in _candidate_strategies(
+        selector=selector,
+        has_desktop_target=has_desktop_target,
+        allow_managed_browser=allow_managed_browser,
+        available_surfaces=observation.get("available_surfaces", []),
+    ):
+        if surface == "current_tab":
+            result = await current_tab_click(selector, tool_context=tool_context)
+        elif surface == "desktop":
+            result = await desktop_control_click(
+                app_name=app_name,
+                window_id=window_id,
+                role=role,
+                title=title,
+                identifier=identifier,
+                value_contains=value_contains,
+                index=index,
+                tool_context=tool_context,
+            )
+        else:
+            result = await browser_click(selector, tool_context=tool_context)
 
-    if has_desktop_target and "desktop" in observation.get("available_surfaces", []):
-        result = await desktop_control_click(
-            app_name=app_name,
-            window_id=window_id,
-            role=role,
-            title=title,
-            identifier=identifier,
-            value_contains=value_contains,
-            index=index,
-            tool_context=tool_context,
-        )
-        return _action_payload(
-            action="click",
-            surface="desktop",
-            strategy="desktop_selector",
-            observation=observation,
-            result=result,
-        )
+        attempt: dict[str, Any] = {
+            "surface": surface,
+            "strategy": strategy,
+            "result": result,
+            "success": _is_success(result),
+        }
+        if expected and _is_success(result):
+            verification = await _evaluate_expectations(
+                surface=surface,
+                selector=selector,
+                expected=expected,
+                tool_context=tool_context,
+            )
+            attempt["verification"] = verification
+            if verification["success"]:
+                attempts.append(attempt)
+                final_result = result
+                final_surface = surface
+                final_strategy = strategy
+                final_verification = verification
+                break
+        elif _is_success(result):
+            attempts.append(attempt)
+            final_result = result
+            final_surface = surface
+            final_strategy = strategy
+            break
+        attempts.append(attempt)
+        final_result = result
+        final_surface = surface
+        final_strategy = strategy
+        if attempt.get("verification"):
+            final_verification = attempt["verification"]
 
-    if selector and allow_managed_browser:
-        result = await browser_click(selector, tool_context=tool_context)
-        return _action_payload(
-            action="click",
-            surface="browser",
-            strategy="managed_browser_selector",
-            observation=observation,
-            result=result,
-        )
+    trajectory_id = _record_trajectory(
+        action="click",
+        request={
+            "selector": selector,
+            "app_name": app_name,
+            "window_id": window_id,
+            "role": role,
+            "title": title,
+            "identifier": identifier,
+            "value_contains": value_contains,
+            "allow_managed_browser": allow_managed_browser,
+            "verify": expected,
+        },
+        observation=observation,
+        attempts=attempts,
+        verification=final_verification,
+        final_surface=final_surface,
+        success=_is_success(final_result) and (final_verification or {"success": True})["success"],
+    )
 
     return _action_payload(
         action="click",
-        surface=None,
-        strategy="no_available_surface",
+        surface=final_surface,
+        strategy=final_strategy,
         observation=observation,
-        result={
-            "error": "No browser or desktop surface could satisfy computer_click",
-            "success": False,
-        },
+        result=final_result,
+        attempts=attempts,
+        verification=final_verification,
+        trajectory_id=trajectory_id,
     )
 
 
@@ -361,6 +675,11 @@ async def computer_fill(
     value_contains: Optional[str] = None,
     index: int = 0,
     allow_managed_browser: bool = True,
+    verify_text_contains: Optional[str] = None,
+    verify_text_not_contains: Optional[str] = None,
+    verify_url_contains: Optional[str] = None,
+    verify_frontmost_app: Optional[str] = None,
+    verify_window_title_contains: Optional[str] = None,
     observed_available_surfaces: list[str] | None = None,
     observed_preferred_surface: Optional[str] = None,
     tool_context: Optional[ToolContext] = None,
@@ -393,54 +712,121 @@ async def computer_fill(
         value_contains=value_contains,
         tool_context=tool_context,
     )
+    expected = _expected_verification(
+        text_contains=verify_text_contains,
+        text_not_contains=verify_text_not_contains,
+        url_contains=verify_url_contains,
+        frontmost_app=verify_frontmost_app,
+        window_title_contains=verify_window_title_contains,
+    )
+    attempts: list[dict[str, Any]] = []
+    final_result: dict[str, Any] = {
+        "error": "No browser or desktop surface could satisfy computer_fill",
+        "success": False,
+    }
+    final_surface: str | None = None
+    final_strategy = "no_available_surface"
+    final_verification: dict[str, Any] | None = None
 
-    if selector and "current_tab" in observation.get("available_surfaces", []):
-        result = await current_tab_fill(selector, text, tool_context=tool_context)
-        return _action_payload(
-            action="fill",
-            surface="current_tab",
-            strategy="current_tab_selector",
-            observation=observation,
-            result=result,
-        )
+    for surface, strategy in _candidate_strategies(
+        selector=selector,
+        has_desktop_target=has_desktop_target,
+        allow_managed_browser=allow_managed_browser,
+        available_surfaces=observation.get("available_surfaces", []),
+    ):
+        if surface == "current_tab":
+            result = await current_tab_fill(selector, text, tool_context=tool_context)
+        elif surface == "desktop":
+            result = await desktop_control_type(
+                text=text,
+                app_name=app_name,
+                window_id=window_id,
+                role=role,
+                title=title,
+                identifier=identifier,
+                value_contains=value_contains,
+                index=index,
+                tool_context=tool_context,
+            )
+        else:
+            result = await browser_fill(selector, text, tool_context=tool_context)
 
-    if has_desktop_target and "desktop" in observation.get("available_surfaces", []):
-        result = await desktop_control_type(
-            text=text,
-            app_name=app_name,
-            window_id=window_id,
-            role=role,
-            title=title,
-            identifier=identifier,
-            value_contains=value_contains,
-            index=index,
-            tool_context=tool_context,
-        )
-        return _action_payload(
-            action="fill",
-            surface="desktop",
-            strategy="desktop_selector",
-            observation=observation,
-            result=result,
-        )
+        attempt: dict[str, Any] = {
+            "surface": surface,
+            "strategy": strategy,
+            "result": result,
+            "success": _is_success(result),
+        }
+        if expected and _is_success(result):
+            verification = await _evaluate_expectations(
+                surface=surface,
+                selector=selector,
+                expected=expected,
+                tool_context=tool_context,
+            )
+            attempt["verification"] = verification
+            if verification["success"]:
+                attempts.append(attempt)
+                final_result = result
+                final_surface = surface
+                final_strategy = strategy
+                final_verification = verification
+                break
+        elif _is_success(result):
+            attempts.append(attempt)
+            final_result = result
+            final_surface = surface
+            final_strategy = strategy
+            break
+        attempts.append(attempt)
+        final_result = result
+        final_surface = surface
+        final_strategy = strategy
+        if attempt.get("verification"):
+            final_verification = attempt["verification"]
 
-    if selector and allow_managed_browser:
-        result = await browser_fill(selector, text, tool_context=tool_context)
-        return _action_payload(
-            action="fill",
-            surface="browser",
-            strategy="managed_browser_selector",
-            observation=observation,
-            result=result,
-        )
+    trajectory_id = _record_trajectory(
+        action="fill",
+        request={
+            "selector": selector,
+            "text_length": len(text),
+            "app_name": app_name,
+            "window_id": window_id,
+            "role": role,
+            "title": title,
+            "identifier": identifier,
+            "value_contains": value_contains,
+            "allow_managed_browser": allow_managed_browser,
+            "verify": expected,
+        },
+        observation=observation,
+        attempts=attempts,
+        verification=final_verification,
+        final_surface=final_surface,
+        success=_is_success(final_result) and (final_verification or {"success": True})["success"],
+    )
 
     return _action_payload(
         action="fill",
-        surface=None,
-        strategy="no_available_surface",
+        surface=final_surface,
+        strategy=final_strategy,
         observation=observation,
-        result={
-            "error": "No browser or desktop surface could satisfy computer_fill",
-            "success": False,
-        },
+        result=final_result,
+        attempts=attempts,
+        verification=final_verification,
+        trajectory_id=trajectory_id,
     )
+
+
+async def computer_trajectory_recent(
+    status: Optional[str] = None,
+    limit: int = 20,
+) -> dict[str, Any]:
+    """Return recent computer-use trajectories for failure and repair analysis."""
+
+    trajectories = get_computer_trajectory_store().recent(status=status, limit=limit)
+    return {
+        "success": True,
+        "count": len(trajectories),
+        "trajectories": trajectories,
+    }

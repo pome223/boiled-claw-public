@@ -1,7 +1,15 @@
 import pytest
 from google.adk.tools import FunctionTool
 
+from src.computer_use.trajectory_store import ComputerTrajectoryStore
 from src.tools import computer
+
+
+@pytest.fixture
+def trajectory_store(tmp_path, monkeypatch):
+    store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
+    monkeypatch.setattr(computer, "get_computer_trajectory_store", lambda: store)
+    return store
 
 
 @pytest.mark.asyncio
@@ -148,6 +156,7 @@ async def test_computer_click_prefers_current_tab_selector(monkeypatch):
     assert result["surface"] == "current_tab"
     assert result["strategy"] == "current_tab_selector"
     assert result["result"]["selector"] == "#submit"
+    assert result["recovered"] is False
 
 
 @pytest.mark.asyncio
@@ -333,6 +342,131 @@ async def test_computer_click_prefers_desktop_target_over_managed_browser(monkey
     assert result["result"]["target"]["title"] == "Submit"
 
 
+@pytest.mark.asyncio
+async def test_computer_evaluate_checks_browser_and_desktop_expectations(monkeypatch):
+    async def _current_tab_info(*, tool_context=None):
+        return {
+            "url": "https://example.com/search",
+            "title": "Example Search",
+            "success": True,
+        }
+
+    async def _current_tab_extract_text(*, selector=None, tool_context=None):
+        return {"text": "Search results for lobster", "success": True}
+
+    async def _frontmost_app(*, tool_context=None):
+        return {"app_name": "Google Chrome", "ok": True}
+
+    async def _windows(*, include_minimized=False, tool_context=None):
+        return {"windows": [{"title": "Example Search"}], "ok": True}
+
+    monkeypatch.setattr(computer, "current_tab_info", _current_tab_info)
+    monkeypatch.setattr(computer, "current_tab_extract_text", _current_tab_extract_text)
+    monkeypatch.setattr(computer, "desktop_view_frontmost_app", _frontmost_app)
+    monkeypatch.setattr(computer, "desktop_view_windows", _windows)
+
+    result = await computer.computer_evaluate(
+        selector="body",
+        expected_text_contains="lobster",
+        expected_url_contains="example.com",
+        expected_frontmost_app="chrome",
+        expected_window_title_contains="search",
+        surface="current_tab",
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "pass"
+    assert len(result["checks"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_computer_click_recovers_to_browser_after_verification_failure(monkeypatch, trajectory_store):
+    async def _observe(**kwargs):
+        return {
+            "preferred_surface": "current_tab",
+            "available_surfaces": ["current_tab", "desktop"],
+            "success": True,
+        }
+
+    async def _current_tab_click(selector, tool_context=None):
+        return {"selector": selector, "success": True}
+
+    async def _current_tab_extract_text(*, selector=None, tool_context=None):
+        return {"text": "still on old page", "success": True}
+
+    async def _browser_click(selector, tool_context=None):
+        return {"selector": selector, "success": True}
+
+    async def _browser_extract_text(selector=None, tool_context=None):
+        return {"text": "saved successfully", "success": True}
+
+    monkeypatch.setattr(computer, "computer_observe", _observe)
+    monkeypatch.setattr(computer, "current_tab_click", _current_tab_click)
+    monkeypatch.setattr(computer, "current_tab_extract_text", _current_tab_extract_text)
+    monkeypatch.setattr(computer, "browser_click", _browser_click)
+    monkeypatch.setattr(computer, "browser_extract_text", _browser_extract_text)
+
+    result = await computer.computer_click(
+        selector="#save",
+        verify_text_contains="saved successfully",
+    )
+
+    assert result["success"] is True
+    assert result["surface"] == "browser"
+    assert result["recovered"] is True
+    assert len(result["attempts"]) == 2
+    assert result["verification"]["status"] == "pass"
+
+    stored = trajectory_store.recent(limit=5)
+    assert stored[0]["status"] == "recovered"
+    assert stored[0]["attempts"][0]["surface"] == "current_tab"
+    assert stored[0]["attempts"][1]["surface"] == "browser"
+
+
+@pytest.mark.asyncio
+async def test_computer_fill_records_failed_trajectory_when_verification_never_passes(monkeypatch, trajectory_store):
+    async def _observe(**kwargs):
+        return {
+            "preferred_surface": "current_tab",
+            "available_surfaces": ["current_tab"],
+            "success": True,
+        }
+
+    async def _current_tab_fill(selector, text, tool_context=None):
+        return {"selector": selector, "success": True}
+
+    async def _current_tab_extract_text(*, selector=None, tool_context=None):
+        return {"text": "draft value only", "success": True}
+
+    async def _browser_fill(selector, text, tool_context=None):
+        return {"selector": selector, "success": True}
+
+    async def _browser_extract_text(selector=None, tool_context=None):
+        return {"text": "draft value only", "success": True}
+
+    monkeypatch.setattr(computer, "computer_observe", _observe)
+    monkeypatch.setattr(computer, "current_tab_fill", _current_tab_fill)
+    monkeypatch.setattr(computer, "current_tab_extract_text", _current_tab_extract_text)
+    monkeypatch.setattr(computer, "browser_fill", _browser_fill)
+    monkeypatch.setattr(computer, "browser_extract_text", _browser_extract_text)
+
+    result = await computer.computer_fill(
+        selector="#search",
+        text="lobster",
+        verify_text_contains="committed",
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "verification fail"
+    assert len(result["attempts"]) == 2
+    assert result["verification"]["status"] == "fail"
+
+    recent = await computer.computer_trajectory_recent(status="failed", limit=5)
+    assert recent["count"] == 1
+    assert recent["trajectories"][0]["status"] == "failed"
+    assert recent["trajectories"][0]["action"] == "fill"
+
+
 def test_computer_action_tool_schema_avoids_additional_properties():
     for tool in (computer.computer_click, computer.computer_fill):
         declaration = FunctionTool(tool)._get_declaration()
@@ -346,3 +480,9 @@ def test_computer_action_tool_schema_avoids_additional_properties():
         assert properties["observed_available_surfaces"].additional_properties is None
         assert getattr(array_variant.items.type, "value", array_variant.items.type) == "STRING"
         assert properties["observed_preferred_surface"].additional_properties is None
+
+
+def test_computer_evaluate_and_trajectory_tool_schema_is_simple():
+    for tool in (computer.computer_evaluate, computer.computer_trajectory_recent):
+        declaration = FunctionTool(tool)._get_declaration()
+        assert declaration.parameters.additional_properties is None
