@@ -59,7 +59,9 @@ from src.tools.self_improvement import (
 from src.tools.physical_ai import (
     physical_ai_build_ros2_action,
     physical_ai_dispatch_ros2_action,
+    physical_ai_replay_computer_trajectory,
     physical_ai_submit_simulation,
+    physical_ai_validation_status,
 )
 from src.agents.model_config import DEFAULT_MODEL
 
@@ -415,17 +417,22 @@ physical_agent = Agent(
 
 ## 役割
 - Isaac Sim / OSMO adapter に simulation job を投げる
+- browser / desktop 由来の computer trajectory を simulation-first physical flow に変換する
 - ROS2-friendly action envelope を組み立てる
 - simulation validation を通ったものだけ real-world dispatch 候補に進める
 
 ## 原則
-- まず `physical_ai_submit_simulation`
+- PoC を一本通すなら `physical_ai_replay_computer_trajectory` を優先する
+- 個別に進める場合は `physical_ai_submit_simulation`
+- 状態確認には `physical_ai_validation_status`
 - 次に `physical_ai_build_ros2_action`
 - 実世界 dispatch は validation 済み run_id がある場合に限る
 - `dry_run=true` を使って simulation-first の検証を保つ
 """,
     tools=[
+        physical_ai_replay_computer_trajectory,
         physical_ai_submit_simulation,
+        physical_ai_validation_status,
         physical_ai_build_ros2_action,
         physical_ai_dispatch_ros2_action,
     ],

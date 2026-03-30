@@ -54,7 +54,9 @@ from src.tools.finance import stock_price
 from src.tools.physical_ai import (
     physical_ai_build_ros2_action,
     physical_ai_dispatch_ros2_action,
+    physical_ai_replay_computer_trajectory,
     physical_ai_submit_simulation,
+    physical_ai_validation_status,
 )
 from src.tools.skills import skill_list, skill_execute
 from src.tools.subagents import (
@@ -230,8 +232,10 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         self_improvement_package_candidate,
         self_improvement_cleanup_canary,
         physical_ai_submit_simulation,
+        physical_ai_validation_status,
         physical_ai_build_ros2_action,
         physical_ai_dispatch_ros2_action,
+        physical_ai_replay_computer_trajectory,
         skill_list,
         skill_execute,
     ],

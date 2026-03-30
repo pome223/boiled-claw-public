@@ -38,8 +38,10 @@ def test_root_agent_tools():
     assert "self_improvement_package_candidate" in tool_names
     assert "self_improvement_cleanup_canary" in tool_names
     assert "physical_ai_submit_simulation" in tool_names
+    assert "physical_ai_validation_status" in tool_names
     assert "physical_ai_build_ros2_action" in tool_names
     assert "physical_ai_dispatch_ros2_action" in tool_names
+    assert "physical_ai_replay_computer_trajectory" in tool_names
 
 
 def test_root_agent_sub_agents_connected():

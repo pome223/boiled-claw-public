@@ -153,9 +153,17 @@ class Settings(BaseSettings):
         default=None,
         description="Adapter endpoint for Isaac Sim simulation validation",
     )
+    physical_ai_isaac_sim_status_url: Optional[str] = Field(
+        default=None,
+        description="Optional adapter endpoint for Isaac Sim validation status refresh",
+    )
     physical_ai_osmo_url: Optional[str] = Field(
         default=None,
         description="Adapter endpoint for OSMO workflow orchestration",
+    )
+    physical_ai_osmo_status_url: Optional[str] = Field(
+        default=None,
+        description="Optional adapter endpoint for OSMO validation status refresh",
     )
     physical_ai_ros2_bridge_url: Optional[str] = Field(
         default=None,
