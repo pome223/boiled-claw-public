@@ -81,6 +81,56 @@ async def test_validation_status_returns_persisted_run():
 
 
 @pytest.mark.asyncio
+async def test_validation_status_refreshes_pending_run(monkeypatch, tmp_path):
+    async def _post(url, payload):
+        assert url == "http://isaac.local/status"
+        assert payload["operation"] == "status"
+        assert payload["run_id"] == "run-pending"
+        return {"run_id": "run-pending", "status": "validated", "validated": True}
+
+    physical_ai._record_validation_run(
+        {
+            "run_id": "run-pending",
+            "validated": False,
+            "adapter": "isaac_sim",
+            "status": "queued",
+            "workflow": "pick-and-place",
+            "scenario": "warehouse_a",
+            "robot": "ur10",
+            "task": "demo",
+            "response": {"status": "queued"},
+            "created_at": 0.0,
+        }
+    )
+    monkeypatch.setattr(physical_ai, "_post_adapter_json", _post)
+    monkeypatch.setattr(
+        physical_ai,
+        "get_settings",
+        lambda: type(
+            "Settings",
+            (),
+            {
+                "physical_ai_isaac_sim_url": "http://isaac.local/sim",
+                "physical_ai_isaac_sim_status_url": "http://isaac.local/status",
+                "physical_ai_osmo_url": "http://osmo.local/workflows",
+                "physical_ai_osmo_status_url": "http://osmo.local/status",
+                "physical_ai_ros2_bridge_url": "http://ros2.local/dispatch",
+                "physical_ai_timeout_seconds": 5,
+                "physical_ai_validation_db_path": tmp_path / "physical_ai_validation.db",
+            },
+        )(),
+    )
+    monkeypatch.setattr(validation_store_module, "get_settings", physical_ai.get_settings)
+
+    result = await physical_ai.physical_ai_validation_status("run-pending")
+
+    assert result["success"] is True
+    assert result["validated"] is True
+    assert result["status"] == "validated"
+    assert result["refreshed"] is True
+
+
+@pytest.mark.asyncio
 async def test_submit_simulation_does_not_trust_ready_status(monkeypatch):
     async def _post(url, payload):
         return {"run_id": "run-ready", "status": "ready"}
@@ -312,6 +362,54 @@ async def test_replay_computer_trajectory_skips_dispatch_until_validation_passes
     assert result["simulation"]["validated"] is False
     assert result["dispatch"] is None
     assert result["dispatch_skipped_reason"] == "simulation_not_validated"
+
+
+@pytest.mark.asyncio
+async def test_replay_computer_trajectory_bubbles_up_dispatch_failure(
+    monkeypatch,
+    tmp_path,
+    computer_trajectory_store,
+):
+    async def _post(url, payload):
+        return {"run_id": "run-dispatch-fail", "status": "validated", "validated": True}
+
+    settings = type(
+        "Settings",
+        (),
+        {
+            "physical_ai_isaac_sim_url": "http://isaac.local/sim",
+            "physical_ai_isaac_sim_status_url": "http://isaac.local/status",
+            "physical_ai_osmo_url": "http://osmo.local/workflows",
+            "physical_ai_osmo_status_url": "http://osmo.local/status",
+            "physical_ai_ros2_bridge_url": None,
+            "physical_ai_timeout_seconds": 5,
+            "physical_ai_validation_db_path": tmp_path / "physical_ai_validation.db",
+        },
+    )()
+    monkeypatch.setattr(physical_ai, "_post_adapter_json", _post)
+    monkeypatch.setattr(physical_ai, "get_settings", lambda: settings)
+    monkeypatch.setattr(validation_store_module, "get_settings", physical_ai.get_settings)
+
+    trajectory_id = computer_trajectory_store.record(
+        action="click",
+        status="failed",
+        final_surface="browser",
+        attempts=[],
+        verification=None,
+        request={"selector": "#save"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    result = await physical_ai.physical_ai_replay_computer_trajectory(
+        trajectory_id=trajectory_id,
+        adapter="isaac_sim",
+        allow_real_hardware=True,
+        dry_run=False,
+    )
+
+    assert result["success"] is False
+    assert result["dispatch"]["success"] is False
+    assert result["error"] == "physical_ai_ros2_bridge_url is not configured"
 
 
 @pytest.mark.asyncio

@@ -382,7 +382,7 @@ Typed memory kinds are used to keep long-lived facts separate from execution tra
 The physical AI slice is simulation-first by design:
 
 - `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
-- `physical_ai_validation_status` returns the persisted validation state for a run id
+- `physical_ai_validation_status` returns the persisted validation state for a run id and can refresh queued runs from adapter status endpoints
 - `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges
 - `physical_ai_dispatch_ros2_action` only allows real dispatch when a persisted validation run is explicitly marked as validated
 - `physical_ai_replay_computer_trajectory` turns a recorded browser/desktop trajectory into a simulation request plus ROS2 dry-run candidate for PoC work
@@ -391,7 +391,9 @@ Optional `.env`:
 
 ```bash
 PHYSICAL_AI_ISAAC_SIM_URL=http://127.0.0.1:9001/sim
+PHYSICAL_AI_ISAAC_SIM_STATUS_URL=http://127.0.0.1:9001/status
 PHYSICAL_AI_OSMO_URL=http://127.0.0.1:9002/workflows
+PHYSICAL_AI_OSMO_STATUS_URL=http://127.0.0.1:9002/status
 PHYSICAL_AI_ROS2_BRIDGE_URL=http://127.0.0.1:9003/dispatch
 PHYSICAL_AI_VALIDATION_DB_PATH=data/physical_ai_validation.db
 ```

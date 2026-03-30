@@ -34,6 +34,15 @@ def _adapter_url(adapter: str) -> str | None:
     return None
 
 
+def _adapter_status_url(adapter: str) -> str | None:
+    settings = get_settings()
+    if adapter == "isaac_sim":
+        return settings.physical_ai_isaac_sim_status_url
+    if adapter == "osmo":
+        return settings.physical_ai_osmo_status_url
+    return None
+
+
 async def _post_adapter_json(url: str, payload: dict[str, Any]) -> dict[str, Any]:
     settings = get_settings()
     async with httpx.AsyncClient(timeout=settings.physical_ai_timeout_seconds) as client:
@@ -99,6 +108,32 @@ def _trajectory_context(trajectory: dict[str, Any]) -> dict[str, Any]:
     if failure_reason:
         context["failure_reason"] = failure_reason
     return context
+
+
+async def _refresh_validation_run(validation: dict[str, Any]) -> dict[str, Any] | None:
+    status_url = _adapter_status_url(str(validation.get("adapter") or ""))
+    if not status_url:
+        return None
+
+    response = await _post_adapter_json(
+        status_url,
+        {
+            "operation": "status",
+            "run_id": validation["run_id"],
+            "workflow": validation.get("workflow"),
+            "scenario": validation.get("scenario"),
+            "robot": validation.get("robot"),
+            "task": validation.get("task"),
+        },
+    )
+    refreshed = {
+        **validation,
+        "status": str(response.get("status") or validation.get("status") or "queued"),
+        "validated": _is_validated_response(response),
+        "response": response,
+    }
+    _record_validation_run(refreshed)
+    return refreshed
 
 
 def _is_validated_response(response: dict[str, Any]) -> bool:
@@ -186,19 +221,55 @@ async def physical_ai_submit_simulation(
     return payload
 
 
-async def physical_ai_validation_status(run_id: str) -> dict[str, Any]:
+async def physical_ai_validation_status(
+    run_id: str,
+    refresh: bool = True,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
     """Return the persisted status for a simulation-first validation run."""
 
     validation = _validation_status_payload(run_id)
     if validation is None:
         return {"success": False, "error": f"Unknown validation run: {run_id}"}
-    return {
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    audit_logger = get_audit_logger()
+    refreshed = False
+    refresh_error: str | None = None
+
+    if refresh and not validation.get("validated"):
+        try:
+            refreshed_validation = await _refresh_validation_run(validation)
+        except Exception as exc:  # pragma: no cover - guarded by tests via payload
+            refresh_error = str(exc)
+        else:
+            if refreshed_validation is not None:
+                validation = refreshed_validation
+                refreshed = True
+
+    audit_logger.log(
+        event_type=AuditEventType.PHYSICAL_AI,
+        user_id=ctx.get("user_id") or None,
+        session_id=ctx.get("session_id") or None,
+        action="physical_ai_validation_status",
+        resource=run_id,
+        result=str(validation.get("status") or "unknown"),
+        metadata={"validated": bool(validation.get("validated")), "refreshed": refreshed},
+    )
+
+    payload = {
         "success": True,
         "run_id": run_id,
         "status": validation.get("status"),
         "validated": bool(validation.get("validated")),
         "validation": validation,
+        "refreshed": refreshed,
     }
+    if refresh_error:
+        payload["refresh_error"] = refresh_error
+    elif refresh and not refreshed and not validation.get("validated") and not _adapter_status_url(str(validation.get("adapter") or "")):
+        payload["refresh_skipped_reason"] = "adapter_status_url_not_configured"
+    return payload
 
 
 async def physical_ai_build_ros2_action(
@@ -365,4 +436,7 @@ async def physical_ai_replay_computer_trajectory(
         tool_context=tool_context,
     )
     payload["dispatch"] = dispatch
+    payload["success"] = bool(dispatch.get("success"))
+    if not dispatch.get("success"):
+        payload["error"] = dispatch.get("error") or "dispatch failed"
     return payload
