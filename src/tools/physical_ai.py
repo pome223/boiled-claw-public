@@ -10,6 +10,7 @@ from typing import Any, Optional
 import httpx
 from google.adk.agents.context import Context as ToolContext
 
+from src.computer_use.trajectory_store import get_computer_trajectory_store
 from src.config.settings import get_settings
 from src.physical_ai.validation_store import (
     get_physical_ai_validation_store,
@@ -17,6 +18,7 @@ from src.physical_ai.validation_store import (
 )
 from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
+
 
 def reset_physical_ai_validation_runs() -> None:
     get_physical_ai_validation_store().clear()
@@ -46,6 +48,57 @@ def _record_validation_run(run: dict[str, Any]) -> None:
 
 def _validation_status_payload(run_id: str) -> dict[str, Any] | None:
     return get_physical_ai_validation_store().get(run_id)
+
+
+def _attempt_error(attempt: dict[str, Any]) -> str | None:
+    result = attempt.get("result") if isinstance(attempt, dict) else None
+    if isinstance(result, dict):
+        error = str(result.get("error") or "").strip()
+        if error:
+            return error
+    verification = attempt.get("verification") if isinstance(attempt, dict) else None
+    if isinstance(verification, dict) and not verification.get("success"):
+        return f"verification {verification.get('status', 'failed')}"
+    return None
+
+
+def _trajectory_context(trajectory: dict[str, Any]) -> dict[str, Any]:
+    attempts = trajectory.get("attempts") or []
+    attempt_summaries: list[dict[str, Any]] = []
+    failure_reason: str | None = None
+
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        summary = {
+            "surface": attempt.get("surface"),
+            "strategy": attempt.get("strategy"),
+            "success": bool(attempt.get("success")),
+        }
+        error = _attempt_error(attempt)
+        if error:
+            summary["error"] = error
+            failure_reason = failure_reason or error
+        verification = attempt.get("verification")
+        if isinstance(verification, dict):
+            summary["verification_status"] = verification.get("status")
+        attempt_summaries.append(summary)
+
+    verification = trajectory.get("verification") or {}
+    context = {
+        "id": trajectory.get("id"),
+        "action": trajectory.get("action"),
+        "status": trajectory.get("status"),
+        "final_surface": trajectory.get("final_surface"),
+        "attempt_count": len(attempt_summaries),
+        "verification_status": verification.get("status"),
+        "request": trajectory.get("request") or {},
+        "observation": trajectory.get("observation") or {},
+        "attempts": attempt_summaries,
+    }
+    if failure_reason:
+        context["failure_reason"] = failure_reason
+    return context
 
 
 def _is_validated_response(response: dict[str, Any]) -> bool:
@@ -133,6 +186,21 @@ async def physical_ai_submit_simulation(
     return payload
 
 
+async def physical_ai_validation_status(run_id: str) -> dict[str, Any]:
+    """Return the persisted status for a simulation-first validation run."""
+
+    validation = _validation_status_payload(run_id)
+    if validation is None:
+        return {"success": False, "error": f"Unknown validation run: {run_id}"}
+    return {
+        "success": True,
+        "run_id": run_id,
+        "status": validation.get("status"),
+        "validated": bool(validation.get("validated")),
+        "validation": validation,
+    }
+
+
 async def physical_ai_build_ros2_action(
     robot_namespace: str,
     action_name: str,
@@ -215,3 +283,86 @@ async def physical_ai_dispatch_ros2_action(
         "response": response,
         "validation_run_id": validation_run_id,
     }
+
+
+async def physical_ai_replay_computer_trajectory(
+    trajectory_id: int,
+    adapter: str,
+    workflow: str = "computer_use_replay",
+    scenario: str = "browser_failure_replay",
+    robot: Optional[str] = None,
+    task: Optional[str] = None,
+    simulation_parameters_json: Optional[str] = None,
+    robot_namespace: str = "robot",
+    action_name: str = "follow_joint_trajectory",
+    action_type: str = "control_msgs/action/FollowJointTrajectory",
+    goal_json: str = "{}",
+    frame_id: Optional[str] = None,
+    allow_real_hardware: bool = False,
+    dry_run: bool = True,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    """Replay a recorded computer-use trajectory into a simulation-first physical AI flow."""
+
+    trajectory = get_computer_trajectory_store().get(trajectory_id)
+    if trajectory is None:
+        return {"success": False, "error": f"Unknown computer trajectory: {trajectory_id}"}
+
+    trajectory_context = _trajectory_context(trajectory)
+    simulation_parameters = json.loads(simulation_parameters_json) if simulation_parameters_json else {}
+    simulation_parameters["computer_trajectory"] = trajectory_context
+
+    simulation = await physical_ai_submit_simulation(
+        adapter=adapter,
+        workflow=workflow,
+        scenario=scenario,
+        robot=robot,
+        task=task or f"replay_{trajectory_context['action']}_{trajectory_id}",
+        parameters_json=json.dumps(simulation_parameters, ensure_ascii=True),
+        tool_context=tool_context,
+    )
+    if not simulation.get("success"):
+        return {
+            "success": False,
+            "error": simulation.get("error") or "simulation submit failed",
+            "trajectory": trajectory_context,
+            "simulation": simulation,
+        }
+
+    goal = json.loads(goal_json)
+    goal["computer_trajectory"] = {
+        "id": trajectory_context["id"],
+        "status": trajectory_context["status"],
+        "action": trajectory_context["action"],
+        "final_surface": trajectory_context["final_surface"],
+    }
+    goal["validation_run_id"] = simulation["run_id"]
+
+    ros2_action = await physical_ai_build_ros2_action(
+        robot_namespace=robot_namespace,
+        action_name=action_name,
+        action_type=action_type,
+        goal_json=json.dumps(goal, ensure_ascii=True),
+        frame_id=frame_id,
+    )
+
+    payload = {
+        "success": True,
+        "trajectory": trajectory_context,
+        "simulation": simulation,
+        "ros2_action": ros2_action,
+    }
+    if not simulation.get("validated"):
+        payload["dispatch"] = None
+        payload["dispatch_skipped_reason"] = "simulation_not_validated"
+        return payload
+
+    dispatch = await physical_ai_dispatch_ros2_action(
+        validation_run_id=simulation["run_id"],
+        ros2_action_json=json.dumps(ros2_action["ros2_action"], ensure_ascii=True),
+        allow_real_hardware=allow_real_hardware,
+        dry_run=dry_run,
+        tool_context=tool_context,
+    )
+    payload["dispatch"] = dispatch
+    return payload

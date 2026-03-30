@@ -382,8 +382,10 @@ Typed memory kinds are used to keep long-lived facts separate from execution tra
 The physical AI slice is simulation-first by design:
 
 - `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
+- `physical_ai_validation_status` returns the persisted validation state for a run id
 - `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges
 - `physical_ai_dispatch_ros2_action` only allows real dispatch when a persisted validation run is explicitly marked as validated
+- `physical_ai_replay_computer_trajectory` turns a recorded browser/desktop trajectory into a simulation request plus ROS2 dry-run candidate for PoC work
 
 Optional `.env`:
 
@@ -395,6 +397,8 @@ PHYSICAL_AI_VALIDATION_DB_PATH=data/physical_ai_validation.db
 ```
 
 Validation runs are stored in SQLite so simulation approvals survive process restarts. Status values like `ready` are not treated as validated; real dispatch requires an explicit pass / validated signal.
+
+For a simple Physical AI PoC, replay a failed `computer_*` trajectory into `physical_ai_replay_computer_trajectory`, let the adapter validate it in Isaac Sim / OSMO, and only then inspect or dispatch the ROS2 envelope.
 
 ## Project Structure
 
@@ -622,7 +626,7 @@ The default root agent exposes these tool families:
 - `run_shell`, `read_file`, `write_file`
 - `memory_store`, `memory_search`, `memory_stats`, `memory_delete`
 - `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
-- `physical_ai_submit_simulation`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`
+- `physical_ai_submit_simulation`, `physical_ai_validation_status`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`, `physical_ai_replay_computer_trajectory`
 - `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
 - `skill_list`, `skill_execute`
 

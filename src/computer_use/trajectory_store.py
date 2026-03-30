@@ -93,6 +93,37 @@ class ComputerTrajectoryStore:
             conn.commit()
         return int(trajectory_id)
 
+    @staticmethod
+    def _row_to_trajectory(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "id": row[0],
+            "action": row[1],
+            "status": row[2],
+            "final_surface": row[3],
+            "attempts": json.loads(row[4]),
+            "verification": json.loads(row[5]) if row[5] else None,
+            "request": json.loads(row[6]) if row[6] else {},
+            "observation": json.loads(row[7]) if row[7] else {},
+            "created_at": row[8],
+        }
+
+    def get(self, trajectory_id: int) -> dict[str, Any] | None:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT id, action, status, final_surface, attempts_json, verification_json,
+                       request_json, observation_json, created_at
+                FROM computer_trajectories
+                WHERE id = ?
+                """,
+                (trajectory_id,),
+            )
+            row = cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_trajectory(row)
+
     def recent(self, *, status: Optional[str] = None, limit: int = 20) -> list[dict[str, Any]]:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -120,22 +151,7 @@ class ComputerTrajectoryStore:
                     (limit,),
                 )
             rows = cursor.fetchall()
-        result: list[dict[str, Any]] = []
-        for row in rows:
-            result.append(
-                {
-                    "id": row[0],
-                    "action": row[1],
-                    "status": row[2],
-                    "final_surface": row[3],
-                    "attempts": json.loads(row[4]),
-                    "verification": json.loads(row[5]) if row[5] else None,
-                    "request": json.loads(row[6]) if row[6] else {},
-                    "observation": json.loads(row[7]) if row[7] else {},
-                    "created_at": row[8],
-                }
-            )
-        return result
+        return [self._row_to_trajectory(row) for row in rows]
 
 
 _trajectory_store: ComputerTrajectoryStore | None = None
