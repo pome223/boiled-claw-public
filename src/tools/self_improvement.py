@@ -11,6 +11,7 @@ from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.computer_use.trajectory_store import get_computer_trajectory_store
 from src.config.settings import get_settings
 from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
@@ -101,6 +102,108 @@ def _cached_benchmark_result(canary: Path, commands: str) -> dict[str, Any] | No
         "results": list(benchmark.get("results") or []),
         "reused": True,
     }
+
+
+def _trajectory_failure_reason(trajectory: dict[str, Any]) -> str:
+    verification = trajectory.get("verification")
+    if isinstance(verification, dict) and not verification.get("success"):
+        return f"verification {verification.get('status', 'failed')}"
+    for attempt in trajectory.get("attempts") or []:
+        if not isinstance(attempt, dict):
+            continue
+        result = attempt.get("result")
+        if isinstance(result, dict):
+            error = str(result.get("error") or "").strip()
+            if error:
+                return error
+        verification = attempt.get("verification")
+        if isinstance(verification, dict) and not verification.get("success"):
+            return f"verification {verification.get('status', 'failed')}"
+    return "unknown failure"
+
+
+def _trajectory_demo_goal(trajectory: dict[str, Any]) -> str:
+    request = trajectory.get("request") or {}
+    action = str(trajectory.get("action") or "action")
+    target = (
+        request.get("selector")
+        or request.get("title")
+        or request.get("identifier")
+        or request.get("value_contains")
+        or trajectory.get("final_surface")
+        or "unknown-target"
+    )
+    return f"Investigate failed {action} trajectory {trajectory.get('id')} for {target}"
+
+
+def _trajectory_improvement_summary(trajectory: dict[str, Any]) -> str:
+    request = trajectory.get("request") or {}
+    action = str(trajectory.get("action") or "action")
+    target = (
+        request.get("selector")
+        or request.get("title")
+        or request.get("identifier")
+        or request.get("value_contains")
+        or "unknown-target"
+    )
+    return (
+        f"Demo candidate for failed computer trajectory {trajectory.get('id')}: "
+        f"improve {action} handling around {target} after {_trajectory_failure_reason(trajectory)}."
+    )
+
+
+async def _run_candidate_commands(
+    *,
+    canary: Path,
+    commands: str,
+    timeout_seconds: int,
+    tool_context: Optional[ToolContext],
+) -> dict[str, Any]:
+    command_list = _split_commands(commands)
+    if not command_list:
+        return {"success": False, "error": "At least one candidate command is required"}
+
+    timeout = timeout_seconds or get_settings().self_improvement_benchmark_timeout_seconds
+    results: list[dict[str, Any]] = []
+    all_passed = True
+    for command in command_list:
+        completed = await run_shell_guarded(
+            command=command,
+            timeout=timeout,
+            cwd=str(canary),
+            tool_context=tool_context,
+        )
+        entry = {
+            "command": command,
+            "return_code": completed.get("return_code"),
+            "passed": completed.get("return_code") == 0,
+            "stdout": _trim_output(str(completed.get("stdout") or "").strip()),
+            "stderr": _trim_output(str(completed.get("stderr") or "").strip()),
+        }
+        if completed.get("error") and not entry["stderr"]:
+            entry["stderr"] = str(completed["error"])
+        results.append(entry)
+        if not entry["passed"]:
+            all_passed = False
+            break
+
+    payload = {
+        "success": all_passed,
+        "canary_path": str(canary),
+        "results": results,
+    }
+    _persist_state(
+        canary,
+        candidate_commands={
+            "commands": command_list,
+            "all_passed": all_passed,
+            "results": results,
+            "completed_at": time.time(),
+        },
+    )
+    if not all_passed:
+        payload["error"] = "candidate command failed"
+    return payload
 
 
 async def self_improvement_prepare_canary(
@@ -354,4 +457,108 @@ async def self_improvement_cleanup_canary(
         result="success" if success else f"error:{payload['stderr'] or payload['stdout']}",
         metadata={"branch": branch_name, "remove_branch": remove_branch},
     )
+    return payload
+
+
+async def self_improvement_demo_from_trajectory(
+    trajectory_id: int,
+    candidate_commands: str,
+    benchmark_commands: str,
+    repo_path: Optional[str] = None,
+    base_ref: str = "HEAD",
+    worktree_root: Optional[str] = None,
+    goal: Optional[str] = None,
+    improvement_summary: Optional[str] = None,
+    timeout_seconds: int = 0,
+    record_as_approved: bool = False,
+    auto_cleanup: bool = False,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    """Run a failed computer trajectory through one canary -> benchmark -> package demo flow."""
+
+    trajectory = get_computer_trajectory_store().get(trajectory_id)
+    if trajectory is None:
+        return {"success": False, "error": f"Unknown computer trajectory: {trajectory_id}"}
+    if str(trajectory.get("status") or "") != "failed":
+        return {
+            "success": False,
+            "error": f"Trajectory {trajectory_id} must have status=failed for the demo flow",
+            "trajectory": trajectory,
+        }
+
+    resolved_goal = goal or _trajectory_demo_goal(trajectory)
+    resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
+
+    prepare = await self_improvement_prepare_canary(
+        goal=resolved_goal,
+        repo_path=repo_path,
+        base_ref=base_ref,
+        worktree_root=worktree_root,
+        tool_context=tool_context,
+    )
+    if not prepare.get("success"):
+        return {
+            "success": False,
+            "trajectory": trajectory,
+            "prepare": prepare,
+            "error": prepare.get("error") or prepare.get("stderr") or "failed to prepare canary",
+        }
+
+    canary = Path(prepare["canary_path"]).resolve()
+    _persist_state(
+        canary,
+        demo={
+            "trajectory_id": trajectory_id,
+            "trajectory_status": trajectory.get("status"),
+            "failure_reason": _trajectory_failure_reason(trajectory),
+            "goal": resolved_goal,
+            "improvement_summary": resolved_summary,
+            "started_at": time.time(),
+        },
+    )
+
+    candidate = await _run_candidate_commands(
+        canary=canary,
+        commands=candidate_commands,
+        timeout_seconds=timeout_seconds,
+        tool_context=tool_context,
+    )
+    if not candidate.get("success"):
+        payload = {
+            "success": False,
+            "trajectory": trajectory,
+            "prepare": prepare,
+            "candidate": candidate,
+            "error": candidate.get("error") or "candidate command failed",
+        }
+        if auto_cleanup:
+            payload["cleanup"] = await self_improvement_cleanup_canary(
+                canary_path=str(canary),
+                tool_context=tool_context,
+            )
+        return payload
+
+    packaged = await self_improvement_package_candidate(
+        canary_path=str(canary),
+        benchmark_commands=benchmark_commands,
+        improvement_summary=resolved_summary,
+        repo_path=repo_path,
+        timeout_seconds=timeout_seconds,
+        record_as_approved=record_as_approved,
+        tool_context=tool_context,
+    )
+    payload = {
+        "success": bool(packaged.get("success")),
+        "trajectory": trajectory,
+        "prepare": prepare,
+        "candidate": candidate,
+        "package": packaged,
+        "goal": resolved_goal,
+        "improvement_summary": resolved_summary,
+    }
+    if auto_cleanup:
+        payload["cleanup"] = await self_improvement_cleanup_canary(
+            canary_path=str(canary),
+            tool_context=tool_context,
+        )
     return payload

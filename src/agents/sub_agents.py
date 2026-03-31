@@ -52,6 +52,7 @@ from src.tools.desktop import (
 from src.tools.memory import memory_store, memory_search
 from src.tools.self_improvement import (
     self_improvement_cleanup_canary,
+    self_improvement_demo_from_trajectory,
     self_improvement_package_candidate,
     self_improvement_prepare_canary,
     self_improvement_run_benchmarks,
@@ -388,13 +389,15 @@ self_improver_agent = Agent(
 
 ## 原則
 - 直接 main を編集しない
-- まず `self_improvement_prepare_canary`
+- failed computer trajectory から一本通すなら `self_improvement_demo_from_trajectory`
+- 個別に進める場合は `self_improvement_prepare_canary`
 - 次に `self_improvement_run_benchmarks`
 - 合格した候補だけ `self_improvement_package_candidate` でまとめる
 - 終わった canary は `self_improvement_cleanup_canary` で片付ける
 - 記録するときは `memory_store(kind=...)` を使い分ける
 """,
     tools=[
+        self_improvement_demo_from_trajectory,
         self_improvement_prepare_canary,
         self_improvement_run_benchmarks,
         self_improvement_package_candidate,

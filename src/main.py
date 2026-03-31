@@ -4,6 +4,7 @@ CLI / Web 両対応
 """
 
 import asyncio
+import json
 import os
 from dotenv import load_dotenv
 from rich.console import Console
@@ -400,6 +401,66 @@ def status():
     ch_table.add_row("Discord", "[green]yes[/green]" if settings.discord_bot_token else "[dim]no[/dim]")
     ch_table.add_row("Slack", "[green]yes[/green]" if settings.slack_bot_token else "[dim]no[/dim]")
     console.print(ch_table)
+
+
+@cli.command("self-improvement-demo")
+@click.option("--trajectory-id", type=int, required=True, help="Failed computer trajectory id to replay.")
+@click.option(
+    "--candidate-command",
+    "candidate_commands",
+    multiple=True,
+    required=True,
+    help="Command to apply the candidate change inside the canary. Repeat for multiple steps.",
+)
+@click.option(
+    "--benchmark-command",
+    "benchmark_commands",
+    multiple=True,
+    required=True,
+    help="Benchmark command to gate the candidate. Repeat for multiple steps.",
+)
+@click.option("--repo-path", default=None, help="Repository root to create the canary from.")
+@click.option("--base-ref", default="HEAD", help="Git ref used to seed the canary.")
+@click.option("--worktree-root", default=None, help="Directory where canary worktrees should be created.")
+@click.option("--goal", default=None, help="Override the generated canary goal.")
+@click.option("--summary", default=None, help="Override the generated improvement summary.")
+@click.option("--timeout-seconds", default=0, type=int, help="Timeout for candidate and benchmark commands.")
+@click.option("--record-as-approved", is_flag=True, default=False, help="Record a passing candidate as approved memory.")
+@click.option("--auto-cleanup", is_flag=True, default=False, help="Remove the canary after packaging.")
+def self_improvement_demo(
+    trajectory_id,
+    candidate_commands,
+    benchmark_commands,
+    repo_path,
+    base_ref,
+    worktree_root,
+    goal,
+    summary,
+    timeout_seconds,
+    record_as_approved,
+    auto_cleanup,
+):
+    """Run one self-improvement demo flow from a failed computer trajectory."""
+    from src.tools.self_improvement import self_improvement_demo_from_trajectory
+
+    result = asyncio.run(
+        self_improvement_demo_from_trajectory(
+            trajectory_id=trajectory_id,
+            candidate_commands="\n".join(candidate_commands),
+            benchmark_commands="\n".join(benchmark_commands),
+            repo_path=repo_path,
+            base_ref=base_ref,
+            worktree_root=worktree_root,
+            goal=goal,
+            improvement_summary=summary,
+            timeout_seconds=timeout_seconds,
+            record_as_approved=record_as_approved,
+            auto_cleanup=auto_cleanup,
+        )
+    )
+    console.print_json(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result.get("success"):
+        raise click.Abort()
 
 
 # ── bridge group (host / desktop) ───────────────────────────────
