@@ -50,6 +50,7 @@ from src.tools.self_improvement import (
     self_improvement_package_candidate,
     self_improvement_prepare_canary,
     self_improvement_run_benchmarks,
+    self_improvement_search_from_trajectory,
 )
 from src.tools.finance import stock_price
 from src.tools.physical_ai import (
@@ -231,6 +232,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         self_improvement_prepare_canary,
         self_improvement_run_benchmarks,
         self_improvement_demo_from_trajectory,
+        self_improvement_search_from_trajectory,
         self_improvement_package_candidate,
         self_improvement_cleanup_canary,
         physical_ai_submit_simulation,

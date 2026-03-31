@@ -1,4 +1,5 @@
 import asyncio
+import json
 import subprocess
 from pathlib import Path
 
@@ -323,3 +324,138 @@ def test_cli_self_improvement_demo_invokes_tool(monkeypatch):
 
     assert result.exit_code == 0
     assert '"id": 7' in result.output
+
+
+@pytest.mark.asyncio
+async def test_search_from_failed_trajectory_selects_smallest_promotable_candidate(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+):
+    trajectory_id = computer_trajectory_store.record(
+        action="click",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={"status": "fail", "success": False},
+        request={"selector": "#save"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        canary = Path(cwd)
+        if command == "apply-small-fix":
+            (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+            return {"stdout": "small", "stderr": "", "return_code": 0}
+        if command == "apply-large-fix":
+            (canary / "README.md").write_text("hello\nworld\nextra\nextra\n", encoding="utf-8")
+            return {"stdout": "large", "stderr": "", "return_code": 0}
+        if command == "verify-search-fix":
+            content = (canary / "README.md").read_text(encoding="utf-8")
+            return {
+                "stdout": "verified" if "world" in content else "",
+                "stderr": "" if "world" in content else "missing world",
+                "return_code": 0 if "world" in content else 1,
+            }
+        return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+
+    result = await self_improvement.self_improvement_search_from_trajectory(
+        trajectory_id=trajectory_id,
+        candidate_specs_json=json.dumps(
+            [
+                {"name": "small-fix", "commands": ["apply-small-fix"]},
+                {"name": "large-fix", "commands": ["apply-large-fix"]},
+            ]
+        ),
+        benchmark_commands="verify-search-fix",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+        cleanup_losers=True,
+        auto_cleanup=True,
+    )
+
+    assert result["success"] is True
+    assert result["winner_name"] == "small-fix"
+    assert result["winner"]["package"]["promotable"] is True
+    assert result["winner"]["cleanup"]["success"] is True
+    losing = next(candidate for candidate in result["candidates"] if candidate["name"] == "large-fix")
+    assert losing["cleanup"]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_search_reports_failure_when_no_candidate_is_promotable(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+):
+    trajectory_id = computer_trajectory_store.record(
+        action="fill",
+        status="failed",
+        final_surface="browser",
+        attempts=[],
+        verification=None,
+        request={"selector": "#query"},
+        observation={"preferred_surface": "browser", "available_surfaces": ["browser"]},
+    )
+
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        canary = Path(cwd)
+        if command == "apply-broken-fix":
+            (canary / "README.md").write_text("hello\n", encoding="utf-8")
+            return {"stdout": "broken", "stderr": "", "return_code": 0}
+        if command == "verify-search-fix":
+            return {"stdout": "", "stderr": "missing world", "return_code": 1}
+        return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+
+    result = await self_improvement.self_improvement_search_from_trajectory(
+        trajectory_id=trajectory_id,
+        candidate_specs_json=json.dumps(
+            [{"name": "broken-fix", "commands": ["apply-broken-fix"]}]
+        ),
+        benchmark_commands="verify-search-fix",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+        cleanup_losers=True,
+    )
+
+    assert result["success"] is False
+    assert result["error"] == "No promotable candidate found"
+    assert result["winner_name"] == "broken-fix"
+    assert result["winner"]["package"]["promotable"] is False
+    assert result["winner"]["cleanup"]["success"] is True
+
+
+def test_cli_self_improvement_search_invokes_tool(monkeypatch):
+    async def _search(**kwargs):
+        assert kwargs["trajectory_id"] == 9
+        specs = json.loads(kwargs["candidate_specs_json"])
+        assert [spec["name"] for spec in specs] == ["small-fix", "large-fix"]
+        assert kwargs["benchmark_commands"] == "verify-search-fix"
+        return {"success": True, "winner_name": "small-fix"}
+
+    monkeypatch.setattr(self_improvement, "self_improvement_search_from_trajectory", _search)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "self-improvement-search",
+            "--trajectory-id",
+            "9",
+            "--candidate-spec",
+            '{"name":"small-fix","commands":["apply-small-fix"]}',
+            "--candidate-spec",
+            '{"name":"large-fix","commands":["apply-large-fix"]}',
+            "--benchmark-command",
+            "verify-search-fix",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"winner_name": "small-fix"' in result.output

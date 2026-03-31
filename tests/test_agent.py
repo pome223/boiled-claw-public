@@ -36,6 +36,7 @@ def test_root_agent_tools():
     assert "self_improvement_prepare_canary" in tool_names
     assert "self_improvement_run_benchmarks" in tool_names
     assert "self_improvement_demo_from_trajectory" in tool_names
+    assert "self_improvement_search_from_trajectory" in tool_names
     assert "self_improvement_package_candidate" in tool_names
     assert "self_improvement_cleanup_canary" in tool_names
     assert "physical_ai_submit_simulation" in tool_names

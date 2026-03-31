@@ -56,6 +56,7 @@ from src.tools.self_improvement import (
     self_improvement_package_candidate,
     self_improvement_prepare_canary,
     self_improvement_run_benchmarks,
+    self_improvement_search_from_trajectory,
 )
 from src.tools.physical_ai import (
     physical_ai_build_ros2_action,
@@ -389,6 +390,7 @@ self_improver_agent = Agent(
 
 ## 原則
 - 直接 main を編集しない
+- 複数 canary で探索するなら `self_improvement_search_from_trajectory`
 - failed computer trajectory から一本通すなら `self_improvement_demo_from_trajectory`
 - 個別に進める場合は `self_improvement_prepare_canary`
 - 次に `self_improvement_run_benchmarks`
@@ -397,6 +399,7 @@ self_improver_agent = Agent(
 - 記録するときは `memory_store(kind=...)` を使い分ける
 """,
     tools=[
+        self_improvement_search_from_trajectory,
         self_improvement_demo_from_trajectory,
         self_improvement_prepare_canary,
         self_improvement_run_benchmarks,

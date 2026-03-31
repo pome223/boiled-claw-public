@@ -136,6 +136,20 @@ def _trajectory_demo_goal(trajectory: dict[str, Any]) -> str:
     return f"Investigate failed {action} trajectory {trajectory.get('id')} for {target}"
 
 
+def _trajectory_search_goal(trajectory: dict[str, Any]) -> str:
+    request = trajectory.get("request") or {}
+    action = str(trajectory.get("action") or "action")
+    target = (
+        request.get("selector")
+        or request.get("title")
+        or request.get("identifier")
+        or request.get("value_contains")
+        or trajectory.get("final_surface")
+        or "unknown-target"
+    )
+    return f"Search repair candidates for failed {action} trajectory {trajectory.get('id')} for {target}"
+
+
 def _trajectory_improvement_summary(trajectory: dict[str, Any]) -> str:
     request = trajectory.get("request") or {}
     action = str(trajectory.get("action") or "action")
@@ -149,6 +163,105 @@ def _trajectory_improvement_summary(trajectory: dict[str, Any]) -> str:
     return (
         f"Demo candidate for failed computer trajectory {trajectory.get('id')}: "
         f"improve {action} handling around {target} after {_trajectory_failure_reason(trajectory)}."
+    )
+
+
+def _parse_candidate_specs(candidate_specs_json: str) -> list[dict[str, Any]]:
+    try:
+        payload = json.loads(candidate_specs_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"candidate_specs_json must be valid JSON: {exc}") from exc
+
+    if not isinstance(payload, list) or not payload:
+        raise ValueError("candidate_specs_json must be a non-empty JSON array")
+
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(payload, start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"Candidate spec #{index} must be an object")
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            raise ValueError(f"Candidate spec #{index} must include a non-empty name")
+        commands_value = entry.get("commands")
+        if isinstance(commands_value, list):
+            commands = [str(command).strip() for command in commands_value if str(command).strip()]
+        elif isinstance(commands_value, str):
+            commands = _split_commands(commands_value)
+        else:
+            commands = []
+        if not commands:
+            raise ValueError(f"Candidate spec '{name}' must include at least one command")
+
+        goal = str(entry.get("goal") or "").strip() or None
+        improvement_summary = str(entry.get("improvement_summary") or "").strip() or None
+        normalized.append(
+            {
+                "name": name,
+                "commands": commands,
+                "goal": goal,
+                "improvement_summary": improvement_summary,
+            }
+        )
+    return normalized
+
+
+def _search_candidate_goal(search_goal: str, candidate_name: str, candidate_goal: Optional[str]) -> str:
+    if candidate_goal:
+        return candidate_goal
+    return f"{search_goal} [{candidate_name}]"
+
+
+def _search_candidate_summary(
+    base_summary: str,
+    candidate_name: str,
+    candidate_summary: Optional[str],
+) -> str:
+    if candidate_summary:
+        return candidate_summary
+    return f"{base_summary} Candidate: {candidate_name}."
+
+
+def _candidate_diff_metrics(canary: Path) -> dict[str, int]:
+    numstat = _run_git(canary, "diff", "--numstat")
+    changed_files = 0
+    changed_lines = 0
+    for line in numstat.stdout.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        changed_files += 1
+        added = 0 if parts[0] == "-" else int(parts[0])
+        deleted = 0 if parts[1] == "-" else int(parts[1])
+        changed_lines += added + deleted
+    return {"changed_files": changed_files, "changed_lines": changed_lines}
+
+
+def _candidate_benchmark_counts(package: dict[str, Any]) -> tuple[int, int]:
+    benchmark = package.get("benchmark")
+    if not isinstance(benchmark, dict):
+        return (0, 0)
+    results = benchmark.get("results")
+    if not isinstance(results, list):
+        return (0, 0)
+    passed = sum(1 for result in results if isinstance(result, dict) and result.get("passed"))
+    return (passed, len(results))
+
+
+def _candidate_ranking_key(candidate: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
+    package = candidate.get("package")
+    package = package if isinstance(package, dict) else {}
+    passed, total = _candidate_benchmark_counts(package)
+    diff_metrics = candidate.get("diff_metrics")
+    diff_metrics = diff_metrics if isinstance(diff_metrics, dict) else {}
+    changed_files = int(diff_metrics.get("changed_files") or 0)
+    changed_lines = int(diff_metrics.get("changed_lines") or 0)
+    return (
+        1 if package.get("promotable") else 0,
+        1 if package.get("success") else 0,
+        passed,
+        -total,
+        -changed_files,
+        -changed_lines,
     )
 
 
@@ -561,4 +674,182 @@ async def self_improvement_demo_from_trajectory(
             canary_path=str(canary),
             tool_context=tool_context,
         )
+    return payload
+
+
+async def self_improvement_search_from_trajectory(
+    trajectory_id: int,
+    candidate_specs_json: str,
+    benchmark_commands: str,
+    repo_path: Optional[str] = None,
+    base_ref: str = "HEAD",
+    worktree_root: Optional[str] = None,
+    goal: Optional[str] = None,
+    improvement_summary: Optional[str] = None,
+    timeout_seconds: int = 0,
+    record_winner_as_approved: bool = False,
+    cleanup_losers: bool = True,
+    auto_cleanup: bool = False,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    """Search across multiple canaries for the best benchmarked repair of a failed trajectory."""
+
+    trajectory = get_computer_trajectory_store().get(trajectory_id)
+    if trajectory is None:
+        return {"success": False, "error": f"Unknown computer trajectory: {trajectory_id}"}
+    if str(trajectory.get("status") or "") != "failed":
+        return {
+            "success": False,
+            "error": f"Trajectory {trajectory_id} must have status=failed for the search flow",
+            "trajectory": trajectory,
+        }
+
+    try:
+        candidate_specs = _parse_candidate_specs(candidate_specs_json)
+    except ValueError as exc:
+        return {"success": False, "error": str(exc)}
+
+    resolved_goal = goal or _trajectory_search_goal(trajectory)
+    resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
+
+    candidates: list[dict[str, Any]] = []
+    winner_index: int | None = None
+    winner_key: tuple[int, int, int, int, int, int] | None = None
+
+    for index, spec in enumerate(candidate_specs):
+        candidate_name = str(spec["name"])
+        candidate_goal = _search_candidate_goal(resolved_goal, candidate_name, spec.get("goal"))
+        candidate_summary = _search_candidate_summary(
+            resolved_summary,
+            candidate_name,
+            spec.get("improvement_summary"),
+        )
+
+        prepare = await self_improvement_prepare_canary(
+            goal=candidate_goal,
+            repo_path=repo_path,
+            base_ref=base_ref,
+            worktree_root=worktree_root,
+            tool_context=tool_context,
+        )
+        candidate_result: dict[str, Any] = {
+            "name": candidate_name,
+            "index": index,
+            "goal": candidate_goal,
+            "improvement_summary": candidate_summary,
+            "prepare": prepare,
+        }
+        if not prepare.get("success"):
+            candidate_result["success"] = False
+            candidate_result["error"] = (
+                prepare.get("error") or prepare.get("stderr") or "failed to prepare canary"
+            )
+            candidates.append(candidate_result)
+            continue
+
+        canary = Path(prepare["canary_path"]).resolve()
+        _persist_state(
+            canary,
+            search={
+                "trajectory_id": trajectory_id,
+                "candidate_name": candidate_name,
+                "candidate_index": index,
+                "trajectory_status": trajectory.get("status"),
+                "failure_reason": _trajectory_failure_reason(trajectory),
+                "goal": candidate_goal,
+                "improvement_summary": candidate_summary,
+                "started_at": time.time(),
+            },
+        )
+
+        candidate = await _run_candidate_commands(
+            canary=canary,
+            commands="\n".join(spec["commands"]),
+            timeout_seconds=timeout_seconds,
+            tool_context=tool_context,
+        )
+        candidate_result["candidate"] = candidate
+        if not candidate.get("success"):
+            candidate_result["success"] = False
+            candidate_result["error"] = candidate.get("error") or "candidate command failed"
+            if cleanup_losers:
+                candidate_result["cleanup"] = await self_improvement_cleanup_canary(
+                    canary_path=str(canary),
+                    tool_context=tool_context,
+                )
+            candidates.append(candidate_result)
+            continue
+
+        packaged = await self_improvement_package_candidate(
+            canary_path=str(canary),
+            benchmark_commands=benchmark_commands,
+            improvement_summary=candidate_summary,
+            repo_path=repo_path,
+            timeout_seconds=timeout_seconds,
+            record_as_approved=False,
+            tool_context=tool_context,
+        )
+        candidate_result["package"] = packaged
+        candidate_result["diff_metrics"] = _candidate_diff_metrics(canary)
+        candidate_result["success"] = bool(packaged.get("success"))
+        if not packaged.get("success"):
+            candidate_result["error"] = packaged.get("error") or "failed to package candidate"
+        ranking_key = _candidate_ranking_key(candidate_result)
+        candidate_result["ranking_key"] = list(ranking_key)
+        if winner_key is None or ranking_key > winner_key:
+            winner_key = ranking_key
+            winner_index = index
+        candidates.append(candidate_result)
+
+    winner = candidates[winner_index] if winner_index is not None else None
+    if winner is not None and winner.get("prepare", {}).get("success"):
+        winner_canary = str(winner["prepare"]["canary_path"])
+    else:
+        winner_canary = None
+    has_promotable_winner = bool(winner and winner.get("package", {}).get("promotable"))
+
+    if has_promotable_winner and record_winner_as_approved:
+        refreshed = await self_improvement_package_candidate(
+            canary_path=str(winner_canary),
+            benchmark_commands=benchmark_commands,
+            improvement_summary=str(winner["improvement_summary"]),
+            repo_path=repo_path,
+            timeout_seconds=timeout_seconds,
+            record_as_approved=True,
+            tool_context=tool_context,
+        )
+        winner["package"] = refreshed
+        winner["diff_metrics"] = _candidate_diff_metrics(Path(winner_canary))
+
+    for index, candidate in enumerate(candidates):
+        canary_path = candidate.get("prepare", {}).get("canary_path")
+        if not canary_path:
+            continue
+        should_cleanup = False
+        if winner_index is None:
+            should_cleanup = cleanup_losers
+        elif not has_promotable_winner:
+            should_cleanup = cleanup_losers
+        elif index != winner_index:
+            should_cleanup = cleanup_losers
+        elif auto_cleanup:
+            should_cleanup = True
+        if should_cleanup:
+            candidate["cleanup"] = await self_improvement_cleanup_canary(
+                canary_path=str(canary_path),
+                tool_context=tool_context,
+            )
+
+    payload = {
+        "success": bool(winner and winner.get("package", {}).get("promotable")),
+        "trajectory": trajectory,
+        "goal": resolved_goal,
+        "improvement_summary": resolved_summary,
+        "candidates": candidates,
+    }
+    if winner is not None:
+        payload["winner"] = winner
+        payload["winner_name"] = winner.get("name")
+    if not payload["success"]:
+        payload["error"] = "No promotable candidate found"
     return payload
