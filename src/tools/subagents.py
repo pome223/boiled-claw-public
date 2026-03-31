@@ -21,13 +21,13 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from google.adk.agents import Agent
 from google.adk.agents.context import Context as ToolContext
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from src.agents.sub_agents import SUB_AGENTS
 from src.agents.model_config import DEFAULT_MODEL
 from src.config.settings import get_settings
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
+from src.runtime.session_service import create_session_service
 from src.security.audit import AuditEventType, get_audit_logger
 
 _AGENT_MAP = {agent.name: agent for agent in SUB_AGENTS}
@@ -437,7 +437,7 @@ class SubagentManager:
             state.ended_at = time.time()
             return
 
-        session_service = InMemorySessionService()
+        session_service = create_session_service()
         memory_service = get_promoted_memory_service()
         runner = Runner(
             agent=resolved_agent,

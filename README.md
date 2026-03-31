@@ -87,6 +87,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
 - 📝 **Persistent Transcript** - Gateway holds SQLite-backed session history
+- 🗃️ **Redis Sessions** - Optional Redis-backed ADK session state for Gateway / CLI / channels
 - ⏰ **Cron Platform** - System event integration, delivery targets, and retry support
 - 🔌 **MCP Support** - Bundled sample MCP server supporting SSE / HTTP / stdio connections
 - 🔒 **Security** - Audit logs, command policies, tool approvals
@@ -158,6 +159,9 @@ cp .env.example .env
 # Optionally configure Gateway auth:
 # GATEWAY_API_KEY=change-me
 # GATEWAY_AUTH_USER_HEADER=X-Auth-User
+# Optionally persist live ADK sessions in Redis:
+# REDIS_URL=redis://127.0.0.1:6379/0
+# REDIS_SESSION_NAMESPACE=boiled-claw:sessions
 ```
 
 You can obtain a Google API Key from [Google AI Studio](https://aistudio.google.com/apikey).
@@ -755,7 +759,7 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - [x] Reliable computer use (evaluation, recovery, trajectory capture)
 - [x] Offline canary self-improvement workflow
 - [x] Simulation-first physical AI adapters
-- [ ] Redis sessions
+- [x] Redis sessions
 - [ ] Slack channel
 - [ ] WhatsApp channel
 - [ ] Canvas (visual workspace)

@@ -112,12 +112,12 @@ async def test_spawn_dynamic_no_mcp_servers():
     mock_runner.run_async = AsyncMock(return_value=aiter([]))
 
     with patch("src.tools.subagents.Runner", return_value=mock_runner), \
-         patch("src.tools.subagents.InMemorySessionService") as mock_svc_cls:
+         patch("src.tools.subagents.create_session_service") as mock_svc_factory:
         mock_svc = AsyncMock()
         mock_session = MagicMock()
         mock_session.id = "test-session-id"
         mock_svc.create_session = AsyncMock(return_value=mock_session)
-        mock_svc_cls.return_value = mock_svc
+        mock_svc_factory.return_value = mock_svc
 
         result = await sessions_spawn_dynamic(
             task="自己紹介して",
@@ -139,12 +139,12 @@ async def test_spawn_dynamic_sets_dynamic_flag():
     mock_runner.run_async = AsyncMock(return_value=aiter([]))
 
     with patch("src.tools.subagents.Runner", return_value=mock_runner), \
-         patch("src.tools.subagents.InMemorySessionService") as mock_svc_cls:
+         patch("src.tools.subagents.create_session_service") as mock_svc_factory:
         mock_svc = AsyncMock()
         mock_session = MagicMock()
         mock_session.id = "test-session-id"
         mock_svc.create_session = AsyncMock(return_value=mock_session)
-        mock_svc_cls.return_value = mock_svc
+        mock_svc_factory.return_value = mock_svc
 
         spawn_result = await sessions_spawn_dynamic(
             task="test task",

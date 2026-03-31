@@ -25,7 +25,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google.adk.events.event import Event
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pathlib import Path
 
@@ -58,6 +57,7 @@ from src.gateway.routing import (
     targets_user_browser,
 )
 from src.runtime.tool_events import set_tool_event_notifier
+from src.runtime.session_service import create_session_service
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 
@@ -247,7 +247,7 @@ class GatewayServer:
         self.settings = get_settings()
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
-        self.session_service = InMemorySessionService()
+        self.session_service = create_session_service(self.settings)
         self.memory_service = get_promoted_memory_service()
         self.subagent_manager = get_subagent_manager()
         self.runner = Runner(
@@ -256,7 +256,7 @@ class GatewayServer:
             session_service=self.session_service,
             memory_service=self.memory_service,
         )
-        self.routing_session_service = InMemorySessionService()
+        self.routing_session_service = create_session_service(self.settings)
         self.routing_runner = Runner(
             agent=routing_agent,
             app_name="boiled-claw-router",

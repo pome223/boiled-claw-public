@@ -22,7 +22,7 @@ from google.adk.agents.callback_context import CallbackContext
 from google.adk.events.event import Event
 from google.adk.events.event_actions import EventActions
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService, Session
+from google.adk.sessions import Session
 from google.genai.types import Content, Part
 
 from src.agents.model_config import DEFAULT_MODEL
@@ -64,6 +64,7 @@ from src.control_loop.guarded_tools import (
     guarded_write_file,
 )
 from src.control_loop.planner_agent import planner_agent
+from src.runtime.session_service import create_session_service
 from src.control_loop.verifier_agent import verifier_agent
 from src.runtime.state_keys import StateKeys
 
@@ -185,7 +186,7 @@ class ControlLoop:
     """
     ADK Runner を使って Planner → Executor → Verifier のループを実行する。
 
-    session_service: 外部から注入可能（デフォルトは InMemorySessionService）。
+    session_service: 外部から注入可能（デフォルトは configured session service）。
     """
 
     def __init__(
@@ -194,7 +195,7 @@ class ControlLoop:
         memory_service=None,
         max_repair_attempts: int = _MAX_REPAIR_ATTEMPTS,
     ) -> None:
-        self._session_service = session_service or InMemorySessionService()
+        self._session_service = session_service or create_session_service()
         if memory_service is None:
             from src.memory_lifecycle.adk_memory_service import (
                 get_promoted_memory_service,

@@ -82,6 +82,10 @@ class Settings(BaseSettings):
 
     # Redis settings (for future session store)
     redis_url: Optional[str] = Field(default=None, description="Redis URL")
+    redis_session_namespace: str = Field(
+        default="boiled-claw:sessions",
+        description="Key namespace for Redis-backed ADK sessions",
+    )
 
     # Browser settings
     browser_headless: bool = Field(default=True, description="Headless browser mode")
