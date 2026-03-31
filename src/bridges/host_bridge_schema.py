@@ -29,6 +29,9 @@ class HostShellRunResult(BaseModel):
     stderr: str = ""
     return_code: int = 0
     timed_out: bool = False
+    intent: Optional[str] = None
+    risk: Optional[Literal["low", "medium", "high"]] = None
+    summary: Optional[str] = None
     error: Optional[str] = None
 
 

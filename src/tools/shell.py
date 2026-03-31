@@ -3,7 +3,6 @@
 """
 
 import asyncio
-import shlex
 import uuid
 from typing import Any, Optional
 
@@ -15,6 +14,7 @@ from src.bridges.host_bridge_schema import HostShellRunRequest, HostShellRunResu
 from src.config.settings import get_settings
 from src.security.audit import get_audit_logger
 from src.security.policy import get_security_policy
+from src.security.shell_intent import inspect_shell_command
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.context import resolve_tool_context
 
@@ -65,11 +65,27 @@ async def run_shell_guarded(
     Returns:
         stdout, stderr, return_code を含む辞書
     """
-    # ホワイトスペースを正規化してからポリシーチェック（空白2つ等の回避を防ぐ）
-    normalized = " ".join(command.split())
+    try:
+        inspection = inspect_shell_command(command)
+    except ValueError as e:
+        return {
+            "error": f"Invalid command syntax: {e}",
+            "stdout": "",
+            "stderr": "",
+            "return_code": -1,
+        }
+
+    normalized = inspection.normalized
     audit_logger = get_audit_logger()
     ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    audit_metadata: dict[str, Any] = {}
+    audit_metadata: dict[str, Any] = {
+        "shell_intent": inspection.intent.category,
+        "shell_risk": inspection.intent.risk,
+        "shell_summary": inspection.intent.summary,
+        "executable": inspection.ast.executable_basename,
+        "control_operators": list(inspection.ast.control_operators),
+        "redirections": [item.to_dict() for item in inspection.ast.redirections],
+    }
 
     def _audit(result: str, return_code: int | None = None) -> None:
         audit_logger.log_shell_command(
@@ -82,7 +98,7 @@ async def run_shell_guarded(
         )
 
     policy = get_security_policy()
-    allowed, reason = policy.is_command_allowed(normalized)
+    allowed, reason = policy.is_command_allowed(normalized, inspection=inspection)
     if not allowed:
         _audit(f"blocked:{reason}", -1)
         return {
@@ -94,7 +110,12 @@ async def run_shell_guarded(
 
     approval_error, approval_token = await _check_tool_policy(
         "run_shell",
-        {"command": normalized, "timeout": timeout},
+        {
+            "command": normalized,
+            "timeout": timeout,
+            "shell_intent": inspection.intent.to_dict(),
+            "shell_ast": inspection.ast.to_dict(),
+        },
         tool_context,
     )
     if approval_error:
@@ -122,6 +143,8 @@ async def run_shell_guarded(
             "executor": "host_bridge",
             "request_id": request.request_id,
             "approval_token": approval_token,
+            "shell_intent": inspection.intent.category,
+            "shell_risk": inspection.intent.risk,
             **({"cwd": cwd} if cwd else {}),
         }
         result, payload = await execute_host_bridge_call(
@@ -152,30 +175,19 @@ async def run_shell_guarded(
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "return_code": result.return_code,
+                "intent": result.intent or inspection.intent.category,
+                "risk": result.risk or inspection.intent.risk,
+                "summary": result.summary or inspection.intent.summary,
                 **({"error": result.error} if result.error else {}),
                 **({"timed_out": result.timed_out} if result.timed_out else {}),
             }
         _audit(f"bridge_error:{payload['error']}", -1)
         return payload
 
-    # コマンドをトークンに分解
-    try:
-        tokens = shlex.split(normalized)
-    except ValueError as e:
-        _audit(f"invalid:{e}", -1)
-        return {
-            "error": f"Invalid command syntax: {e}",
-            "stdout": "",
-            "stderr": "",
-            "return_code": -1,
-        }
-
-    if not tokens:
-        _audit("empty", -1)
-        return {"error": "Empty command", "stdout": "", "stderr": "", "return_code": -1}
+    tokens = inspection.ast.exec_tokens
 
     # 先頭トークン（実行ファイル名）による追加チェック
-    executable = tokens[0].lstrip("./").split("/")[-1]
+    executable = inspection.ast.executable_basename or tokens[0].lstrip("./").split("/")[-1]
     # Best-effort guard only. The actual security boundary is policy.is_command_allowed()
     # above; wrappers like `bash -c ...` can bypass executable-name checks.
     BLOCKED_EXECUTABLES = {
@@ -212,6 +224,9 @@ async def run_shell_guarded(
             "stdout": stdout.decode("utf-8", errors="replace"),
             "stderr": stderr.decode("utf-8", errors="replace"),
             "return_code": process.returncode,
+            "intent": inspection.intent.category,
+            "risk": inspection.intent.risk,
+            "summary": inspection.intent.summary,
         }
 
     except asyncio.TimeoutError:

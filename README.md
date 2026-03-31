@@ -78,7 +78,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🖥️ **Reliable Computer Use** - Browser-first observe / evaluate / act / recover flows with SQLite trajectory capture
 - 🧪 **Offline Self-Improvement** - Canary worktrees, benchmark gating, candidate packaging, and cleanup
 - 🤖 **Simulation-First Physical AI** - Isaac Sim / OSMO submission, persisted validation, and ROS2-friendly dispatch envelopes
-- 💻 **Shell Execution** - Secure command execution with security policies
+- 💻 **Shell Execution** - Guarded execution with shell AST parsing, intent classification, and approvals
 - 📁 **File Operations** - Read and write support
 - 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
 - 🧠 **Memory System** - SQLite + vector search
@@ -490,6 +490,7 @@ boiled-claw/
 │   ├── security/
 │   │   ├── audit.py            # Audit logs
 │   │   ├── policy.py           # Command/path security policy
+│   │   ├── shell_intent.py     # Shell parsing + intent classification
 │   │   └── tool_policy.py      # Tool approvals / per-agent policy
 │   ├── config/
 │   │   ├── settings.py         # Pydantic settings
@@ -719,6 +720,8 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 
 - Audit logs (all operations are recorded)
 - Command blocklist
+- Shell AST parsing + intent classification before execution
+- Shell wrappers, control operators, redirections, and inline interpreter eval blocked by default
 - Path access control
 - Secret detection
 - Per-agent tool policy

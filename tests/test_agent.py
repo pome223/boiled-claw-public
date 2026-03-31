@@ -158,6 +158,16 @@ def test_security_policy():
     # 安全なコマンドは許可される
     allowed, reason = policy.is_command_allowed("ls -la")
     assert allowed
+    assert reason is None
+
+    # shell wrapper / redirection は AST ベースで拒否される
+    allowed, reason = policy.is_command_allowed('bash -lc "echo hi"')
+    assert not allowed
+    assert "Shell wrapper" in reason
+
+    allowed, reason = policy.is_command_allowed("echo hi > out.txt")
+    assert not allowed
+    assert "redirection" in reason
 
 
 def test_audit_logger():
