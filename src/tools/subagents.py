@@ -29,6 +29,7 @@ from src.config.settings import get_settings
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.runtime.session_service import create_session_service
 from src.security.audit import AuditEventType, get_audit_logger
+from src.security.tool_policy import get_tool_policy_engine
 
 _AGENT_MAP = {agent.name: agent for agent in SUB_AGENTS}
 
@@ -102,6 +103,7 @@ class SubagentRunState:
     parent_run_id: Optional[str] = None
     spawn_depth: int = 1  # root agent から何段目か (root=0, 直接 spawn=1, ...)
     dynamic_instruction: Optional[str] = None  # 動的生成エージェントのシステムプロンプト
+    propagated_approvals: int = 0
     queue: asyncio.Queue[Optional[str]] = field(default_factory=asyncio.Queue, repr=False)
     worker: Optional[asyncio.Task] = field(default=None, repr=False)
 
@@ -117,6 +119,7 @@ class SubagentRunState:
             "parent_run_id": self.parent_run_id,
             "spawn_depth": self.spawn_depth,
             "dynamic": self.dynamic_instruction is not None,
+            "propagated_approvals": self.propagated_approvals,
             "current_task": self.current_task,
             "messages_processed": self.messages_processed,
             "pending_messages": self.queue.qsize(),
@@ -450,6 +453,12 @@ class SubagentManager:
             user_id=state.user_id,
         )
         state.session_id = session.id
+        propagated = get_tool_policy_engine().propagate_approvals_to_session(
+            source_session_id=state.requester_session_id,
+            target_session_id=session.id,
+            agent_name=state.agent_name,
+        )
+        state.propagated_approvals = len(propagated)
 
         while True:
             task_message = await state.queue.get()

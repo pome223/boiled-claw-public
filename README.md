@@ -90,7 +90,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🗃️ **Redis Sessions** - Optional Redis-backed ADK session state for Gateway / CLI / channels
 - ⏰ **Cron Platform** - System event integration, delivery targets, and retry support
 - 🔌 **MCP Support** - Bundled sample MCP server supporting SSE / HTTP / stdio connections
-- 🔒 **Security** - Audit logs, command policies, tool approvals
+- 🔒 **Security** - Audit logs, command policies, and stateful tool approvals with scope / expiry / propagation
 - 📦 **Extensible** - Skill plugin system
 - 🐳 **Docker Ready** - Easy deployment with `docker compose`
 
@@ -631,7 +631,7 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `GET /transcript/sessions?user_id=...` - Transcript-backed session summaries
 - `POST /cron` / `GET /cron` - Cron platform
 - `GET /tools/policy` - Tool policy list
-- `GET /tools/approvals` - Pending approval list
+- `GET /tools/approvals` - Approval state list (`state=pending|approved|denied|propagated|expired|all`)
 
 ### Using with Telegram
 
@@ -725,6 +725,8 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - Path access control
 - Secret detection
 - Per-agent tool policy
+- Stateful tool approvals (`pending -> approved/denied -> propagated -> expired`)
+- Approval scope / tool pattern / path scope / expiry / subagent propagation metadata
 - Tool approval request / resolve (`tools.approval_request`, `tools.approval`)
 - Transcript ownership protection via Gateway API key + trusted identity header
 

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import time
 
 import pytest
 
@@ -70,6 +71,111 @@ async def test_tool_policy_request_approval_round_trip():
     assert reason == "approved in test"
     assert captured["tool_name"] == "run_shell"
     assert captured["agent_name"] == "boiled_claw"
+    assert captured["state"] == "pending"
+    assert captured["scope"] == "single"
+    assert captured["tool_pattern"] == "run_shell"
+    assert captured["propagate_to_subagents"] is False
+    assert isinstance(captured["expires_at"], float)
+
+
+@pytest.mark.asyncio
+async def test_tool_policy_reuses_session_scoped_approval(tmp_path):
+    engine = ToolPolicyEngine()
+    notifications = []
+
+    async def notifier(payload):
+        notifications.append(payload)
+        engine.resolve_approval(
+            payload["request_id"],
+            True,
+            "approved for session",
+            scope="session",
+            tool_pattern="run_shell",
+            path_scope=str(tmp_path),
+            expires_at=time.time() + 60,
+            propagate_to_subagents=True,
+        )
+
+    engine.set_notifier(notifier)
+
+    approved, reason, first_request_id = await engine.request_approval_with_id(
+        tool_name="run_shell",
+        agent_name="boiled_claw",
+        args={"command": "echo first", "cwd": str(tmp_path)},
+        session_id="session-1",
+        reason="shell commands need approval",
+    )
+    assert approved is True
+    assert reason == "approved for session"
+
+    reused_approved, reused_reason, reused_request_id = await engine.request_approval_with_id(
+        tool_name="run_shell",
+        agent_name="boiled_claw",
+        args={"command": "echo second", "cwd": str(tmp_path)},
+        session_id="session-1",
+        reason="shell commands need approval",
+    )
+    assert reused_approved is True
+    assert reused_request_id == first_request_id
+    assert "reused approved approval" in reused_reason
+    assert len(notifications) == 1
+
+
+def test_tool_policy_propagates_session_scoped_approval():
+    engine = ToolPolicyEngine()
+    approval = engine.create_approval_request(
+        request_id="req-parent",
+        tool_name="write_file",
+        agent_name="boiled_claw",
+        args={"path": "/tmp/demo.txt"},
+        session_id="session-parent",
+        reason="file writes need approval",
+    )
+    engine.resolve_approval(
+        approval.request_id,
+        True,
+        "approved for session",
+        scope="session",
+        tool_pattern="write_file",
+        path_scope="/tmp",
+        expires_at=time.time() + 60,
+        propagate_to_subagents=True,
+    )
+
+    propagated = engine.propagate_approvals_to_session(
+        source_session_id="session-parent",
+        target_session_id="session-child",
+        agent_name="web_researcher",
+    )
+
+    assert len(propagated) == 1
+    assert propagated[0]["state"] == "propagated"
+    assert propagated[0]["session_id"] == "session-child"
+    assert propagated[0]["source_request_id"] == "req-parent"
+    assert propagated[0]["propagate_to_subagents"] is True
+
+
+def test_tool_policy_marks_expired_approvals():
+    engine = ToolPolicyEngine()
+    engine.create_approval_request(
+        request_id="req-expired",
+        tool_name="run_shell",
+        agent_name="boiled_claw",
+        args={"command": "echo hi"},
+        session_id="session-1",
+        reason="shell commands need approval",
+        state="approved",
+        scope="session",
+        expires_at=time.time() - 1,
+    )
+
+    expired = engine.cleanup_expired()
+
+    assert expired == 1
+    approvals = engine.list_approvals(session_id="session-1", state="expired", include_expired=True)
+    assert len(approvals) == 1
+    assert approvals[0]["request_id"] == "req-expired"
+    assert approvals[0]["state"] == "expired"
 
 
 @pytest.mark.asyncio

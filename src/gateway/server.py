@@ -374,6 +374,13 @@ class GatewayServer:
                     agent_name=payload.get("agent_name", ""),
                     args=payload.get("args") or {},
                     reason=payload.get("reason", ""),
+                    state=payload.get("state", "pending"),
+                    scope=payload.get("scope", "single"),
+                    tool_pattern=payload.get("tool_pattern"),
+                    path_scope=payload.get("path_scope"),
+                    expires_at=payload.get("expires_at"),
+                    propagate_to_subagents=bool(payload.get("propagate_to_subagents", False)),
+                    source_request_id=payload.get("source_request_id"),
                 ),
             )
 
@@ -1612,8 +1619,19 @@ class GatewayServer:
             return self.tool_policy.list_policies()
 
         @self.app.get("/tools/approvals")
-        async def tool_approvals_list(session_id: Optional[str] = None):
-            return {"approvals": self.tool_policy.list_pending_approvals(session_id)}
+        async def tool_approvals_list(
+            session_id: Optional[str] = None,
+            state: Optional[str] = None,
+            include_expired: bool = False,
+        ):
+            selected_state = state or "pending"
+            return {
+                "approvals": self.tool_policy.list_approvals(
+                    session_id=session_id,
+                    state=selected_state,
+                    include_expired=include_expired,
+                )
+            }
 
         # --- static / chat UI ---
 
@@ -1792,8 +1810,24 @@ class GatewayServer:
                         request_id = data.get("request_id", "")
                         approved = bool(data.get("approved", False))
                         reason = data.get("reason", "")
+                        scope = data.get("scope")
+                        tool_pattern = data.get("tool_pattern")
+                        path_scope = data.get("path_scope")
+                        expires_at = data.get("expires_at")
+                        propagate_to_subagents = data.get("propagate_to_subagents")
                         result = self.tool_policy.resolve_approval(
-                            request_id, approved, reason,
+                            request_id,
+                            approved,
+                            reason,
+                            scope=scope,
+                            tool_pattern=tool_pattern,
+                            path_scope=path_scope,
+                            expires_at=expires_at if isinstance(expires_at, (int, float)) else None,
+                            propagate_to_subagents=(
+                                bool(propagate_to_subagents)
+                                if propagate_to_subagents is not None
+                                else None
+                            ),
                         )
                         control_loop_resolved = False
                         pending_control_request = None
