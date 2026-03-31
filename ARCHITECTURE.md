@@ -10,6 +10,7 @@ boiled-claw は、OpenClaw の control plane / execution plane separation を Py
 - desktop fallback と policy-bounded control loop
 - trajectory-aware verify / repair / future self-improvement
 - simulator / robotics runtime に伸ばせる physical-ready adapter surface
+- skills / bridges / browser-first tools をまとめる runtime substrate
 
 このドキュメントは現在実装されている構成を中心に説明します。physical AI 方向は forward path であり、現時点でフル robotics stack を提供するものではありません。
 
@@ -35,6 +36,11 @@ boiled-claw は、OpenClaw の control plane / execution plane separation を Py
 │  │  (Audit +    │  │  (SQLite +   │  │  (Plugins) │       │
 │  │   Policy)    │  │   Vector)    │  │            │       │
 │  └──────────────┘  └──────────────┘  └────────────┘       │
+│             ┌──────────────────────┐                        │
+│             │  Runtime Substrate   │                        │
+│             │ resource_* /         │                        │
+│             │ capability_*         │                        │
+│             └──────────────────────┘                        │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -91,7 +97,7 @@ src/
 #### Root Agent
 - **モデル**: gemini-3-flash-preview
 - **役割**: メインエージェント、全ツールにアクセス可能
-- **ツール**: web_search, browser, shell, file, memory, skills, subagents
+- **ツール**: web_search, browser, shell, file, memory, skills, runtime substrate, subagents
 - **委譲方式**: ADK `sub_agents` + `AgentTool` + `TransferToAgentTool`
 
 #### Sub Agents
@@ -147,6 +153,8 @@ src/
 - 一括開始/停止
 
 ### 4. Tools (ツール)
+
+runtime substrate により、従来は host bridge / desktop / current_tab / skills に分散していた surface を、`resource_list`, `resource_read`, `capability_list`, `capability_invoke` の 4 つで横断的に見られるようにしています。これにより Gateway の HTTP API と root agent が同じ canonical capability registry を共有します。
 
 #### web_search
 - DuckDuckGo Instant Answer API

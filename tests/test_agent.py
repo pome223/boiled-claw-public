@@ -48,6 +48,10 @@ def test_root_agent_tools():
     assert "task_get" in tool_names
     assert "task_list" in tool_names
     assert "task_update" in tool_names
+    assert "resource_list" in tool_names
+    assert "resource_read" in tool_names
+    assert "capability_list" in tool_names
+    assert "capability_invoke" in tool_names
 
 
 def test_root_agent_sub_agents_connected():
