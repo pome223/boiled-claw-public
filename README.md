@@ -84,6 +84,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🧠 **Memory System** - SQLite + vector search
 - 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
+- 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
 - 📝 **Persistent Transcript** - Gateway holds SQLite-backed session history
@@ -358,6 +359,7 @@ COMPUTER_TRAJECTORY_DB_PATH=data/computer_trajectories.db
 ```
 
 Trajectories persist the request, observation summary, attempts, verification result, and final surface. This makes recovery debugging and future repair loops inspectable instead of hidden in prompt state.
+Longer-running flows now also emit first-class task objects, so `task_get` / `task_list` can track orchestration state separately from chat history.
 
 ### 8. Offline Self-Improvement Canaries
 
@@ -382,6 +384,11 @@ Typed memory kinds are used to keep long-lived facts separate from execution tra
 - `fact`
 - `trajectory`
 - `approved_improvement`
+
+The high-level demo and search flows now create persistent task objects:
+
+- `self_improvement_demo_from_trajectory` returns one `task_id` for the end-to-end demo run
+- `self_improvement_search_from_trajectory` creates a parent search task plus candidate child tasks, then records `winner_task_id` / `loser_task_ids`
 
 CLI demo:
 
@@ -426,6 +433,25 @@ PHYSICAL_AI_VALIDATION_DB_PATH=data/physical_ai_validation.db
 Validation runs are stored in SQLite so simulation approvals survive process restarts. Status values like `ready` are not treated as validated; real dispatch requires an explicit pass / validated signal.
 
 For a simple Physical AI PoC, replay a failed `computer_*` trajectory into `physical_ai_replay_computer_trajectory`, let the adapter validate it in Isaac Sim / OSMO, and only then inspect or dispatch the ROS2 envelope.
+That replay flow now also returns a persistent `task_id` with simulation / ROS2 / dispatch artifacts attached.
+
+### 10. Task Object Layer
+
+Long-running or orchestration-heavy flows now emit persistent task objects instead of hiding all state inside chat side effects.
+
+- `task_create`, `task_get`, `task_list`, `task_update` expose a shared task surface
+- `sessions_spawn` / `sessions_spawn_dynamic` create `subagent` tasks linked to their `run_id`
+- `self_improvement_demo_from_trajectory` creates a single self-improvement task
+- `self_improvement_search_from_trajectory` creates a parent search task plus candidate child tasks with `winner_task_id` / `loser_task_ids`
+- `physical_ai_replay_computer_trajectory` creates a replay task with simulation / validation / dispatch artifacts
+
+Task objects persist:
+
+- `task_id`, `kind`, `status`, `title`
+- `artifacts` and `metadata`
+- `winner_task_id` / `loser_task_ids`
+- `approval_dependencies`
+- `run_id` for subagent-backed tasks
 
 ## Project Structure
 
@@ -460,6 +486,9 @@ boiled-claw/
 │   │   └── factory.py          # Runtime factory
 │   ├── physical_ai/
 │   │   └── validation_store.py # Persisted simulation validation store
+│   ├── runtime/
+│   │   ├── session_service.py  # Optional Redis-backed ADK sessions
+│   │   └── task_store.py       # Persistent workflow task objects
 │   ├── tools/
 │   │   ├── web_search.py       # Web search
 │   │   ├── finance.py          # Stock price lookup
@@ -475,7 +504,8 @@ boiled-claw/
 │   │   ├── self_improvement.py # Offline canary self-improvement tools
 │   │   ├── physical_ai.py      # Simulation-first physical AI adapter tools
 │   │   ├── skills.py           # Skill listing / execution
-│   │   └── subagents.py        # Sub-agent / dynamic agent management
+│   │   ├── subagents.py        # Sub-agent / dynamic agent management
+│   │   └── tasks.py            # First-class task object tools
 │   ├── mcp_servers/
 │   │   ├── sample_server.py         # Sample MCP server
 │   │   ├── host_bridge_server.py    # Host Bridge MCP server
@@ -630,6 +660,7 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `GET /sessions/{user_id}/{session_id}/history` - Transcript history
 - `GET /transcript/sessions?user_id=...` - Transcript-backed session summaries
 - `POST /cron` / `GET /cron` - Cron platform
+- `GET /tasks` / `GET /tasks/{task_id}` - Persistent workflow task objects
 - `GET /tools/policy` - Tool policy list
 - `GET /tools/approvals` - Approval state list (`state=pending|approved|denied|propagated|expired|all`)
 
@@ -656,6 +687,7 @@ The default root agent exposes these tool families:
 - `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_demo_from_trajectory`, `self_improvement_search_from_trajectory`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
 - `physical_ai_submit_simulation`, `physical_ai_validation_status`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`, `physical_ai_replay_computer_trajectory`
 - `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
+- `task_create`, `task_get`, `task_list`, `task_update`
 - `skill_list`, `skill_execute`
 
 ### Dynamic Agent Generation (sessions_spawn_dynamic)
@@ -673,6 +705,9 @@ curl -sS -X POST http://127.0.0.1:18789/agent/run \
 
 # Check execution results
 curl http://127.0.0.1:18789/subagents/{session_id}
+
+# Or inspect the persistent task object returned by sessions_spawn(_dynamic)
+curl http://127.0.0.1:18789/tasks/{task_id}
 ```
 
 **MCP Connection Types:**

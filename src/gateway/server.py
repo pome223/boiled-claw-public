@@ -60,6 +60,7 @@ from src.runtime.tool_events import set_tool_event_notifier
 from src.runtime.session_service import create_session_service
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
+from src.runtime.task_store import get_task_store
 
 _HEARTBEAT_INTERVAL = 30  # seconds
 _AGENT_TIMEOUT = 120       # seconds
@@ -338,6 +339,7 @@ class GatewayServer:
                 status=payload.get("status", ""),
                 message=payload.get("message", ""),
                 run_id=payload.get("run_id"),
+                task_id=payload.get("task_id"),
                 agent_name=payload.get("agent_name"),
             )
 
@@ -1553,6 +1555,31 @@ class GatewayServer:
         @self.app.get("/subagents/{session_id}")
         async def subagents_list_endpoint(session_id: str):
             return await self.subagent_manager.list_runs(requester_session_id=session_id)
+
+        @self.app.get("/tasks")
+        async def task_list_endpoint(
+            session_id: Optional[str] = None,
+            kind: Optional[str] = None,
+            status: Optional[str] = None,
+            parent_task_id: Optional[str] = None,
+            limit: int = 20,
+        ):
+            return {
+                "tasks": get_task_store().list(
+                    owner_session_id=session_id,
+                    kind=kind,
+                    status=status,
+                    parent_task_id=parent_task_id,
+                    limit=max(1, min(limit, 100)),
+                )
+            }
+
+        @self.app.get("/tasks/{task_id}")
+        async def task_get_endpoint(task_id: str):
+            task = get_task_store().get(task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            return {"task": task}
 
         @self.app.post("/subagents/{run_id}/steer")
         async def subagents_steer_endpoint(run_id: str, payload: Dict[str, Any] | None = Body(default=None)):
@@ -2854,6 +2881,7 @@ class GatewayServer:
         message: str,
         user_id: Optional[str] = None,
         run_id: Optional[str] = None,
+        task_id: Optional[str] = None,
         agent_name: Optional[str] = None,
     ) -> None:
         event = ev_system_event(
@@ -2861,6 +2889,7 @@ class GatewayServer:
             status=status,
             message=message,
             run_id=run_id,
+            task_id=task_id,
             agent_name=agent_name,
         )
         session = self.transcript.get_session(session_id)
@@ -2879,6 +2908,7 @@ class GatewayServer:
                     "source": source,
                     "status": status,
                     "run_id": run_id or "",
+                    "task_id": task_id or "",
                     "agent_name": agent_name or "",
                 },
             )

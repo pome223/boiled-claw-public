@@ -30,6 +30,7 @@ from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.runtime.session_service import create_session_service
 from src.security.audit import AuditEventType, get_audit_logger
 from src.security.tool_policy import get_tool_policy_engine
+from src.tools.tasks import create_task_record, update_task_record
 
 _AGENT_MAP = {agent.name: agent for agent in SUB_AGENTS}
 
@@ -86,6 +87,7 @@ def _build_mcp_toolsets(mcp_servers: list[dict]) -> list:
 @dataclass
 class SubagentRunState:
     run_id: str
+    task_id: Optional[str]
     agent_name: str
     mode: str
     requester_session_id: str
@@ -110,6 +112,7 @@ class SubagentRunState:
     def to_view(self) -> Dict[str, Any]:
         return {
             "run_id": self.run_id,
+            "task_id": self.task_id,
             "agent_name": self.agent_name,
             "mode": self.mode,
             "status": self.status,
@@ -142,6 +145,35 @@ class SubagentManager:
 
     def set_notifier(self, notifier: Optional[Callable[[Dict[str, Any]], Awaitable[None]]]) -> None:
         self._notifier = notifier
+
+    @staticmethod
+    def _task_title(agent_name: str, task: str) -> str:
+        preview = " ".join(task.split()).strip()
+        if len(preview) > 72:
+            preview = preview[:69].rstrip() + "..."
+        return f"Subagent {agent_name}: {preview or 'task'}"
+
+    def _sync_task(
+        self,
+        state: SubagentRunState,
+        *,
+        status: Optional[str] = None,
+        artifacts: Optional[dict[str, Any]] = None,
+        metadata: Optional[dict[str, Any]] = None,
+        error: Optional[str] = None,
+        approval_dependencies: Optional[list[str]] = None,
+    ) -> None:
+        if not state.task_id:
+            return
+        update_task_record(
+            state.task_id,
+            status=status or state.status,
+            artifacts=artifacts,
+            metadata=metadata,
+            error=error,
+            run_id=state.run_id,
+            approval_dependencies=approval_dependencies,
+        )
 
     async def spawn(
         self,
@@ -222,6 +254,7 @@ class SubagentManager:
 
             state = SubagentRunState(
                 run_id=run_id,
+                task_id=None,
                 agent_name=agent_name,
                 mode=normalized_mode,
                 requester_session_id=requester_session_id,
@@ -232,6 +265,29 @@ class SubagentManager:
                 spawn_depth=child_depth,
                 dynamic_instruction=_dynamic_instruction,
             )
+            task_record = create_task_record(
+                kind="subagent",
+                title=self._task_title(agent_name, task),
+                status="accepted",
+                owner_session_id=requester_session_id,
+                owner_user_id=user_id,
+                run_id=run_id,
+                approval_dependencies=[],
+                artifacts={
+                    "subagent": {
+                        "agent_name": agent_name,
+                        "mode": normalized_mode,
+                        "current_task": task,
+                        "parent_run_id": parent_run_id,
+                        "spawn_depth": child_depth,
+                    }
+                },
+                metadata={
+                    "dynamic": _dynamic_instruction is not None,
+                    "dynamic_instruction": _dynamic_instruction,
+                },
+            )
+            state.task_id = str(task_record["task_id"])
             self._runs[run_id] = state
 
         await state.queue.put(task)
@@ -253,6 +309,7 @@ class SubagentManager:
         return {
             "status": "accepted",
             "run_id": run_id,
+            "task_id": state.task_id,
             "agent_name": agent_name,
             "mode": normalized_mode,
             "requester_session_id": requester_session_id,
@@ -290,6 +347,7 @@ class SubagentManager:
         return {
             "success": True,
             "run_id": state.run_id,
+            "task_id": state.task_id,
             "status": state.status,
             "pending_messages": state.queue.qsize(),
         }
@@ -322,6 +380,12 @@ class SubagentManager:
 
         state.status = "cancelled"
         state.ended_at = time.time()
+        self._sync_task(
+            state,
+            status="cancelled",
+            artifacts={"subagent": {"killed_children": killed_children}},
+            error="cancelled",
+        )
 
         self._audit_logger.log(
             event_type=AuditEventType.AGENT_MESSAGE,
@@ -336,6 +400,7 @@ class SubagentManager:
         return {
             "success": True,
             "run_id": run_id,
+            "task_id": state.task_id,
             "status": state.status,
             "killed_children": killed_children,
         }
@@ -366,6 +431,7 @@ class SubagentManager:
                     pass
                 child.status = "cancelled"
                 child.ended_at = time.time()
+                self._sync_task(child, status="cancelled", error="cancelled")
                 killed.append(child.run_id)
 
                 self._audit_logger.log(
@@ -438,6 +504,7 @@ class SubagentManager:
             state.status = "failed"
             state.error = f"Agent not found: {state.agent_name}"
             state.ended_at = time.time()
+            self._sync_task(state, status="failed", error=state.error)
             return
 
         session_service = create_session_service()
@@ -459,6 +526,22 @@ class SubagentManager:
             agent_name=state.agent_name,
         )
         state.propagated_approvals = len(propagated)
+        dependency_ids = [
+            str(item.get("source_request_id") or item.get("request_id"))
+            for item in propagated
+            if item.get("source_request_id") or item.get("request_id")
+        ]
+        self._sync_task(
+            state,
+            status=state.status,
+            artifacts={
+                "subagent": {
+                    "session_id": session.id,
+                    "propagated_approvals": state.propagated_approvals,
+                }
+            },
+            approval_dependencies=dependency_ids,
+        )
 
         while True:
             task_message = await state.queue.get()
@@ -469,6 +552,17 @@ class SubagentManager:
                 state.started_at = time.time()
             state.status = "running"
             state.current_task = task_message
+            self._sync_task(
+                state,
+                status="running",
+                artifacts={
+                    "subagent": {
+                        "current_task": task_message,
+                        "messages_processed": state.messages_processed,
+                        "session_id": session.id,
+                    }
+                },
+            )
 
             try:
                 result_text = await self._run_agent_turn(
@@ -482,6 +576,20 @@ class SubagentManager:
                 state.last_result = (result_text or "").strip() or "(empty response)"
                 state.error = None
                 state.ended_at = time.time()
+                completion_status = "completed" if state.mode == "run" else "idle"
+                self._sync_task(
+                    state,
+                    status=completion_status,
+                    artifacts={
+                        "subagent": {
+                            "current_task": task_message,
+                            "last_result": state.last_result,
+                            "messages_processed": state.messages_processed,
+                            "session_id": session.id,
+                        }
+                    },
+                    error=None,
+                )
 
                 await self._notify(
                     state=state,
@@ -500,11 +608,24 @@ class SubagentManager:
             except asyncio.CancelledError:
                 state.status = "cancelled"
                 state.ended_at = time.time()
+                self._sync_task(state, status="cancelled", error="cancelled")
                 raise
             except Exception as exc:
                 state.error = str(exc)
                 state.status = "failed"
                 state.ended_at = time.time()
+                self._sync_task(
+                    state,
+                    status="failed",
+                    artifacts={
+                        "subagent": {
+                            "current_task": task_message,
+                            "messages_processed": state.messages_processed,
+                            "session_id": session.id,
+                        }
+                    },
+                    error=state.error,
+                )
                 await self._notify(
                     state=state,
                     message=f"[subagent:{state.agent_name}] failed ({state.run_id}): {state.error}",
@@ -558,6 +679,7 @@ class SubagentManager:
             await self._notifier(
                 {
                     "run_id": state.run_id,
+                    "task_id": state.task_id,
                     "agent_name": state.agent_name,
                     "requester_session_id": state.requester_session_id,
                     "event": event,

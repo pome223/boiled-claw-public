@@ -5,6 +5,7 @@ import pytest
 from src.computer_use.trajectory_store import ComputerTrajectoryStore
 from src.physical_ai import validation_store as validation_store_module
 from src.physical_ai.validation_store import reset_physical_ai_validation_store
+from src.runtime.task_store import get_task_store
 from src.tools import physical_ai
 
 
@@ -311,12 +312,16 @@ async def test_replay_computer_trajectory_runs_simulation_and_dry_run_dispatch(
     )
 
     assert result["success"] is True
+    assert result["task_id"].startswith("task_")
     assert result["simulation"]["run_id"] == "run-replay"
     assert result["dispatch"]["success"] is True
     assert result["dispatch"]["dry_run"] is True
     assert result["ros2_action"]["ros2_action"]["goal"]["computer_trajectory"]["id"] == trajectory_id
     assert captured_sim_request["parameters"]["computer_trajectory"]["id"] == trajectory_id
     assert captured_sim_request["parameters"]["computer_trajectory"]["status"] == "failed"
+    task = get_task_store().get(result["task_id"])
+    assert task is not None
+    assert task["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -359,9 +364,13 @@ async def test_replay_computer_trajectory_skips_dispatch_until_validation_passes
     )
 
     assert result["success"] is True
+    assert result["task_id"].startswith("task_")
     assert result["simulation"]["validated"] is False
     assert result["dispatch"] is None
     assert result["dispatch_skipped_reason"] == "simulation_not_validated"
+    task = get_task_store().get(result["task_id"])
+    assert task is not None
+    assert task["status"] == "awaiting_validation"
 
 
 @pytest.mark.asyncio
@@ -408,8 +417,12 @@ async def test_replay_computer_trajectory_bubbles_up_dispatch_failure(
     )
 
     assert result["success"] is False
+    assert result["task_id"].startswith("task_")
     assert result["dispatch"]["success"] is False
     assert result["error"] == "physical_ai_ros2_bridge_url is not configured"
+    task = get_task_store().get(result["task_id"])
+    assert task is not None
+    assert task["status"] == "failed"
 
 
 @pytest.mark.asyncio

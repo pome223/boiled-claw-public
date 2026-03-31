@@ -44,6 +44,10 @@ def test_root_agent_tools():
     assert "physical_ai_build_ros2_action" in tool_names
     assert "physical_ai_dispatch_ros2_action" in tool_names
     assert "physical_ai_replay_computer_trajectory" in tool_names
+    assert "task_create" in tool_names
+    assert "task_get" in tool_names
+    assert "task_list" in tool_names
+    assert "task_update" in tool_names
 
 
 def test_root_agent_sub_agents_connected():

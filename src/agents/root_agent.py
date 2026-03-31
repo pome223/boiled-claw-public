@@ -69,6 +69,7 @@ from src.tools.subagents import (
     subagents_list,
     subagents_steer,
 )
+from src.tools.tasks import task_create, task_get, task_list, task_update
 from src.agents.sub_agents import SUB_AGENTS
 from src.agents.model_config import DEFAULT_MODEL
 
@@ -125,7 +126,8 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 ### バックグラウンド実行の判断基準
 - 長時間タスク、並列調査、後続作業を伴う依頼では `sessions_spawn` を使う
 - 単発で短い処理は通常ツールで実行する
-- `sessions_spawn` 実行時は run_id を明示し、状態確認手段（`subagents_list` 等）を案内する
+- `sessions_spawn` 実行時は `task_id` と `run_id` を明示し、状態確認手段（`task_get`, `task_list`, `subagents_list` 等）を案内する
+- `self_improvement_*` の demo/search や `physical_ai_replay_computer_trajectory` も `task_id` を返すので、後続の追跡は `task_get` / `task_list` を優先する
 
 ## セキュリティ
 - 危険なコマンドや操作は実行前に必ず確認を取る
@@ -188,6 +190,10 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         agents_list,
         sessions_spawn,
         sessions_spawn_dynamic,
+        task_create,
+        task_get,
+        task_list,
+        task_update,
         subagents_list,
         subagents_steer,
         subagents_kill,

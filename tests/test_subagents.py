@@ -6,6 +6,7 @@ import pytest
 
 from src.tools import subagents as subagent_tools
 from src.security.tool_policy import ToolPolicyEngine
+from src.tools.tasks import task_get
 
 
 def _tool_context(user_id: str = "test-user", session_id: str = "sess-1"):
@@ -69,11 +70,18 @@ async def test_sessions_spawn_run_mode_completes(monkeypatch):
         tool_context=ctx,
     )
     assert spawn["status"] == "accepted"
+    assert spawn["task_id"].startswith("task_")
 
     run = await _wait_for_status(spawn["run_id"], ctx, {"completed"})
     assert run is not None
+    assert run["task_id"] == spawn["task_id"]
     assert run["messages_processed"] == 1
     assert "processed:collect facts" in run["last_result"]
+
+    task = await task_get(task_id=spawn["task_id"], tool_context=ctx)
+    assert task["success"] is True
+    assert task["task"]["status"] == "completed"
+    assert task["task"]["run_id"] == spawn["run_id"]
 
 
 @pytest.mark.asyncio
@@ -100,6 +108,7 @@ async def test_session_mode_supports_steer_and_kill(monkeypatch):
 
     run = await _wait_for_status(spawn["run_id"], ctx, {"idle"})
     assert run is not None
+    assert run["task_id"] == spawn["task_id"]
 
     steer = await subagent_tools.subagents_steer(
         run_id=spawn["run_id"],
@@ -122,6 +131,7 @@ async def test_session_mode_supports_steer_and_kill(monkeypatch):
     killed = await subagent_tools.subagents_kill(run_id=spawn["run_id"], tool_context=ctx)
     assert killed["success"] is True
     assert killed["status"] == "cancelled"
+    assert killed["task_id"] == spawn["task_id"]
 
 
 @pytest.mark.asyncio
@@ -168,6 +178,9 @@ async def test_sessions_spawn_propagates_parent_approvals(monkeypatch):
     run = await _wait_for_status(spawn["run_id"], ctx, {"completed"})
     assert run is not None
     assert run["propagated_approvals"] == 1
+    task = await task_get(task_id=spawn["task_id"], tool_context=ctx)
+    assert task["success"] is True
+    assert task["task"]["approval_dependencies"] == ["req-prop"]
 
     approvals = engine.list_approvals(
         session_id=run["session_id"],

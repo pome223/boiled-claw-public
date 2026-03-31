@@ -57,6 +57,10 @@ class Settings(BaseSettings):
         default=Path("data/computer_trajectories.db"),
         description="Browser-first computer-use trajectory DB path",
     )
+    task_store_db_path: Path = Field(
+        default=Path("data/tasks.db"),
+        description="SQLite DB path for persistent workflow task objects",
+    )
 
     # Subagent settings
     subagent_max_concurrent: int = Field(default=8, description="Max concurrent subagent runs globally")
@@ -188,6 +192,7 @@ class Settings(BaseSettings):
         self.memory_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.self_improvement_canary_root.mkdir(parents=True, exist_ok=True)
         self.computer_trajectory_db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.task_store_db_path.parent.mkdir(parents=True, exist_ok=True)
         self.audit_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.physical_ai_validation_db_path.parent.mkdir(parents=True, exist_ok=True)
 
