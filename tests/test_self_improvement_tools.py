@@ -8,6 +8,7 @@ from click.testing import CliRunner
 
 from src.computer_use.trajectory_store import ComputerTrajectoryStore
 from src.main import cli
+from src.runtime.task_store import get_task_store
 from src.tools import self_improvement
 
 
@@ -234,11 +235,15 @@ async def test_demo_from_failed_trajectory_runs_candidate_and_packages_diff(
     )
 
     assert result["success"] is True
+    assert result["task_id"].startswith("task_")
     assert result["goal"].startswith("Investigate failed click trajectory")
     assert result["candidate"]["success"] is True
     assert result["package"]["promotable"] is True
     assert "README.md" in result["package"]["diff_stat"]
     assert result["cleanup"]["success"] is True
+    task = get_task_store().get(result["task_id"])
+    assert task is not None
+    assert task["status"] == "completed"
 
 
 @pytest.mark.asyncio
@@ -295,8 +300,12 @@ async def test_demo_reports_candidate_command_failure_and_cleans_up(
     )
 
     assert result["success"] is False
+    assert result["task_id"].startswith("task_")
     assert result["candidate"]["success"] is False
     assert result["cleanup"]["success"] is True
+    task = get_task_store().get(result["task_id"])
+    assert task is not None
+    assert task["status"] == "failed"
 
 
 def test_cli_self_improvement_demo_invokes_tool(monkeypatch):
@@ -378,10 +387,16 @@ async def test_search_from_failed_trajectory_selects_smallest_promotable_candida
     )
 
     assert result["success"] is True
+    assert result["task_id"].startswith("task_")
     assert result["winner_name"] == "small-fix"
     assert result["winner"]["package"]["promotable"] is True
     assert result["winner"]["cleanup"]["success"] is True
+    assert result["winner"]["task_id"].startswith("task_")
+    parent_task = get_task_store().get(result["task_id"])
+    assert parent_task is not None
+    assert parent_task["winner_task_id"] == result["winner"]["task_id"]
     losing = next(candidate for candidate in result["candidates"] if candidate["name"] == "large-fix")
+    assert losing["task_id"].startswith("task_")
     assert losing["cleanup"]["success"] is True
 
 
@@ -425,10 +440,15 @@ async def test_search_reports_failure_when_no_candidate_is_promotable(
     )
 
     assert result["success"] is False
+    assert result["task_id"].startswith("task_")
     assert result["error"] == "No promotable candidate found"
     assert result["winner_name"] == "broken-fix"
     assert result["winner"]["package"]["promotable"] is False
+    assert result["winner"]["task_id"].startswith("task_")
     assert result["winner"]["cleanup"]["success"] is True
+    parent_task = get_task_store().get(result["task_id"])
+    assert parent_task is not None
+    assert parent_task["status"] == "failed"
 
 
 def test_cli_self_improvement_search_invokes_tool(monkeypatch):

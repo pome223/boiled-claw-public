@@ -127,6 +127,7 @@ async def test_spawn_dynamic_no_mcp_servers():
 
     assert result["status"] == "accepted"
     assert result["run_id"].startswith("dyn_")
+    assert result["task_id"].startswith("task_")
     assert result["mode"] == "run"
 
 

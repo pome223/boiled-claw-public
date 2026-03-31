@@ -19,14 +19,14 @@ Client -> Server:
   presence.ping       (no data)
   tools.approval      request_id, approved (bool), reason?, scope?, tool_pattern?, path_scope?, expires_at?, propagate_to_subagents?
 
-Server -> Client:
+  Server -> Client:
   connected           session_id, user_id, protocol_version
   chat.done           text, request_id?, aborted
   chat.token          text, request_id?
   chat.history        entries[], session_id
   tool.start          tool_name, agent_name, args, metadata?
   tool.result         tool_name, agent_name, ok, result, metadata?
-  system.event        source, status, message, run_id?, agent_name?
+  system.event        source, status, message, run_id?, task_id?, agent_name?
   health.tick         active_sessions, ts
   cron.update         job_id, status, message
   tools.approval_request  request_id, tool_name, agent_name, args, reason, state, scope, tool_pattern, path_scope, expires_at, propagate_to_subagents
@@ -209,6 +209,7 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "status": {"type": "string"},
             "message": {"type": "string"},
             "run_id": {"type": "string"},
+            "task_id": {"type": "string"},
             "agent_name": {"type": "string"},
             "ts": {"type": "number"},
         },
@@ -434,6 +435,7 @@ def ev_system_event(
     status: str,
     message: str,
     run_id: Optional[str] = None,
+    task_id: Optional[str] = None,
     agent_name: Optional[str] = None,
 ) -> dict[str, Any]:
     d = _base("system.event")
@@ -442,6 +444,8 @@ def ev_system_event(
     d["message"] = message
     if run_id:
         d["run_id"] = run_id
+    if task_id:
+        d["task_id"] = task_id
     if agent_name:
         d["agent_name"] = agent_name
     return d

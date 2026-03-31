@@ -17,6 +17,7 @@ from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
 from src.tools.memory import memory_store
 from src.tools.shell import run_shell_guarded
+from src.tools.tasks import create_task_record, update_task_record
 
 
 _STATE_DIRNAME = ".boiled-claw-self-improvement"
@@ -601,6 +602,23 @@ async def self_improvement_demo_from_trajectory(
 
     resolved_goal = goal or _trajectory_demo_goal(trajectory)
     resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
+    task_record = create_task_record(
+        kind="self_improvement_demo",
+        title=resolved_goal,
+        status="running",
+        artifacts={
+            "trajectory": trajectory,
+            "goal": resolved_goal,
+            "improvement_summary": resolved_summary,
+        },
+        metadata={
+            "trajectory_id": trajectory_id,
+            "record_as_approved": record_as_approved,
+            "auto_cleanup": auto_cleanup,
+        },
+        tool_context=tool_context,
+    )
+    task_id = str(task_record["task_id"])
 
     prepare = await self_improvement_prepare_canary(
         goal=resolved_goal,
@@ -610,8 +628,15 @@ async def self_improvement_demo_from_trajectory(
         tool_context=tool_context,
     )
     if not prepare.get("success"):
+        update_task_record(
+            task_id,
+            status="failed",
+            artifacts={"prepare": prepare},
+            error=prepare.get("error") or prepare.get("stderr") or "failed to prepare canary",
+        )
         return {
             "success": False,
+            "task_id": task_id,
             "trajectory": trajectory,
             "prepare": prepare,
             "error": prepare.get("error") or prepare.get("stderr") or "failed to prepare canary",
@@ -639,6 +664,7 @@ async def self_improvement_demo_from_trajectory(
     if not candidate.get("success"):
         payload = {
             "success": False,
+            "task_id": task_id,
             "trajectory": trajectory,
             "prepare": prepare,
             "candidate": candidate,
@@ -649,6 +675,12 @@ async def self_improvement_demo_from_trajectory(
                 canary_path=str(canary),
                 tool_context=tool_context,
             )
+        update_task_record(
+            task_id,
+            status="failed",
+            artifacts={key: value for key, value in payload.items() if key in {"prepare", "candidate", "cleanup"}},
+            error=payload["error"],
+        )
         return payload
 
     packaged = await self_improvement_package_candidate(
@@ -662,6 +694,7 @@ async def self_improvement_demo_from_trajectory(
     )
     payload = {
         "success": bool(packaged.get("success")),
+        "task_id": task_id,
         "trajectory": trajectory,
         "prepare": prepare,
         "candidate": candidate,
@@ -674,6 +707,12 @@ async def self_improvement_demo_from_trajectory(
             canary_path=str(canary),
             tool_context=tool_context,
         )
+    update_task_record(
+        task_id,
+        status="completed" if payload["success"] else "failed",
+        artifacts={key: value for key, value in payload.items() if key in {"prepare", "candidate", "package", "cleanup"}},
+        error=None if payload["success"] else packaged.get("error"),
+    )
     return payload
 
 
@@ -711,6 +750,24 @@ async def self_improvement_search_from_trajectory(
 
     resolved_goal = goal or _trajectory_search_goal(trajectory)
     resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
+    parent_task = create_task_record(
+        kind="self_improvement_search",
+        title=resolved_goal,
+        status="running",
+        artifacts={
+            "trajectory": trajectory,
+            "goal": resolved_goal,
+            "improvement_summary": resolved_summary,
+        },
+        metadata={
+            "trajectory_id": trajectory_id,
+            "record_winner_as_approved": record_winner_as_approved,
+            "cleanup_losers": cleanup_losers,
+            "auto_cleanup": auto_cleanup,
+        },
+        tool_context=tool_context,
+    )
+    parent_task_id = str(parent_task["task_id"])
 
     candidates: list[dict[str, Any]] = []
     winner_index: int | None = None
@@ -737,12 +794,33 @@ async def self_improvement_search_from_trajectory(
             "index": index,
             "goal": candidate_goal,
             "improvement_summary": candidate_summary,
-            "prepare": prepare,
         }
+        candidate_task = create_task_record(
+            kind="self_improvement_candidate",
+            title=candidate_goal,
+            status="running",
+            parent_task_id=parent_task_id,
+            artifacts={
+                "trajectory_id": trajectory_id,
+                "candidate_name": candidate_name,
+                "goal": candidate_goal,
+                "improvement_summary": candidate_summary,
+            },
+            metadata={"candidate_index": index},
+            tool_context=tool_context,
+        )
+        candidate_result["task_id"] = candidate_task["task_id"]
+        candidate_result["prepare"] = prepare
         if not prepare.get("success"):
             candidate_result["success"] = False
             candidate_result["error"] = (
                 prepare.get("error") or prepare.get("stderr") or "failed to prepare canary"
+            )
+            update_task_record(
+                str(candidate_task["task_id"]),
+                status="failed",
+                artifacts={"prepare": prepare},
+                error=candidate_result["error"],
             )
             candidates.append(candidate_result)
             continue
@@ -777,6 +855,16 @@ async def self_improvement_search_from_trajectory(
                     canary_path=str(canary),
                     tool_context=tool_context,
                 )
+            update_task_record(
+                str(candidate_task["task_id"]),
+                status="failed",
+                artifacts={
+                    key: value
+                    for key, value in candidate_result.items()
+                    if key in {"prepare", "candidate", "cleanup"}
+                },
+                error=candidate_result["error"],
+            )
             candidates.append(candidate_result)
             continue
 
@@ -794,6 +882,16 @@ async def self_improvement_search_from_trajectory(
         candidate_result["success"] = bool(packaged.get("success"))
         if not packaged.get("success"):
             candidate_result["error"] = packaged.get("error") or "failed to package candidate"
+        update_task_record(
+            str(candidate_task["task_id"]),
+            status="completed" if candidate_result["success"] else "failed",
+            artifacts={
+                key: value
+                for key, value in candidate_result.items()
+                if key in {"prepare", "candidate", "package", "diff_metrics", "ranking_key"}
+            },
+            error=candidate_result.get("error"),
+        )
         ranking_key = _candidate_ranking_key(candidate_result)
         candidate_result["ranking_key"] = list(ranking_key)
         if winner_key is None or ranking_key > winner_key:
@@ -839,9 +937,14 @@ async def self_improvement_search_from_trajectory(
                 canary_path=str(canary_path),
                 tool_context=tool_context,
             )
+            update_task_record(
+                str(candidate.get("task_id")),
+                artifacts={"cleanup": candidate["cleanup"]},
+            )
 
     payload = {
         "success": bool(winner and winner.get("package", {}).get("promotable")),
+        "task_id": parent_task_id,
         "trajectory": trajectory,
         "goal": resolved_goal,
         "improvement_summary": resolved_summary,
@@ -852,4 +955,20 @@ async def self_improvement_search_from_trajectory(
         payload["winner_name"] = winner.get("name")
     if not payload["success"]:
         payload["error"] = "No promotable candidate found"
+    candidate_task_ids = [str(candidate.get("task_id")) for candidate in candidates if candidate.get("task_id")]
+    winner_task_id = str(winner.get("task_id")) if winner and winner.get("task_id") else None
+    loser_task_ids = [task_id for task_id in candidate_task_ids if task_id != winner_task_id]
+    update_task_record(
+        parent_task_id,
+        status="completed" if payload["success"] else "failed",
+        winner_task_id=winner_task_id,
+        loser_task_ids=loser_task_ids,
+        artifacts={
+            "candidate_count": len(candidates),
+            "candidate_task_ids": candidate_task_ids,
+            "winner_name": payload.get("winner_name"),
+            "winner_task_id": winner_task_id,
+        },
+        error=payload.get("error"),
+    )
     return payload

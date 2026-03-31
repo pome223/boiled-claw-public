@@ -18,6 +18,7 @@ from src.physical_ai.validation_store import (
 )
 from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
+from src.tools.tasks import create_task_record, update_task_record
 
 
 def reset_physical_ai_validation_runs() -> None:
@@ -380,6 +381,20 @@ async def physical_ai_replay_computer_trajectory(
         return {"success": False, "error": f"Unknown computer trajectory: {trajectory_id}"}
 
     trajectory_context = _trajectory_context(trajectory)
+    task_record = create_task_record(
+        kind="physical_ai_replay",
+        title=f"Physical replay for trajectory {trajectory_id}",
+        status="running",
+        artifacts={"trajectory": trajectory_context},
+        metadata={
+            "trajectory_id": trajectory_id,
+            "adapter": adapter,
+            "workflow": workflow,
+            "scenario": scenario,
+        },
+        tool_context=tool_context,
+    )
+    task_id = str(task_record["task_id"])
     simulation_parameters = json.loads(simulation_parameters_json) if simulation_parameters_json else {}
     simulation_parameters["computer_trajectory"] = trajectory_context
 
@@ -393,8 +408,15 @@ async def physical_ai_replay_computer_trajectory(
         tool_context=tool_context,
     )
     if not simulation.get("success"):
+        update_task_record(
+            task_id,
+            status="failed",
+            artifacts={"simulation": simulation},
+            error=simulation.get("error") or "simulation submit failed",
+        )
         return {
             "success": False,
+            "task_id": task_id,
             "error": simulation.get("error") or "simulation submit failed",
             "trajectory": trajectory_context,
             "simulation": simulation,
@@ -419,6 +441,7 @@ async def physical_ai_replay_computer_trajectory(
 
     payload = {
         "success": True,
+        "task_id": task_id,
         "trajectory": trajectory_context,
         "simulation": simulation,
         "ros2_action": ros2_action,
@@ -426,6 +449,15 @@ async def physical_ai_replay_computer_trajectory(
     if not simulation.get("validated"):
         payload["dispatch"] = None
         payload["dispatch_skipped_reason"] = "simulation_not_validated"
+        update_task_record(
+            task_id,
+            status="awaiting_validation",
+            artifacts={
+                "simulation": simulation,
+                "ros2_action": ros2_action,
+                "dispatch_skipped_reason": payload["dispatch_skipped_reason"],
+            },
+        )
         return payload
 
     dispatch = await physical_ai_dispatch_ros2_action(
@@ -439,4 +471,14 @@ async def physical_ai_replay_computer_trajectory(
     payload["success"] = bool(dispatch.get("success"))
     if not dispatch.get("success"):
         payload["error"] = dispatch.get("error") or "dispatch failed"
+    update_task_record(
+        task_id,
+        status="completed" if payload["success"] else "failed",
+        artifacts={
+            "simulation": simulation,
+            "ros2_action": ros2_action,
+            "dispatch": dispatch,
+        },
+        error=payload.get("error"),
+    )
     return payload
