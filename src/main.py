@@ -464,6 +464,73 @@ def self_improvement_demo(
         raise click.Abort()
 
 
+@cli.command("self-improvement-search")
+@click.option("--trajectory-id", type=int, required=True, help="Failed computer trajectory id to search from.")
+@click.option(
+    "--candidate-spec",
+    "candidate_specs",
+    multiple=True,
+    required=True,
+    help=(
+        "JSON object describing one candidate, for example "
+        "'{\"name\":\"small-fix\",\"commands\":[\"python3 scripts/apply_fix.py\"]}'. "
+        "Repeat for multiple candidates."
+    ),
+)
+@click.option(
+    "--benchmark-command",
+    "benchmark_commands",
+    multiple=True,
+    required=True,
+    help="Benchmark command to gate every candidate. Repeat for multiple steps.",
+)
+@click.option("--repo-path", default=None, help="Repository root to create the canary from.")
+@click.option("--base-ref", default="HEAD", help="Git ref used to seed the canary.")
+@click.option("--worktree-root", default=None, help="Directory where canary worktrees should be created.")
+@click.option("--goal", default=None, help="Override the generated search goal.")
+@click.option("--summary", default=None, help="Override the generated improvement summary.")
+@click.option("--timeout-seconds", default=0, type=int, help="Timeout for candidate and benchmark commands.")
+@click.option("--record-winner-as-approved", is_flag=True, default=False, help="Record the winning candidate as approved memory.")
+@click.option("--cleanup-losers/--keep-losers", default=True, help="Remove losing canaries after comparison.")
+@click.option("--auto-cleanup", is_flag=True, default=False, help="Also remove the winning canary after packaging.")
+def self_improvement_search(
+    trajectory_id,
+    candidate_specs,
+    benchmark_commands,
+    repo_path,
+    base_ref,
+    worktree_root,
+    goal,
+    summary,
+    timeout_seconds,
+    record_winner_as_approved,
+    cleanup_losers,
+    auto_cleanup,
+):
+    """Search across multiple canaries for the best repair candidate."""
+    from src.tools.self_improvement import self_improvement_search_from_trajectory
+
+    result = asyncio.run(
+        self_improvement_search_from_trajectory(
+            trajectory_id=trajectory_id,
+            candidate_specs_json=json.dumps([json.loads(spec) for spec in candidate_specs], ensure_ascii=False),
+            benchmark_commands="\n".join(benchmark_commands),
+            repo_path=repo_path,
+            base_ref=base_ref,
+            worktree_root=worktree_root,
+            goal=goal,
+            improvement_summary=summary,
+            timeout_seconds=timeout_seconds,
+            record_winner_as_approved=record_winner_as_approved,
+            cleanup_losers=cleanup_losers,
+            auto_cleanup=auto_cleanup,
+        )
+    )
+    console.print_json(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result.get("success"):
+        raise click.Abort()
+
+
 # ── bridge group (host / desktop) ───────────────────────────────
 
 

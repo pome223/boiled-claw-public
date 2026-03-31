@@ -366,6 +366,7 @@ The self-improvement slice is intentionally offline and benchmark-gated:
 - `self_improvement_prepare_canary` creates an isolated git worktree for a candidate change
 - `self_improvement_run_benchmarks` executes guarded shell commands inside that canary
 - `self_improvement_demo_from_trajectory` runs a failed computer trajectory through one canary -> candidate -> benchmark -> package flow
+- `self_improvement_search_from_trajectory` fans one failed computer trajectory out into multiple canaries, compares benchmarked candidates, and keeps the winner
 - `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, and can record approved changes into memory
 - `self_improvement_cleanup_canary` removes the worktree and deletes the canary branch when finished
 
@@ -388,6 +389,16 @@ CLI demo:
 boiled-claw self-improvement-demo \
   --trajectory-id 42 \
   --candidate-command "python3 scripts/apply_fix.py" \
+  --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q"
+```
+
+Search demo:
+
+```bash
+boiled-claw self-improvement-search \
+  --trajectory-id 42 \
+  --candidate-spec '{"name":"small-fix","commands":["python3 scripts/apply_small_fix.py"]}' \
+  --candidate-spec '{"name":"bolder-fix","commands":["python3 scripts/apply_bolder_fix.py"]}' \
   --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q"
 ```
 
@@ -641,7 +652,7 @@ The default root agent exposes these tool families:
 - `desktop_view_*`, `desktop_wait_*`, `desktop_runtime_*`, `desktop_control_*`
 - `run_shell`, `read_file`, `write_file`
 - `memory_store`, `memory_search`, `memory_stats`, `memory_delete`
-- `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_demo_from_trajectory`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
+- `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_demo_from_trajectory`, `self_improvement_search_from_trajectory`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
 - `physical_ai_submit_simulation`, `physical_ai_validation_status`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`, `physical_ai_replay_computer_trajectory`
 - `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
 - `skill_list`, `skill_execute`
