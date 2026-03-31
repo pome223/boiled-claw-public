@@ -107,10 +107,10 @@ async def _run_cli(
 ):
     """CLIモードでエージェントを実行する"""
     from google.adk.runners import Runner
-    from google.adk.sessions import InMemorySessionService
     from google.genai import types
     from src.config.settings import get_settings
     from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
+    from src.runtime.session_service import create_session_service
     from src.skills.runtime import ensure_skills_loaded
     from src.cli.repl import handle_slash_command
 
@@ -139,7 +139,7 @@ async def _run_cli(
         console.print("[green]Config OK. Dry-run mode — exiting.[/green]")
         return
 
-    session_service = InMemorySessionService()
+    session_service = create_session_service(settings)
     memory_service = get_promoted_memory_service()
     runner = Runner(
         agent=root_agent,
@@ -259,17 +259,17 @@ async def _run_channels():
     from src.channels.telegram import TelegramChannel
     from src.channels.discord_ch import DiscordChannel
     from google.adk.runners import Runner
-    from google.adk.sessions import InMemorySessionService
     from src.agents.root_agent import root_agent
     from google.genai import types
     from src.skills.runtime import ensure_skills_loaded
     from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
+    from src.runtime.session_service import create_session_service
 
     settings = get_settings()
     await ensure_skills_loaded()
     registry = get_channel_registry()
 
-    session_service = InMemorySessionService()
+    session_service = create_session_service(settings)
     memory_service = get_promoted_memory_service()
     runner = Runner(
         agent=root_agent,
@@ -356,6 +356,7 @@ def status():
     cfg_table.add_row("Gateway", f"{settings.gateway_host}:{settings.gateway_port}")
     cfg_table.add_row("Shell Enabled", str(settings.shell_enabled))
     cfg_table.add_row("Browser Headless", str(settings.browser_headless))
+    cfg_table.add_row("Redis Sessions", settings.redis_url or "-")
     cfg_table.add_row("API Key Set", "yes" if os.getenv("GOOGLE_API_KEY") else "no")
     console.print(cfg_table)
 
