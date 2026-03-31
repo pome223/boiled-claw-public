@@ -46,6 +46,7 @@ from src.tools.desktop import (
 from src.tools.memory import memory_store, memory_search, memory_stats, memory_delete
 from src.tools.self_improvement import (
     self_improvement_cleanup_canary,
+    self_improvement_demo_from_trajectory,
     self_improvement_package_candidate,
     self_improvement_prepare_canary,
     self_improvement_run_benchmarks,
@@ -229,6 +230,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         memory_delete,
         self_improvement_prepare_canary,
         self_improvement_run_benchmarks,
+        self_improvement_demo_from_trajectory,
         self_improvement_package_candidate,
         self_improvement_cleanup_canary,
         physical_ai_submit_simulation,

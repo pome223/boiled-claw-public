@@ -1,9 +1,43 @@
+import asyncio
 import subprocess
 from pathlib import Path
 
 import pytest
+from click.testing import CliRunner
 
+from src.computer_use.trajectory_store import ComputerTrajectoryStore
+from src.main import cli
 from src.tools import self_improvement
+
+
+@pytest.fixture(autouse=True)
+def _local_shell_only(monkeypatch):
+    """Force run_shell_guarded to use local subprocess, bypassing Host Bridge."""
+    import src.tools.shell as shell_module
+
+    original = shell_module.run_shell_guarded
+
+    async def _patched(command, timeout=30, cwd=None, tool_context=None):
+        tokens = command.split()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *tokens,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)
+            return {
+                "stdout": stdout.decode(errors="replace"),
+                "stderr": stderr.decode(errors="replace"),
+                "return_code": process.returncode,
+            }
+        except asyncio.TimeoutError:
+            return {"stdout": "", "stderr": f"Timed out after {timeout}s", "return_code": None}
+        except Exception as e:
+            return {"stdout": "", "stderr": str(e), "return_code": -1, "error": str(e)}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _patched)
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -29,6 +63,13 @@ def git_repo(tmp_path):
     _git(repo, "add", "README.md")
     _git(repo, "commit", "-m", "init")
     return repo
+
+
+@pytest.fixture
+def computer_trajectory_store(tmp_path, monkeypatch):
+    store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
+    monkeypatch.setattr(self_improvement, "get_computer_trajectory_store", lambda: store)
+    return store
 
 
 @pytest.mark.asyncio
@@ -147,3 +188,138 @@ async def test_cleanup_canary_removes_worktree_and_branch(git_repo, tmp_path):
     assert cleanup["success"] is True
     assert cleanup["worktree_removed"] is True
     assert Path(prepare["canary_path"]).exists() is False
+
+
+@pytest.mark.asyncio
+async def test_demo_from_failed_trajectory_runs_candidate_and_packages_diff(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+):
+    trajectory_id = computer_trajectory_store.record(
+        action="click",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={"status": "fail", "success": False},
+        request={"selector": "#save"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        canary = Path(cwd)
+        if command == "apply-demo-fix":
+            (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+            return {"stdout": "patched", "stderr": "", "return_code": 0}
+        if command == "verify-demo-fix":
+            content = (canary / "README.md").read_text(encoding="utf-8")
+            return {
+                "stdout": "verified" if "world" in content else "",
+                "stderr": "" if "world" in content else "missing world",
+                "return_code": 0 if "world" in content else 1,
+            }
+        return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+
+    result = await self_improvement.self_improvement_demo_from_trajectory(
+        trajectory_id=trajectory_id,
+        candidate_commands="apply-demo-fix",
+        benchmark_commands="verify-demo-fix",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+        auto_cleanup=True,
+    )
+
+    assert result["success"] is True
+    assert result["goal"].startswith("Investigate failed click trajectory")
+    assert result["candidate"]["success"] is True
+    assert result["package"]["promotable"] is True
+    assert "README.md" in result["package"]["diff_stat"]
+    assert result["cleanup"]["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_demo_rejects_non_failed_trajectory(computer_trajectory_store):
+    trajectory_id = computer_trajectory_store.record(
+        action="fill",
+        status="success",
+        final_surface="browser",
+        attempts=[],
+        verification=None,
+        request={"selector": "#query"},
+        observation={"preferred_surface": "browser", "available_surfaces": ["browser"]},
+    )
+
+    result = await self_improvement.self_improvement_demo_from_trajectory(
+        trajectory_id=trajectory_id,
+        candidate_commands="apply-demo-fix",
+        benchmark_commands="verify-demo-fix",
+    )
+
+    assert result["success"] is False
+    assert "must have status=failed" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_demo_reports_candidate_command_failure_and_cleans_up(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+):
+    trajectory_id = computer_trajectory_store.record(
+        action="click",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[],
+        verification=None,
+        request={"selector": "#save"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        return {"stdout": "", "stderr": "boom", "return_code": 1}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+
+    result = await self_improvement.self_improvement_demo_from_trajectory(
+        trajectory_id=trajectory_id,
+        candidate_commands="apply-demo-fix",
+        benchmark_commands="verify-demo-fix",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+        auto_cleanup=True,
+    )
+
+    assert result["success"] is False
+    assert result["candidate"]["success"] is False
+    assert result["cleanup"]["success"] is True
+
+
+def test_cli_self_improvement_demo_invokes_tool(monkeypatch):
+    async def _demo(**kwargs):
+        assert kwargs["trajectory_id"] == 7
+        assert kwargs["candidate_commands"] == "apply-demo-fix"
+        assert kwargs["benchmark_commands"] == "verify-demo-fix"
+        return {"success": True, "trajectory": {"id": 7}}
+
+    monkeypatch.setattr(self_improvement, "self_improvement_demo_from_trajectory", _demo)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "self-improvement-demo",
+            "--trajectory-id",
+            "7",
+            "--candidate-command",
+            "apply-demo-fix",
+            "--benchmark-command",
+            "verify-demo-fix",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert '"id": 7' in result.output
