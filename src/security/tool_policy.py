@@ -1,5 +1,5 @@
 """
-Tool-level security with per-agent policies and approval forwarding.
+Tool-level security with per-agent policies and stateful approvals.
 
 Policy evaluation order:
   1. Check agent-specific rules (if any)
@@ -16,12 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+from pathlib import Path
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Literal, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Tuple
 
 Action = Literal["allow", "deny", "approve"]
+ApprovalState = Literal["pending", "approved", "denied", "propagated", "expired"]
+ApprovalScope = Literal["single", "session"]
+
+_DEFAULT_APPROVAL_TTL_SECONDS = 300.0
+_PATH_ARG_KEYS = ("path", "cwd", "source_path", "dest_path", "target_path")
+_PATH_LIST_KEYS = ("paths",)
 
 
 @dataclass
@@ -32,6 +39,7 @@ class ToolRule:
     action: what to do when matched
     reason: human-readable explanation
     """
+
     tool_pattern: str
     action: Action
     reason: str = ""
@@ -43,6 +51,7 @@ class ToolRule:
 @dataclass
 class AgentPolicy:
     """Policy for a specific agent."""
+
     agent_name: str
     rules: List[ToolRule] = field(default_factory=list)
     fallback: Action = "deny"
@@ -52,6 +61,74 @@ class AgentPolicy:
             if rule.matches(tool_name):
                 return rule.action, rule.reason or f"matched rule: {rule.tool_pattern}"
         return self.fallback, f"fallback policy for agent '{self.agent_name}'"
+
+
+@dataclass
+class ApprovalRecord:
+    """First-class tool approval with lifecycle and propagation metadata."""
+
+    request_id: str
+    tool_name: str
+    agent_name: str
+    args: Dict[str, Any]
+    session_id: str
+    reason: str
+    created_at: float
+    state: ApprovalState = "pending"
+    scope: ApprovalScope = "single"
+    tool_pattern: str = "*"
+    path_scope: Optional[str] = None
+    expires_at: Optional[float] = None
+    propagate_to_subagents: bool = False
+    approved: bool = False
+    resolve_reason: str = ""
+    resolved_at: Optional[float] = None
+    source_request_id: Optional[str] = None
+
+    @property
+    def resolved(self) -> bool:
+        return self.state != "pending"
+
+    def is_expired(self, now: Optional[float] = None) -> bool:
+        if self.expires_at is None:
+            return False
+        return (now or time.time()) >= self.expires_at
+
+    def matches_tool(self, tool_name: str) -> bool:
+        return fnmatch.fnmatch(tool_name, self.tool_pattern)
+
+    def matches_args(self, args: Mapping[str, Any]) -> bool:
+        if not self.path_scope:
+            return True
+        requested_paths = _extract_path_candidates(args)
+        if not requested_paths:
+            return False
+        for path in requested_paths:
+            if _path_within_scope(path, self.path_scope):
+                return True
+        return False
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "tool_name": self.tool_name,
+            "agent_name": self.agent_name,
+            "args": self.args,
+            "session_id": self.session_id,
+            "reason": self.reason,
+            "created_at": self.created_at,
+            "state": self.state,
+            "scope": self.scope,
+            "tool_pattern": self.tool_pattern,
+            "path_scope": self.path_scope,
+            "expires_at": self.expires_at,
+            "propagate_to_subagents": self.propagate_to_subagents,
+            "resolved": self.resolved,
+            "approved": self.approved,
+            "resolve_reason": self.resolve_reason,
+            "resolved_at": self.resolved_at,
+            "source_request_id": self.source_request_id,
+        }
 
 
 # Default rules: broad allow for safe tools, approve for dangerous ones
@@ -88,6 +165,69 @@ _DEFAULT_RULES: List[ToolRule] = [
 ]
 
 
+def _normalize_scope(scope: Optional[str], default: ApprovalScope = "single") -> ApprovalScope:
+    normalized = (scope or default).strip().lower()
+    if normalized not in {"single", "session"}:
+        return default
+    return normalized  # type: ignore[return-value]
+
+
+def _normalize_path(value: Any, *, cwd: Optional[str] = None) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    path = Path(text).expanduser()
+    if not path.is_absolute() and cwd:
+        path = Path(cwd).expanduser() / path
+    try:
+        return str(path.resolve(strict=False))
+    except Exception:
+        return str(path)
+
+
+def _extract_path_candidates(args: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(args, Mapping):
+        return []
+
+    cwd = _normalize_path(args.get("cwd")) if isinstance(args.get("cwd"), str) else None
+    seen: set[str] = set()
+    candidates: list[str] = []
+
+    for key in _PATH_ARG_KEYS:
+        candidate = _normalize_path(args.get(key), cwd=cwd)
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            candidates.append(candidate)
+
+    for key in _PATH_LIST_KEYS:
+        values = args.get(key)
+        if not isinstance(values, list):
+            continue
+        for item in values:
+            candidate = _normalize_path(item, cwd=cwd)
+            if candidate and candidate not in seen:
+                seen.add(candidate)
+                candidates.append(candidate)
+
+    return candidates
+
+
+def _derive_default_path_scope(args: Mapping[str, Any] | None) -> Optional[str]:
+    candidates = _extract_path_candidates(args)
+    return candidates[0] if candidates else None
+
+
+def _path_within_scope(path: str, scope: str) -> bool:
+    try:
+        path_obj = Path(path).expanduser().resolve(strict=False)
+        scope_obj = Path(scope).expanduser().resolve(strict=False)
+        return path_obj == scope_obj or scope_obj in path_obj.parents
+    except Exception:
+        return path == scope or path.startswith(scope.rstrip("/") + "/")
+
+
 class ToolPolicyEngine:
     """Evaluate tool execution permissions per agent."""
 
@@ -98,7 +238,7 @@ class ToolPolicyEngine:
             fallback="deny",
         )
         self._agent_policies: Dict[str, AgentPolicy] = {}
-        self._pending_approvals: Dict[str, _PendingApproval] = {}
+        self._approvals: Dict[str, ApprovalRecord] = {}
         self._approval_waiters: Dict[str, asyncio.Future[tuple[bool, str]]] = {}
         self._notifier: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None
 
@@ -143,26 +283,20 @@ class ToolPolicyEngine:
         }
 
     def evaluate(self, agent_name: str, tool_name: str) -> Tuple[Action, str]:
-        """Evaluate whether a tool call is allowed.
-
-        Returns (action, reason) tuple.
-        """
-        # Check agent-specific policy first
+        """Evaluate whether a tool call is allowed."""
         agent_policy = self._agent_policies.get(agent_name)
         if agent_policy:
             action, reason = agent_policy.evaluate(tool_name)
             if action != "deny" or agent_policy.fallback != "deny":
                 return action, reason
-            # If agent policy has deny fallback and no match, also check default
             for rule in agent_policy.rules:
                 if rule.matches(tool_name):
                     return action, reason
 
-        # Fall back to default policy
         return self._default_policy.evaluate(tool_name)
 
     # ------------------------------------------------------------------
-    # Approval request tracking
+    # Approval state machine
     # ------------------------------------------------------------------
 
     def create_approval_request(
@@ -173,17 +307,39 @@ class ToolPolicyEngine:
         args: Optional[Dict[str, Any]] = None,
         session_id: Optional[str] = None,
         reason: str = "",
-    ) -> _PendingApproval:
-        approval = _PendingApproval(
+        *,
+        scope: ApprovalScope = "single",
+        tool_pattern: Optional[str] = None,
+        path_scope: Optional[str] = None,
+        expires_at: Optional[float] = None,
+        propagate_to_subagents: bool = False,
+        state: ApprovalState = "pending",
+        source_request_id: Optional[str] = None,
+    ) -> ApprovalRecord:
+        created_at = time.time()
+        approval = ApprovalRecord(
             request_id=request_id,
             tool_name=tool_name,
             agent_name=agent_name,
             args=args or {},
             session_id=session_id or "",
             reason=reason,
-            created_at=time.time(),
+            created_at=created_at,
+            state=state,
+            scope=scope,
+            tool_pattern=tool_pattern or tool_name,
+            path_scope=_normalize_path(path_scope) if path_scope else _derive_default_path_scope(args or {}),
+            expires_at=expires_at if expires_at is not None else created_at + _DEFAULT_APPROVAL_TTL_SECONDS,
+            propagate_to_subagents=propagate_to_subagents,
+            source_request_id=source_request_id,
         )
-        self._pending_approvals[request_id] = approval
+        if approval.state in {"approved", "propagated"}:
+            approval.approved = True
+            approval.resolved_at = created_at
+        elif approval.state == "denied":
+            approval.approved = False
+            approval.resolved_at = created_at
+        self._approvals[request_id] = approval
         return approval
 
     def resolve_approval(
@@ -191,42 +347,178 @@ class ToolPolicyEngine:
         request_id: str,
         approved: bool,
         reason: str = "",
-    ) -> Optional[_PendingApproval]:
-        approval = self._pending_approvals.pop(request_id, None)
-        if approval:
-            approval.resolved = True
-            approval.approved = approved
-            approval.resolve_reason = reason
-            approval.resolved_at = time.time()
-            waiter = self._approval_waiters.pop(request_id, None)
-            if waiter and not waiter.done():
-                waiter.set_result((approved, reason))
+        *,
+        scope: Optional[str] = None,
+        tool_pattern: Optional[str] = None,
+        path_scope: Optional[str] = None,
+        expires_at: Optional[float] = None,
+        propagate_to_subagents: Optional[bool] = None,
+    ) -> Optional[ApprovalRecord]:
+        approval = self._approvals.get(request_id)
+        if approval is None or approval.state != "pending":
+            return None
+
+        approval.scope = _normalize_scope(scope, approval.scope)
+        if tool_pattern:
+            approval.tool_pattern = tool_pattern
+        if path_scope is not None:
+            approval.path_scope = _normalize_path(path_scope)
+        if expires_at is not None:
+            approval.expires_at = expires_at
+        if propagate_to_subagents is not None:
+            approval.propagate_to_subagents = propagate_to_subagents
+
+        approval.approved = approved
+        approval.resolve_reason = reason
+        approval.resolved_at = time.time()
+        approval.state = "approved" if approved else "denied"
+
+        waiter = self._approval_waiters.pop(request_id, None)
+        if waiter and not waiter.done():
+            waiter.set_result((approved, reason))
         return approval
 
-    def get_pending_approval(self, request_id: str) -> Optional[_PendingApproval]:
-        return self._pending_approvals.get(request_id)
+    def get_pending_approval(self, request_id: str) -> Optional[ApprovalRecord]:
+        approval = self._approvals.get(request_id)
+        if approval and approval.state == "pending":
+            return approval
+        return None
 
     def list_pending_approvals(
-        self, session_id: Optional[str] = None,
+        self,
+        session_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        approvals = list(self._pending_approvals.values())
-        if session_id:
-            approvals = [a for a in approvals if a.session_id == session_id]
-        return [a.to_dict() for a in approvals]
+        return self.list_approvals(session_id=session_id, state="pending")
 
-    def cleanup_expired(self, max_age: float = 300.0) -> int:
-        """Remove approval requests older than max_age seconds."""
+    def list_approvals(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        state: Optional[str] = None,
+        include_expired: bool = False,
+    ) -> List[Dict[str, Any]]:
+        self.cleanup_expired()
+        approvals = list(self._approvals.values())
+        if session_id:
+            approvals = [item for item in approvals if item.session_id == session_id]
+        if state and state.lower() != "all":
+            approvals = [item for item in approvals if item.state == state]
+        if not include_expired:
+            approvals = [item for item in approvals if item.state != "expired"]
+        approvals.sort(key=lambda item: item.created_at, reverse=True)
+        return [item.to_dict() for item in approvals]
+
+    def cleanup_expired(self, max_age: float = _DEFAULT_APPROVAL_TTL_SECONDS) -> int:
+        """Expire old approval requests and grants without deleting history."""
         now = time.time()
-        expired = [
-            rid for rid, a in self._pending_approvals.items()
-            if now - a.created_at > max_age
-        ]
-        for rid in expired:
-            self._pending_approvals.pop(rid, None)
-            waiter = self._approval_waiters.pop(rid, None)
+        expired_count = 0
+        for approval in self._approvals.values():
+            expired = False
+            if approval.state == "pending" and now - approval.created_at > max_age:
+                expired = True
+            elif approval.state in {"approved", "propagated"} and approval.is_expired(now):
+                expired = True
+            if not expired or approval.state == "expired":
+                continue
+
+            approval.state = "expired"
+            approval.approved = False
+            approval.resolve_reason = approval.resolve_reason or "approval expired"
+            approval.resolved_at = approval.resolved_at or now
+            expired_count += 1
+
+            waiter = self._approval_waiters.pop(approval.request_id, None)
             if waiter and not waiter.done():
-                waiter.cancel()
-        return len(expired)
+                waiter.set_result((False, "approval expired"))
+        return expired_count
+
+    def propagate_approvals_to_session(
+        self,
+        *,
+        source_session_id: str,
+        target_session_id: str,
+        agent_name: str = "",
+    ) -> List[Dict[str, Any]]:
+        self.cleanup_expired()
+        if not source_session_id or not target_session_id or source_session_id == target_session_id:
+            return []
+
+        propagated: list[ApprovalRecord] = []
+        for approval in sorted(self._approvals.values(), key=lambda item: item.created_at):
+            if approval.session_id != source_session_id:
+                continue
+            if approval.state not in {"approved", "propagated"}:
+                continue
+            if approval.scope != "session" or not approval.propagate_to_subagents:
+                continue
+            if approval.is_expired():
+                continue
+            if self._has_existing_propagation(
+                source_request_id=approval.request_id,
+                target_session_id=target_session_id,
+            ):
+                continue
+            propagated.append(
+                self.create_approval_request(
+                    request_id=f"apg_{uuid.uuid4().hex[:12]}",
+                    tool_name=approval.tool_name,
+                    agent_name=agent_name or approval.agent_name,
+                    args=dict(approval.args),
+                    session_id=target_session_id,
+                    reason=approval.reason,
+                    scope=approval.scope,
+                    tool_pattern=approval.tool_pattern,
+                    path_scope=approval.path_scope,
+                    expires_at=approval.expires_at,
+                    propagate_to_subagents=approval.propagate_to_subagents,
+                    state="propagated",
+                    source_request_id=approval.request_id,
+                )
+            )
+        return [item.to_dict() for item in propagated]
+
+    def _has_existing_propagation(
+        self,
+        *,
+        source_request_id: str,
+        target_session_id: str,
+    ) -> bool:
+        for approval in self._approvals.values():
+            if approval.session_id != target_session_id:
+                continue
+            if approval.state not in {"approved", "propagated"}:
+                continue
+            if approval.source_request_id == source_request_id:
+                return True
+        return False
+
+    def _find_matching_approval(
+        self,
+        *,
+        tool_name: str,
+        session_id: str,
+        args: Optional[Mapping[str, Any]] = None,
+    ) -> Optional[ApprovalRecord]:
+        self.cleanup_expired()
+        candidates = [
+            approval
+            for approval in self._approvals.values()
+            if approval.session_id == session_id
+            and approval.state in {"approved", "propagated"}
+            and approval.scope == "session"
+            and approval.matches_tool(tool_name)
+            and approval.matches_args(args or {})
+        ]
+        if not candidates:
+            return None
+        candidates.sort(
+            key=lambda item: (
+                item.state != "propagated",
+                item.resolved_at or item.created_at,
+            ),
+            reverse=True,
+        )
+        return candidates[0]
 
     async def request_approval(
         self,
@@ -236,7 +528,7 @@ class ToolPolicyEngine:
         args: Optional[Dict[str, Any]] = None,
         session_id: str,
         reason: str = "",
-        timeout: float = 300.0,
+        timeout: float = _DEFAULT_APPROVAL_TTL_SECONDS,
     ) -> Tuple[bool, str]:
         approved, resolve_reason, _request_id = await self.request_approval_with_id(
             tool_name=tool_name,
@@ -256,11 +548,20 @@ class ToolPolicyEngine:
         args: Optional[Dict[str, Any]] = None,
         session_id: str,
         reason: str = "",
-        timeout: float = 300.0,
+        timeout: float = _DEFAULT_APPROVAL_TTL_SECONDS,
     ) -> Tuple[bool, str, str]:
         """Request approval and wait for a user response."""
         if not session_id:
             return False, "approval requires a valid session_id", ""
+
+        reusable = self._find_matching_approval(
+            tool_name=tool_name,
+            session_id=session_id,
+            args=args or {},
+        )
+        if reusable is not None:
+            return True, f"reused {reusable.state} approval", reusable.request_id
+
         if self._notifier is None:
             return False, "approval channel is unavailable", ""
 
@@ -272,6 +573,11 @@ class ToolPolicyEngine:
             args=args,
             session_id=session_id,
             reason=reason,
+            scope="single",
+            tool_pattern=tool_name,
+            path_scope=_derive_default_path_scope(args or {}),
+            expires_at=time.time() + max(timeout, 1.0),
+            propagate_to_subagents=False,
         )
 
         loop = asyncio.get_running_loop()
@@ -281,51 +587,20 @@ class ToolPolicyEngine:
         try:
             await self._notifier(approval.to_dict())
         except Exception as exc:
-            self._pending_approvals.pop(request_id, None)
+            self._approvals.pop(request_id, None)
             self._approval_waiters.pop(request_id, None)
             return False, f"failed to deliver approval request: {exc}", request_id
 
         try:
             approved, resolve_reason = await asyncio.wait_for(waiter, timeout=timeout)
         except asyncio.TimeoutError:
-            self._pending_approvals.pop(request_id, None)
-            self._approval_waiters.pop(request_id, None)
+            self.cleanup_expired(max_age=timeout)
             return False, "approval timed out", request_id
         except asyncio.CancelledError:
-            self._pending_approvals.pop(request_id, None)
             self._approval_waiters.pop(request_id, None)
             raise
 
         return approved, resolve_reason, request_id
-
-
-@dataclass
-class _PendingApproval:
-    request_id: str
-    tool_name: str
-    agent_name: str
-    args: Dict[str, Any]
-    session_id: str
-    reason: str
-    created_at: float
-    resolved: bool = False
-    approved: bool = False
-    resolve_reason: str = ""
-    resolved_at: Optional[float] = None
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "request_id": self.request_id,
-            "tool_name": self.tool_name,
-            "agent_name": self.agent_name,
-            "args": self.args,
-            "session_id": self.session_id,
-            "reason": self.reason,
-            "created_at": self.created_at,
-            "resolved": self.resolved,
-            "approved": self.approved,
-            "resolve_reason": self.resolve_reason,
-        }
 
 
 # Global singleton

@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
@@ -1030,6 +1031,91 @@ def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
                 )
                 for entry in history
             )
+
+
+def test_http_tool_approvals_list_exposes_stateful_metadata(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        approval = gateway.tool_policy.create_approval_request(
+            request_id="req-stateful",
+            tool_name="run_shell",
+            agent_name="boiled_claw",
+            args={"command": "echo hi", "cwd": str(tmp_path)},
+            session_id="sess-stateful",
+            reason="shell commands need approval",
+        )
+        gateway.tool_policy.resolve_approval(
+            approval.request_id,
+            True,
+            "approved for session",
+            scope="session",
+            tool_pattern="run_shell",
+            path_scope=str(tmp_path),
+            expires_at=time.time() + 60,
+            propagate_to_subagents=True,
+        )
+
+        response = client.get(
+            "/tools/approvals",
+            params={
+                "session_id": "sess-stateful",
+                "state": "all",
+            },
+        )
+
+    assert response.status_code == 200
+    approvals = response.json()["approvals"]
+    assert len(approvals) == 1
+    assert approvals[0]["state"] == "approved"
+    assert approvals[0]["scope"] == "session"
+    assert approvals[0]["tool_pattern"] == "run_shell"
+    assert approvals[0]["path_scope"] == str(tmp_path.resolve())
+    assert approvals[0]["propagate_to_subagents"] is True
+
+
+def test_websocket_tool_approval_resolution_accepts_scope_fields(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            session_id = connected["session_id"]
+
+            gateway.tool_policy.create_approval_request(
+                request_id="req-ws-stateful",
+                tool_name="write_file",
+                agent_name="boiled_claw",
+                args={"path": str(tmp_path / "note.txt")},
+                session_id=session_id,
+                reason="file writes need approval",
+            )
+            ws.send_json(
+                {
+                    "event": "tools.approval",
+                    "request_id": "req-ws-stateful",
+                    "approved": True,
+                    "reason": "approved in test",
+                    "scope": "session",
+                    "tool_pattern": "write_*",
+                    "path_scope": str(tmp_path),
+                    "expires_at": time.time() + 60,
+                    "propagate_to_subagents": True,
+                }
+            )
+            resolved = ws.receive_json()
+            assert resolved["event"] == "system.event"
+            assert resolved["status"] == "resolved"
+
+    approvals = gateway.tool_policy.list_approvals(
+        session_id=session_id,
+        state="approved",
+    )
+    assert len(approvals) == 1
+    assert approvals[0]["scope"] == "session"
+    assert approvals[0]["tool_pattern"] == "write_*"
+    assert approvals[0]["path_scope"] == str(tmp_path.resolve())
+    assert approvals[0]["propagate_to_subagents"] is True
 
 
 def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_path):

@@ -17,7 +17,7 @@ Client -> Server:
   chat.abort          request_id?
   chat.history        session_id?, limit?, before?
   presence.ping       (no data)
-  tools.approval      request_id, approved (bool), reason?
+  tools.approval      request_id, approved (bool), reason?, scope?, tool_pattern?, path_scope?, expires_at?, propagate_to_subagents?
 
 Server -> Client:
   connected           session_id, user_id, protocol_version
@@ -29,7 +29,7 @@ Server -> Client:
   system.event        source, status, message, run_id?, agent_name?
   health.tick         active_sessions, ts
   cron.update         job_id, status, message
-  tools.approval_request  request_id, tool_name, agent_name, args, reason
+  tools.approval_request  request_id, tool_name, agent_name, args, reason, state, scope, tool_pattern, path_scope, expires_at, propagate_to_subagents
   control.approval_request  request_id, plan_id, goal, risk_level, required_capabilities, plan
 """
 
@@ -117,6 +117,11 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "request_id": {"type": "string"},
             "approved": {"type": "boolean"},
             "reason": {"type": "string"},
+            "scope": {"type": "string", "enum": ["single", "session"]},
+            "tool_pattern": {"type": "string"},
+            "path_scope": {"type": "string"},
+            "expires_at": {"type": "number"},
+            "propagate_to_subagents": {"type": "boolean"},
         },
     },
     # --- Server -> Client ---
@@ -231,6 +236,13 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "agent_name": {"type": "string"},
             "args": {"type": "object"},
             "reason": {"type": "string"},
+            "state": {"type": "string", "enum": ["pending", "approved", "denied", "propagated", "expired"]},
+            "scope": {"type": "string", "enum": ["single", "session"]},
+            "tool_pattern": {"type": "string"},
+            "path_scope": {"type": "string"},
+            "expires_at": {"type": "number"},
+            "propagate_to_subagents": {"type": "boolean"},
+            "source_request_id": {"type": "string"},
             "ts": {"type": "number"},
         },
     },
@@ -455,12 +467,29 @@ def ev_tools_approval_request(
     agent_name: str,
     args: Optional[dict[str, Any]] = None,
     reason: str = "",
+    state: str = "pending",
+    scope: str = "single",
+    tool_pattern: Optional[str] = None,
+    path_scope: Optional[str] = None,
+    expires_at: Optional[float] = None,
+    propagate_to_subagents: bool = False,
+    source_request_id: Optional[str] = None,
 ) -> dict[str, Any]:
     d = _base("tools.approval_request", request_id)
     d["tool_name"] = tool_name
     d["agent_name"] = agent_name
     d["args"] = args or {}
     d["reason"] = reason
+    d["state"] = state
+    d["scope"] = scope
+    d["tool_pattern"] = tool_pattern or tool_name
+    if path_scope:
+        d["path_scope"] = path_scope
+    if expires_at is not None:
+        d["expires_at"] = expires_at
+    d["propagate_to_subagents"] = propagate_to_subagents
+    if source_request_id:
+        d["source_request_id"] = source_request_id
     return d
 
 
