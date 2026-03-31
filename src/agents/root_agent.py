@@ -60,7 +60,14 @@ from src.tools.physical_ai import (
     physical_ai_submit_simulation,
     physical_ai_validation_status,
 )
-from src.tools.skills import skill_list, skill_execute
+from src.tools.skills import (
+    capability_invoke,
+    capability_list,
+    resource_list,
+    resource_read,
+    skill_execute,
+    skill_list,
+)
 from src.tools.subagents import (
     agents_list,
     sessions_spawn,
@@ -95,6 +102,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - **マルチチャネル** - Telegram, Discord, WebSocket経由のアクセス
 - **タスク自動化** - 複雑なタスクを段階的に実行
 - **Skills** - ローカル skills ディレクトリのプラグイン実行
+- **Runtime substrate** - Skills / bridges / browser / desktop capabilities を共通 registry として列挙・起動
 
 ## アーキテクチャ
 - Gateway: WebSocketベースの制御プレーン (ws://127.0.0.1:18789)
@@ -102,6 +110,7 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - Memory: SQLite + ベクトル検索
 - Security: 監査ログ、コマンドポリシー
 - Skills: プラグイン拡張システム
+- Runtime substrate: resource / capability registry over skills + bridges
 
 ## 行動原則
 - ユーザーのリクエストを明確に理解してから行動する
@@ -170,6 +179,11 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
 - desktop_control_click / type は座標だけでなく Accessibility selector でも指定できる
 - desktop_control_scroll で前面 UI をスクロールできる
 - desktop_control_click / type / hotkey / drag / scroll / launch_app / focus_window は高リスク操作なので、承認が必要な場合がある
+
+## Runtime substrate
+- `resource_list` / `resource_read` で skills と bridge resources を列挙・参照できる
+- `capability_list` で shell / file / browser / current_tab / desktop / skill capabilities を共通形式で確認できる
+- `capability_invoke` は dot-name capability を JSON 引数付きで直接起動する
 
 ## マルチエージェント委譲（Google ADK準拠）
 - 単純な検索・ファイル操作・シェル実行は直接ツールを使う（委譲しない）
@@ -246,6 +260,10 @@ OpenClaw にインスパイアされた、マルチチャネル対応のAIエー
         physical_ai_build_ros2_action,
         physical_ai_dispatch_ros2_action,
         physical_ai_replay_computer_trajectory,
+        resource_list,
+        resource_read,
+        capability_list,
+        capability_invoke,
         skill_list,
         skill_execute,
     ],

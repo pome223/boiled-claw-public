@@ -86,6 +86,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
+- 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
 - 📝 **Persistent Transcript** - Gateway holds SQLite-backed session history
 - 🗃️ **Redis Sessions** - Optional Redis-backed ADK session state for Gateway / CLI / channels
@@ -102,9 +103,11 @@ Inspired by OpenClaw's control plane / execution plane separation, boiled-claw i
 - **Gateway (Docker / control plane)**: Routing, session, transcript, cron, approvals, UI event stream
 - **Host Bridge (host OS / execution plane)**: Runs shell, file, and browser operations in a separate process on the host
 - **Desktop Bridge (host OS / desktop capability plane)**: Runtime for GUI automation, Accessibility, and emergency stop
+- **Runtime substrate (common registry plane)**: Canonical resources / capabilities over skills + bridges + browser-first surfaces
 
 The desktop core lives in `src/desktop/`, with bridges hanging off it as adapters.
 Common capability / ping schemas are placed in `src/bridges/common_schema.py` to ensure the desktop runtime does not depend on the host bridge schema.
+The runtime substrate then lifts those scattered tools into `resource_list`, `resource_read`, `capability_list`, and `capability_invoke`, so Gateway HTTP routes and the root agent can inspect skills and bridge-backed surfaces through one canonical layer.
 
 ```mermaid
 flowchart LR
@@ -128,6 +131,7 @@ flowchart LR
         DesktopRuntime["runtime / view / control"]
     end
 
+    RuntimeRegistry["Runtime substrate<br/>resource_* / capability_*"]
     MCP["MCP servers"]
     Skills["Skills / plugins"]
 
@@ -137,6 +141,10 @@ flowchart LR
     ControlLoop --> Memory
     ControlLoop --> MCP
     ControlLoop --> Skills
+    ControlLoop --> RuntimeRegistry
+    RuntimeRegistry --> Skills
+    RuntimeRegistry --> HostTools
+    RuntimeRegistry --> DesktopRuntime
     ControlLoop --> HostTools
     ControlLoop --> DesktopRuntime
     HostTools --> CurrentTab
@@ -661,6 +669,8 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `GET /transcript/sessions?user_id=...` - Transcript-backed session summaries
 - `POST /cron` / `GET /cron` - Cron platform
 - `GET /tasks` / `GET /tasks/{task_id}` - Persistent workflow task objects
+- `GET /runtime/resources` / `GET /runtime/resources/{resource_id}` - Runtime substrate resources
+- `GET /runtime/capabilities` / `POST /runtime/capabilities/invoke` - Canonical capability registry and invoke surface
 - `GET /tools/policy` - Tool policy list
 - `GET /tools/approvals` - Approval state list (`state=pending|approved|denied|propagated|expired|all`)
 
@@ -688,6 +698,7 @@ The default root agent exposes these tool families:
 - `physical_ai_submit_simulation`, `physical_ai_validation_status`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`, `physical_ai_replay_computer_trajectory`
 - `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
 - `task_create`, `task_get`, `task_list`, `task_update`
+- `resource_list`, `resource_read`, `capability_list`, `capability_invoke`
 - `skill_list`, `skill_execute`
 
 ### Dynamic Agent Generation (sessions_spawn_dynamic)
@@ -747,6 +758,8 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - For backward compatibility, the legacy `skills/*.py` format is still loaded.
 - After the Gateway starts, check loading status via `GET /skills`.
 - Use `skill_list` and `skill_execute` to inspect and run bundled skill content.
+- Use `resource_list` / `resource_read` to inspect bundled skills and bridge resources through one canonical surface.
+- Use `capability_list` / `capability_invoke` when you want a transport-neutral registry over shell, file, browser, current-tab, desktop, and skill capabilities.
 - Bundled skills include `skills/auto-fix/SKILL.md`, `skills/code-review/SKILL.md`, `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, `skills/e2e-test/SKILL.md`, and `skills/multi-llm-judge/SKILL.md`.
 - `skills/computer-use/SKILL.md` is the repo-local entry point for the browser-first computer-use stack.
 - `skills/e2e-test/SKILL.md` includes smoke checks for skill loading and recent computer-use / CLI surfaces.

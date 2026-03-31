@@ -126,6 +126,74 @@ def test_chat_ui_and_static_assets_disable_caching(monkeypatch, tmp_path):
         assert app_js_response.headers["expires"] == "0"
 
 
+def test_protocol_exposes_runtime_substrate_metadata(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.get("/protocol")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "GET /runtime/resources" in payload["http_surfaces"]
+    assert payload["runtime_substrate"]["capabilities"]["invoke_route"] == "POST /runtime/capabilities/invoke"
+
+
+def test_runtime_substrate_http_surfaces(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_resource_list():
+        return {"count": 1, "resources": [{"id": "bridge:host"}]}
+
+    async def _fake_resource_read(resource_id: str, refresh: bool = False):
+        return {"ok": True, "resource": {"id": resource_id, "refresh": refresh}}
+
+    async def _fake_capability_list(refresh: bool = False):
+        return {"count": 1, "refresh": refresh, "capabilities": [{"name": "shell.run"}]}
+
+    async def _fake_capability_invoke(name: str, params_json: str = "{}"):
+        return {"success": True, "capability": name, "result": {"params_json": params_json}}
+
+    monkeypatch.setattr(server_module, "tool_resource_list", _fake_resource_list)
+    monkeypatch.setattr(server_module, "tool_resource_read", _fake_resource_read)
+    monkeypatch.setattr(server_module, "tool_capability_list", _fake_capability_list)
+    monkeypatch.setattr(server_module, "tool_capability_invoke", _fake_capability_invoke)
+
+    with TestClient(gateway.app) as client:
+        resources = client.get("/runtime/resources")
+        assert resources.status_code == 200
+        assert resources.json()["resources"][0]["id"] == "bridge:host"
+
+        resource = client.get("/runtime/resources/skill:computer-use", params={"refresh": "true"})
+        assert resource.status_code == 200
+        assert resource.json()["resource"]["id"] == "skill:computer-use"
+        assert resource.json()["resource"]["refresh"] is True
+
+        capabilities = client.get("/runtime/capabilities", params={"refresh": "true"})
+        assert capabilities.status_code == 200
+        assert capabilities.json()["refresh"] is True
+
+        invoke = client.post(
+            "/runtime/capabilities/invoke",
+            json={"name": "shell.run", "params": {"command": "pwd"}},
+        )
+        assert invoke.status_code == 200
+        assert invoke.json()["capability"] == "shell.run"
+        assert '"command": "pwd"' in invoke.json()["result"]["params_json"]
+
+
+def test_runtime_capability_invoke_rejects_approval_required_http_calls(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/runtime/capabilities/invoke",
+            json={"name": "shell.run", "params": {"command": "pwd"}},
+        )
+
+    assert response.status_code == 403
+    assert "requires tool_context-backed approval flow" in response.json()["detail"]
+
+
 def test_gateway_package_exports_remain_available():
     import src.gateway as gateway_pkg
 

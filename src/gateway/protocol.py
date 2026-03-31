@@ -19,6 +19,12 @@ Client -> Server:
   presence.ping       (no data)
   tools.approval      request_id, approved (bool), reason?, scope?, tool_pattern?, path_scope?, expires_at?, propagate_to_subagents?
 
+HTTP surfaces:
+  GET  /runtime/resources
+  GET  /runtime/resources/{resource_id}
+  GET  /runtime/capabilities
+  POST /runtime/capabilities/invoke
+
   Server -> Client:
   connected           session_id, user_id, protocol_version
   chat.done           text, request_id?, aborted
@@ -262,6 +268,87 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "reason": {"type": "string"},
             "ts": {"type": "number"},
         },
+    },
+}
+
+
+HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "GET /runtime/resources": {
+        "description": "List runtime resources such as bridge surfaces and loaded skills.",
+        "response": {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer"},
+                "resources": {"type": "array"},
+            },
+        },
+    },
+    "GET /runtime/resources/{resource_id}": {
+        "description": "Read a runtime resource by id (for example skill:<name> or bridge:host).",
+        "query": {"refresh": {"type": "boolean"}},
+        "response": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "resource": {"type": "object"},
+                "message": {"type": "string"},
+            },
+        },
+    },
+    "GET /runtime/capabilities": {
+        "description": "List canonical runtime capabilities across skills, browser, current_tab, desktop, and host surfaces.",
+        "query": {"refresh": {"type": "boolean"}},
+        "response": {
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer"},
+                "refresh": {"type": "boolean"},
+                "capabilities": {"type": "array"},
+            },
+        },
+    },
+    "POST /runtime/capabilities/invoke": {
+        "description": "Invoke a canonical runtime capability by dot name with JSON params.",
+        "request": {
+            "type": "object",
+            "required": ["name"],
+            "properties": {
+                "name": {"type": "string"},
+                "params": {"type": "object"},
+            },
+        },
+        "response": {
+            "type": "object",
+            "properties": {
+                "success": {"type": "boolean"},
+                "capability": {"type": "string"},
+                "provider": {"type": "string"},
+                "transport": {"type": "string"},
+                "result": {"type": "object"},
+                "error": {"type": "string"},
+            },
+        },
+    },
+}
+
+RUNTIME_SUBSTRATE_SCHEMA: dict[str, Any] = {
+    "resources": {
+        "list_route": "GET /runtime/resources",
+        "read_route": "GET /runtime/resources/{resource_id}",
+        "resource_kinds": ["bridge", "skill"],
+    },
+    "capabilities": {
+        "list_route": "GET /runtime/capabilities",
+        "invoke_route": "POST /runtime/capabilities/invoke",
+        "canonical_prefixes": [
+            "skill",
+            "shell",
+            "file",
+            "browser",
+            "control_ui_chat",
+            "current_tab",
+            "desktop",
+        ],
     },
 }
 

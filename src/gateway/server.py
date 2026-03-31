@@ -39,11 +39,21 @@ from src.security.tool_policy import get_tool_policy_engine
 from src.tools.finance import is_direct_stock_price_query, stock_price
 from src.tools.web_search import web_search
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
-from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
+from src.tools.skills import (
+    capability_invoke as tool_capability_invoke,
+    capability_list as tool_capability_list,
+    resource_list as tool_resource_list,
+    resource_read as tool_resource_read,
+    skill_execute as tool_skill_execute,
+    skill_list as tool_skill_list,
+)
 from src.tools.memory import memory_search, memory_stats, memory_delete
 from src.tools.subagents import get_subagent_manager, set_subagent_notifier
 from src.gateway.protocol import (
+    EVENT_SCHEMAS,
+    HTTP_ROUTE_SCHEMAS,
     PROTOCOL_VERSION,
+    RUNTIME_SUBSTRATE_SCHEMA,
     ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
     ev_health_tick, ev_cron_update, ev_tools_approval_request,
     ev_control_approval_request,
@@ -1234,11 +1244,12 @@ class GatewayServer:
 
         @self.app.get("/protocol")
         async def protocol_info():
-            from src.gateway.protocol import EVENT_SCHEMAS
             return {
                 "version": PROTOCOL_VERSION,
                 "events": list(EVENT_SCHEMAS.keys()),
                 "schemas": EVENT_SCHEMAS,
+                "http_surfaces": HTTP_ROUTE_SCHEMAS,
+                "runtime_substrate": RUNTIME_SUBSTRATE_SCHEMA,
             }
 
         # --- skills ---
@@ -1258,6 +1269,42 @@ class GatewayServer:
             result = await tool_skill_execute(skill_name, json.dumps(params, ensure_ascii=False))
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result.get("message", "Skill execution failed"))
+            return result
+
+        # --- runtime substrate ---
+
+        @self.app.get("/runtime/resources")
+        async def runtime_resources():
+            return await tool_resource_list()
+
+        @self.app.get("/runtime/resources/{resource_id:path}")
+        async def runtime_resource(resource_id: str, refresh: bool = Query(default=False)):
+            result = await tool_resource_read(resource_id, refresh=refresh)
+            if not result.get("ok"):
+                raise HTTPException(status_code=404, detail=result.get("message", "Resource not found"))
+            return result
+
+        @self.app.get("/runtime/capabilities")
+        async def runtime_capabilities(refresh: bool = Query(default=False)):
+            return await tool_capability_list(refresh=refresh)
+
+        @self.app.post("/runtime/capabilities/invoke")
+        async def runtime_capability_invoke(payload: Dict[str, Any] | None = Body(default=None)):
+            if not payload or not isinstance(payload.get("name"), str) or not payload.get("name"):
+                raise HTTPException(status_code=400, detail="name is required")
+            params = payload.get("params") or {}
+            if not isinstance(params, dict):
+                raise HTTPException(status_code=400, detail="params must be an object")
+            result = await tool_capability_invoke(
+                payload["name"],
+                json.dumps(params, ensure_ascii=False),
+            )
+            if not result.get("success") and str(result.get("error", "")).startswith("Unknown capability:"):
+                raise HTTPException(status_code=400, detail=result["error"])
+            if not result.get("success") and "requires tool_context-backed approval flow" in str(
+                result.get("error", "")
+            ):
+                raise HTTPException(status_code=403, detail=result["error"])
             return result
 
         # --- sessions ---

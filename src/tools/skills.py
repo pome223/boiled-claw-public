@@ -10,6 +10,12 @@ from typing import Any, Dict, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.runtime.capability_registry import (
+    invoke_runtime_capability,
+    list_runtime_capabilities,
+    list_runtime_resources,
+    read_runtime_resource,
+)
 from src.skills.base import get_skill_registry
 from src.skills.runtime import ensure_skills_loaded
 from src.tools.subagents import sessions_spawn_dynamic
@@ -110,3 +116,42 @@ async def skill_spawn(
         "spawn": spawn,
         **({"message": spawn.get("error")} if not ok else {}),
     }
+
+
+async def resource_list() -> Dict[str, Any]:
+    """Runtime substrate resources (skills / bridges) を列挙する。"""
+    return await list_runtime_resources()
+
+
+async def resource_read(resource_id: str, refresh: bool = False) -> Dict[str, Any]:
+    """Runtime substrate resource を読む。"""
+    return await read_runtime_resource(resource_id, refresh=refresh)
+
+
+async def capability_list(refresh: bool = False) -> Dict[str, Any]:
+    """Runtime substrate capability を列挙する。"""
+    return await list_runtime_capabilities(refresh=refresh)
+
+
+async def capability_invoke(
+    name: str,
+    params_json: str = "{}",
+    tool_context: Optional[ToolContext] = None,
+) -> Dict[str, Any]:
+    """Runtime substrate capability を呼び出す。"""
+    try:
+        params = json.loads(params_json) if params_json.strip() else {}
+        if not isinstance(params, dict):
+            return {
+                "success": False,
+                "capability": name,
+                "error": "params_json must decode to object",
+            }
+    except json.JSONDecodeError as exc:
+        return {
+            "success": False,
+            "capability": name,
+            "error": f"Invalid params_json: {exc}",
+        }
+
+    return await invoke_runtime_capability(name, params=params, tool_context=tool_context)
