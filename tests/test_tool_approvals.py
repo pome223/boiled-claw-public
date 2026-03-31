@@ -96,6 +96,81 @@ async def test_run_shell_waits_for_approval(monkeypatch):
 
     assert result["return_code"] == 0
     assert "approved" in result["stdout"]
+    assert result["intent"] == "unknown"
+    assert result["risk"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_run_shell_returns_intent_metadata(monkeypatch):
+    engine = ToolPolicyEngine()
+    captured = {}
+
+    async def notifier(payload):
+        captured.update(payload)
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(shell_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        shell_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=False),
+    )
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await shell_module.run_shell("rg approvals tests", tool_context=tool_context)
+
+    assert result["return_code"] == 0
+    assert result["intent"] == "search"
+    assert result["risk"] == "low"
+    assert captured["args"]["shell_intent"]["category"] == "search"
+    assert captured["args"]["shell_ast"]["executable_basename"] == "rg"
+
+
+@pytest.mark.asyncio
+async def test_run_shell_blocks_shell_wrapper(monkeypatch):
+    monkeypatch.setattr(
+        shell_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=False),
+    )
+
+    result = await shell_module.run_shell('bash -lc "echo hi"')
+
+    assert result["return_code"] == -1
+    assert "Shell wrapper" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_shell_blocks_redirection(monkeypatch):
+    monkeypatch.setattr(
+        shell_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=False),
+    )
+
+    result = await shell_module.run_shell("echo hi > out.txt")
+
+    assert result["return_code"] == -1
+    assert "redirection" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_run_shell_blocks_compact_inline_eval(monkeypatch):
+    monkeypatch.setattr(
+        shell_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=False),
+    )
+
+    result = await shell_module.run_shell('python3 -c"print(1)"')
+
+    assert result["return_code"] == -1
+    assert "Inline interpreter evaluation" in result["error"]
 
 
 @pytest.mark.asyncio
@@ -115,6 +190,9 @@ async def test_run_shell_uses_host_bridge_when_enabled(monkeypatch):
                 stdout=f"bridge:{request.command}",
                 stderr="",
                 return_code=0,
+                intent="inspect",
+                risk="low",
+                summary="Inspection command via echo",
             )
 
     async def _emit_start(**payload):
@@ -143,6 +221,8 @@ async def test_run_shell_uses_host_bridge_when_enabled(monkeypatch):
 
     assert result["return_code"] == 0
     assert result["stdout"] == "bridge:echo bridge"
+    assert result["intent"] == "inspect"
+    assert result["risk"] == "low"
     assert seen["shell_approval_token"]
     assert emitted[0][0] == "start"
     assert emitted[0][1]["tool_name"] == "host.shell.run"

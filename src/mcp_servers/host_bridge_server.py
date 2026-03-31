@@ -16,7 +16,6 @@ v1 tools:
 import argparse
 import asyncio
 from pathlib import Path
-import shlex
 import subprocess
 from typing import Optional
 
@@ -64,6 +63,7 @@ from src.bridges.host_bridge_schema import (
     HostShellRunResult,
 )
 from src.security.policy import get_security_policy
+from src.security.shell_intent import inspect_shell_command
 from src.security.network import enforce_loopback_bind, is_loopback_host
 from src.tools import browser as browser_tools
 from src.tools import control_ui_chat as control_ui_chat_tools
@@ -162,19 +162,8 @@ async def _current_tab_extract_text_payload(
 
 
 def _run_host_shell(request: HostShellRunRequest) -> HostShellRunResult:
-    normalized = " ".join(request.command.split())
-
-    policy = get_security_policy()
-    allowed, reason = policy.is_command_allowed(normalized)
-    if not allowed:
-        return HostShellRunResult(
-            ok=False,
-            error=f"Command blocked by security policy: {reason}",
-            return_code=-1,
-        )
-
     try:
-        tokens = shlex.split(normalized)
+        inspection = inspect_shell_command(request.command)
     except ValueError as exc:
         return HostShellRunResult(
             ok=False,
@@ -182,14 +171,20 @@ def _run_host_shell(request: HostShellRunRequest) -> HostShellRunResult:
             return_code=-1,
         )
 
-    if not tokens:
+    normalized = inspection.normalized
+
+    policy = get_security_policy()
+    allowed, reason = policy.is_command_allowed(normalized, inspection=inspection)
+    if not allowed:
         return HostShellRunResult(
             ok=False,
-            error="Empty command",
+            error=f"Command blocked by security policy: {reason}",
             return_code=-1,
         )
 
-    executable = tokens[0].lstrip("./").split("/")[-1]
+    tokens = inspection.ast.exec_tokens
+
+    executable = inspection.ast.executable_basename or tokens[0].lstrip("./").split("/")[-1]
     if executable in _BLOCKED_EXECUTABLES:
         return HostShellRunResult(
             ok=False,
@@ -211,6 +206,9 @@ def _run_host_shell(request: HostShellRunRequest) -> HostShellRunResult:
             stdout=completed.stdout.decode("utf-8", errors="replace"),
             stderr=completed.stderr.decode("utf-8", errors="replace"),
             return_code=completed.returncode,
+            intent=inspection.intent.category,
+            risk=inspection.intent.risk,
+            summary=inspection.intent.summary,
         )
     except subprocess.TimeoutExpired:
         return HostShellRunResult(

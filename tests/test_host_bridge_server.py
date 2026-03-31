@@ -111,6 +111,7 @@ class TestHostBridgeTools:
         text = self._text(result)
         assert "host-bridge" in text
         assert '"ok": true' in text.lower()
+        assert '"intent": "unknown"' in text.lower()
 
     @pytest.mark.asyncio
     async def test_host_shell_run_blocked_pattern(self, mcp):
@@ -126,6 +127,38 @@ class TestHostBridgeTools:
         )
         text = self._text(result)
         assert "blocked" in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_shell_run_blocks_shell_wrapper(self, mcp):
+        result = await mcp.call_tool(
+            "host.shell.run",
+            {
+                "request_id": "req-2b",
+                "session_id": "sess-2b",
+                "user_id": "user-2b",
+                "agent_name": "pytest",
+                "command": 'bash -lc "echo hi"',
+            },
+        )
+        text = self._text(result)
+        assert "shell wrapper" in text.lower()
+        assert '"ok": false' in text.lower()
+
+    @pytest.mark.asyncio
+    async def test_host_shell_run_blocks_redirection(self, mcp):
+        result = await mcp.call_tool(
+            "host.shell.run",
+            {
+                "request_id": "req-2c",
+                "session_id": "sess-2c",
+                "user_id": "user-2c",
+                "agent_name": "pytest",
+                "command": "echo hi > out.txt",
+            },
+        )
+        text = self._text(result)
+        assert "redirection" in text.lower()
+        assert '"ok": false' in text.lower()
 
     @pytest.fixture(autouse=False)
     def _allow_tmp(self, tmp_path, monkeypatch):

@@ -7,6 +7,8 @@ from typing import List, Optional
 from pathlib import Path
 import re
 
+from src.security.shell_intent import ShellCommandInspection, inspect_shell_command
+
 
 class SecurityPolicy:
     """セキュリティポリシー管理"""
@@ -57,13 +59,27 @@ class SecurityPolicy:
             "~/.ssh/id_ed25519",
         ]
 
-    def is_command_allowed(self, command: str) -> tuple[bool, Optional[str]]:
+    def is_command_allowed(
+        self,
+        command: str,
+        inspection: Optional[ShellCommandInspection] = None,
+    ) -> tuple[bool, Optional[str]]:
         """
         コマンドが許可されているかチェック
 
         Returns:
             (許可/拒否, 理由)
         """
+        if inspection is None:
+            try:
+                inspection = inspect_shell_command(command)
+            except ValueError as exc:
+                return False, f"Invalid command syntax: {exc}"
+
+        validation_error = inspection.validation_error()
+        if validation_error:
+            return False, validation_error
+
         # ブロックコマンドのチェック
         for blocked in self.blocked_commands:
             if blocked in command:
