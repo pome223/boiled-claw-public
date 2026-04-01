@@ -1,3 +1,4 @@
+import sqlite3
 from types import SimpleNamespace
 
 import pytest
@@ -121,3 +122,86 @@ def test_task_store_reopen_skips_full_search_rebuild(monkeypatch, tmp_path):
     assert rebuild_calls == 0
     assert result["pagination"]["total"] == 1
     assert result["tasks"][0]["title"] == "Repair selector for save button"
+
+
+def test_task_store_backfills_split_search_fragments_for_legacy_rows(tmp_path):
+    db_path = tmp_path / "tasks.db"
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE tasks (
+                task_id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                title TEXT NOT NULL,
+                status TEXT NOT NULL,
+                owner_session_id TEXT,
+                owner_user_id TEXT,
+                parent_task_id TEXT,
+                run_id TEXT,
+                winner_task_id TEXT,
+                loser_task_ids_json TEXT,
+                approval_dependencies_json TEXT,
+                artifacts_json TEXT NOT NULL,
+                metadata_json TEXT NOT NULL,
+                search_text TEXT NOT NULL DEFAULT '',
+                error TEXT,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL,
+                started_at REAL,
+                ended_at REAL
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO tasks (
+                task_id, kind, title, status, owner_session_id, owner_user_id,
+                parent_task_id, run_id, winner_task_id, loser_task_ids_json,
+                approval_dependencies_json, artifacts_json, metadata_json, search_text,
+                error, created_at, updated_at, started_at, ended_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "task_legacy",
+                "repair",
+                "Legacy repair selector",
+                "failed",
+                "sess-legacy",
+                "alice",
+                None,
+                "run-legacy",
+                None,
+                "[]",
+                '["apr_legacy"]',
+                '{"selector":"#save","summary":"save button moved"}',
+                '{"failure_reason":"selector drift","surface":"current_tab"}',
+                "",
+                "selector failed",
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+            ),
+        )
+        conn.commit()
+
+    reopened = task_store_module.TaskStore(str(db_path))
+    result = reopened.query(q="#save", page=1, page_size=10)
+
+    assert result["pagination"]["total"] == 1
+    assert result["tasks"][0]["task_id"] == "task_legacy"
+
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """
+            SELECT artifacts_search_text, metadata_search_text, search_text
+            FROM tasks
+            WHERE task_id = ?
+            """,
+            ("task_legacy",),
+        ).fetchone()
+
+    assert row is not None
+    assert "#save" in row[0]
+    assert "selector drift" in row[1]
+    assert "legacy repair selector" in row[2]
