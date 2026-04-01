@@ -247,6 +247,69 @@ async def test_demo_from_failed_trajectory_runs_candidate_and_packages_diff(
 
 
 @pytest.mark.asyncio
+async def test_demo_from_failed_trajectory_includes_reuse_suggestions(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+):
+    trajectory_id = computer_trajectory_store.record(
+        action="click",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[],
+        verification=None,
+        request={"selector": "#save"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        canary = Path(cwd)
+        if command == "apply-demo-fix":
+            (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+            return {"stdout": "patched", "stderr": "", "return_code": 0}
+        if command == "verify-demo-fix":
+            return {"stdout": "verified", "stderr": "", "return_code": 0}
+        return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
+
+    async def _memory_search(query=None, tags=None, kind=None, limit=10, tool_context=None):
+        assert kind == "approved_improvement"
+        assert "#save" in query
+        return {
+            "success": True,
+            "results": [
+                {
+                    "id": 7,
+                    "content": "Prefer a more stable selector for the save button.",
+                    "kind": "approved_improvement",
+                    "metadata": {"diff_stat": " README.md | 1 +"},
+                    "tags": ["self-improvement", "approved"],
+                    "created_at": 123.0,
+                    "score": 0.91,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+    monkeypatch.setattr(self_improvement, "memory_search", _memory_search)
+
+    result = await self_improvement.self_improvement_demo_from_trajectory(
+        trajectory_id=trajectory_id,
+        candidate_commands="apply-demo-fix",
+        benchmark_commands="verify-demo-fix",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+
+    assert result["success"] is True
+    assert result["reuse_query"]
+    assert result["reuse_suggestions"][0]["memory_id"] == 7
+    task = get_task_store().get(result["task_id"])
+    assert task is not None
+    assert task["artifacts"]["reuse_suggestions"][0]["memory_id"] == 7
+
+
+@pytest.mark.asyncio
 async def test_demo_rejects_non_failed_trajectory(computer_trajectory_store):
     trajectory_id = computer_trajectory_store.record(
         action="fill",
@@ -449,6 +512,67 @@ async def test_search_reports_failure_when_no_candidate_is_promotable(
     parent_task = get_task_store().get(result["task_id"])
     assert parent_task is not None
     assert parent_task["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_search_from_failed_trajectory_includes_reuse_suggestions(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+):
+    trajectory_id = computer_trajectory_store.record(
+        action="fill",
+        status="failed",
+        final_surface="browser",
+        attempts=[],
+        verification=None,
+        request={"selector": "#query"},
+        observation={"preferred_surface": "browser", "available_surfaces": ["browser"]},
+    )
+
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        canary = Path(cwd)
+        if command == "apply-fix":
+            (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+            return {"stdout": "patched", "stderr": "", "return_code": 0}
+        if command == "verify-search-fix":
+            return {"stdout": "verified", "stderr": "", "return_code": 0}
+        return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
+
+    async def _memory_search(query=None, tags=None, kind=None, limit=10, tool_context=None):
+        assert kind == "approved_improvement"
+        return {
+            "success": True,
+            "results": [
+                {
+                    "id": 11,
+                    "content": "Reuse the browser selector normalization fix.",
+                    "kind": "approved_improvement",
+                    "metadata": {"branch": "canary/browser-fix"},
+                    "tags": ["approved"],
+                    "created_at": 456.0,
+                    "score": 0.88,
+                }
+            ],
+        }
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+    monkeypatch.setattr(self_improvement, "memory_search", _memory_search)
+
+    result = await self_improvement.self_improvement_search_from_trajectory(
+        trajectory_id=trajectory_id,
+        candidate_specs_json=json.dumps([{"name": "fix", "commands": ["apply-fix"]}]),
+        benchmark_commands="verify-search-fix",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+
+    assert result["success"] is True
+    assert result["reuse_suggestions"][0]["memory_id"] == 11
+    task = get_task_store().get(result["task_id"])
+    assert task is not None
+    assert task["artifacts"]["reuse_suggestions"][0]["memory_id"] == 11
 
 
 def test_cli_self_improvement_search_invokes_tool(monkeypatch):

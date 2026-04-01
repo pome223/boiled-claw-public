@@ -1197,6 +1197,71 @@ def test_http_tool_approvals_list_exposes_stateful_metadata(monkeypatch, tmp_pat
     assert approvals[1]["propagate_to_subagents"] is True
 
 
+def test_http_tool_approval_get_exposes_history(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    approval = gateway.tool_policy.create_approval_request(
+        request_id="req-history",
+        tool_name="write_file",
+        agent_name="boiled_claw",
+        args={"path": str(tmp_path / "note.txt")},
+        session_id="sess-history",
+        reason="file writes need approval",
+    )
+    gateway.tool_policy.resolve_approval(
+        approval.request_id,
+        True,
+        "approved in history test",
+        scope="session",
+        propagate_to_subagents=True,
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.get(f"/tools/approvals/{approval.request_id}")
+
+    assert response.status_code == 200
+    payload = response.json()["approval"]
+    assert payload["request_id"] == approval.request_id
+    assert [entry["state"] for entry in payload["history"]] == ["pending", "approved"]
+    assert payload["history"][1]["metadata"]["propagate_to_subagents"] is True
+
+
+def test_http_tool_approval_resolve_endpoint_updates_scope(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    gateway.tool_policy.create_approval_request(
+        request_id="req-resolve-http",
+        tool_name="run_shell",
+        agent_name="boiled_claw",
+        args={"command": "pwd", "cwd": str(tmp_path)},
+        session_id="sess-resolve-http",
+        reason="shell commands need approval",
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/tools/approvals/req-resolve-http/resolve",
+            json={
+                "approved": True,
+                "reason": "approved over http",
+                "session_id": "sess-resolve-http",
+                "scope": "session",
+                "tool_pattern": "run_*",
+                "path_scope": str(tmp_path),
+                "propagate_to_subagents": True,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["resolved"] is True
+    assert payload["approval"]["state"] == "approved"
+    assert payload["approval"]["scope"] == "session"
+    assert payload["approval"]["tool_pattern"] == "run_*"
+    assert payload["approval"]["path_scope"] == str(tmp_path.resolve())
+    assert payload["approval"]["propagate_to_subagents"] is True
+
+
 def test_websocket_tool_approval_resolution_accepts_scope_fields(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
@@ -1432,6 +1497,47 @@ def test_http_control_loop_run_returns_pending_approval(monkeypatch, tmp_path):
         assert payload["ok"] is False
         assert payload["needs_human"] is True
         assert payload["approval_request"]["request_id"] == "plan_req_1"
+
+
+def test_http_control_loop_run_creates_task_object(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_runtime_error(goal: str):
+        return None
+
+    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+        assert goal == "Inspect current browser session"
+        assert session_id
+        return ExecutionResult(
+            request_id="req-control-task",
+            session_id=session_id,
+            user_id=user_id,
+            final_text="done",
+            plan_id="plan-control-task",
+            success=True,
+            repair_count=1,
+        )
+
+    monkeypatch.setattr(gateway, "_current_browser_runtime_error", _fake_runtime_error)
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_run)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/control-loop/run",
+            json={"user_id": "alice", "goal": "Inspect current browser session"},
+        )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["task_id"].startswith("task_")
+
+        task_response = client.get(f"/tasks/{payload['task_id']}")
+
+    assert task_response.status_code == 200
+    task = task_response.json()["task"]
+    assert task["kind"] == "control_loop"
+    assert task["status"] == "completed"
+    assert task["artifacts"]["resume_context"]["goal"] == "Inspect current browser session"
 
 
 def test_websocket_control_run_emits_control_approval_request(monkeypatch, tmp_path):

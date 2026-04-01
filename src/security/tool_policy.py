@@ -84,6 +84,7 @@ class ApprovalRecord:
     resolve_reason: str = ""
     resolved_at: Optional[float] = None
     source_request_id: Optional[str] = None
+    history: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def resolved(self) -> bool:
@@ -128,7 +129,25 @@ class ApprovalRecord:
             "resolve_reason": self.resolve_reason,
             "resolved_at": self.resolved_at,
             "source_request_id": self.source_request_id,
+            "history": list(self.history),
         }
+
+    def add_history(
+        self,
+        state: ApprovalState,
+        *,
+        reason: str = "",
+        metadata: Optional[dict[str, Any]] = None,
+        ts: Optional[float] = None,
+    ) -> None:
+        self.history.append(
+            {
+                "state": state,
+                "reason": reason,
+                "ts": ts if ts is not None else time.time(),
+                "metadata": metadata or {},
+            }
+        )
 
 
 # Default rules: broad allow for safe tools, approve for dangerous ones
@@ -339,6 +358,18 @@ class ToolPolicyEngine:
         elif approval.state == "denied":
             approval.approved = False
             approval.resolved_at = created_at
+        approval.add_history(
+            approval.state,
+            reason=reason,
+            metadata={
+                "scope": approval.scope,
+                "tool_pattern": approval.tool_pattern,
+                "path_scope": approval.path_scope,
+                "propagate_to_subagents": approval.propagate_to_subagents,
+                "source_request_id": approval.source_request_id,
+            },
+            ts=created_at,
+        )
         self._approvals[request_id] = approval
         return approval
 
@@ -372,6 +403,17 @@ class ToolPolicyEngine:
         approval.resolve_reason = reason
         approval.resolved_at = time.time()
         approval.state = "approved" if approved else "denied"
+        approval.add_history(
+            approval.state,
+            reason=reason,
+            metadata={
+                "scope": approval.scope,
+                "tool_pattern": approval.tool_pattern,
+                "path_scope": approval.path_scope,
+                "propagate_to_subagents": approval.propagate_to_subagents,
+            },
+            ts=approval.resolved_at,
+        )
 
         waiter = self._approval_waiters.pop(request_id, None)
         if waiter and not waiter.done():
@@ -389,6 +431,20 @@ class ToolPolicyEngine:
         session_id: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         return self.list_approvals(session_id=session_id, state="pending")
+
+    def get_approval(
+        self,
+        request_id: str,
+        *,
+        include_expired: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        self.cleanup_expired()
+        approval = self._approvals.get(request_id)
+        if approval is None:
+            return None
+        if not include_expired and approval.state == "expired":
+            return None
+        return approval.to_dict()
 
     def list_approvals(
         self,
@@ -428,6 +484,17 @@ class ToolPolicyEngine:
             approval.approved = False
             approval.resolve_reason = approval.resolve_reason or "approval expired"
             approval.resolved_at = approval.resolved_at or now
+            approval.add_history(
+                "expired",
+                reason=approval.resolve_reason,
+                metadata={
+                    "scope": approval.scope,
+                    "tool_pattern": approval.tool_pattern,
+                    "path_scope": approval.path_scope,
+                    "propagate_to_subagents": approval.propagate_to_subagents,
+                },
+                ts=approval.resolved_at,
+            )
             expired_count += 1
 
             waiter = self._approval_waiters.pop(approval.request_id, None)

@@ -107,6 +107,15 @@
               </summary>
               <ul id="inspectorTasksList" class="list compact-list"></ul>
             </details>
+            <details class="event-stream-panel" open>
+              <summary>
+                <span>Selection</span>
+                <span id="inspectorSelectionBadge" class="tag">none</span>
+              </summary>
+              <div id="inspectorSelectionDetail" class="selection-detail selection-detail-empty">
+                Click a task or approval to inspect full metadata, links, and actions.
+              </div>
+            </details>
             <details id="eventStreamPanel" class="event-stream-panel">
               <summary>
                 <span>Event Stream</span>
@@ -125,7 +134,44 @@
               <h3>Task / Approval Dashboard</h3>
               <p class="muted">Live task objects, approval state, and session backend status for the current Gateway.</p>
             </div>
-            <button id="refreshDashboardBtn" class="btn" type="button">Refresh</button>
+            <div class="actions">
+              <button id="clearDashboardFiltersBtn" class="btn" type="button">Clear Filters</button>
+              <button id="refreshDashboardBtn" class="btn" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div class="dashboard-filter-row">
+            <input
+              id="dashboardSearchInput"
+              class="text-input mono"
+              type="search"
+              placeholder="Search task ids, run ids, tool names, errors, summaries..."
+            />
+          </div>
+
+          <div class="dashboard-chip-groups">
+            <div class="chip-group">
+              <span class="chip-group-label">Task Status</span>
+              <div class="chip-row" id="taskStatusChips">
+                <button class="status-chip active" type="button" data-filter-kind="task-status" data-filter-value="all">All</button>
+                <button class="status-chip" type="button" data-filter-kind="task-status" data-filter-value="open">Open</button>
+                <button class="status-chip" type="button" data-filter-kind="task-status" data-filter-value="running">Running</button>
+                <button class="status-chip" type="button" data-filter-kind="task-status" data-filter-value="pending">Pending</button>
+                <button class="status-chip" type="button" data-filter-kind="task-status" data-filter-value="completed">Completed</button>
+                <button class="status-chip" type="button" data-filter-kind="task-status" data-filter-value="failed">Failed</button>
+              </div>
+            </div>
+            <div class="chip-group">
+              <span class="chip-group-label">Approval State</span>
+              <div class="chip-row" id="approvalStateChips">
+                <button class="status-chip active" type="button" data-filter-kind="approval-state" data-filter-value="all">All</button>
+                <button class="status-chip" type="button" data-filter-kind="approval-state" data-filter-value="pending">Pending</button>
+                <button class="status-chip" type="button" data-filter-kind="approval-state" data-filter-value="approved">Approved</button>
+                <button class="status-chip" type="button" data-filter-kind="approval-state" data-filter-value="propagated">Propagated</button>
+                <button class="status-chip" type="button" data-filter-kind="approval-state" data-filter-value="denied">Denied</button>
+                <button class="status-chip" type="button" data-filter-kind="approval-state" data-filter-value="expired">Expired</button>
+              </div>
+            </div>
           </div>
 
           <div class="dashboard-summary">
@@ -161,6 +207,16 @@
                 <span id="dashboardTasksCaption" class="muted mono">latest</span>
               </div>
               <ul id="dashboardTasksList" class="list compact-list"></ul>
+            </div>
+          </div>
+
+          <div class="dashboard-detail-panel">
+            <div class="dashboard-section-header">
+              <h4>Task Detail / Intervention Panel</h4>
+              <span id="dashboardDetailBadge" class="muted mono">none selected</span>
+            </div>
+            <div id="dashboardDetailPanel" class="selection-detail selection-detail-empty">
+              Click a task or approval to inspect full artifacts, metadata, related records, and intervention actions.
             </div>
           </div>
         </div>

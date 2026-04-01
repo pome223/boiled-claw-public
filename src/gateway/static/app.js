@@ -28,6 +28,8 @@ const eventCountBadgeEl = document.getElementById("eventCountBadge");
 const rawLogEl = document.getElementById("rawLog");
 const sessionListEl = document.getElementById("sessionList");
 const refreshDashboardBtn = document.getElementById("refreshDashboardBtn");
+const clearDashboardFiltersBtn = document.getElementById("clearDashboardFiltersBtn");
+const dashboardSearchInputEl = document.getElementById("dashboardSearchInput");
 const dashboardSessionBackendEl = document.getElementById("dashboardSessionBackend");
 const dashboardSessionNamespaceEl = document.getElementById("dashboardSessionNamespace");
 const dashboardPendingApprovalsEl = document.getElementById("dashboardPendingApprovals");
@@ -36,6 +38,8 @@ const dashboardApprovalsListEl = document.getElementById("dashboardApprovalsList
 const dashboardTasksListEl = document.getElementById("dashboardTasksList");
 const dashboardApprovalsCaptionEl = document.getElementById("dashboardApprovalsCaption");
 const dashboardTasksCaptionEl = document.getElementById("dashboardTasksCaption");
+const dashboardDetailPanelEl = document.getElementById("dashboardDetailPanel");
+const dashboardDetailBadgeEl = document.getElementById("dashboardDetailBadge");
 const inspectorSessionBackendEl = document.getElementById("inspectorSessionBackend");
 const inspectorCurrentSessionEl = document.getElementById("inspectorCurrentSession");
 const inspectorPendingApprovalsEl = document.getElementById("inspectorPendingApprovals");
@@ -44,11 +48,14 @@ const inspectorApprovalsListEl = document.getElementById("inspectorApprovalsList
 const inspectorTasksListEl = document.getElementById("inspectorTasksList");
 const inspectorApprovalCountBadgeEl = document.getElementById("inspectorApprovalCountBadge");
 const inspectorTaskCountBadgeEl = document.getElementById("inspectorTaskCountBadge");
+const inspectorSelectionDetailEl = document.getElementById("inspectorSelectionDetail");
+const inspectorSelectionBadgeEl = document.getElementById("inspectorSelectionBadge");
 const statusDotEl = document.getElementById("statusDot");
 const statusTextEl = document.getElementById("statusText");
 const sessionBadgeEl = document.getElementById("sessionBadge");
 const gatewayHostLabelEl = document.getElementById("gatewayHostLabel");
 const heartbeatDotEl = document.getElementById("heartbeatDot");
+const dashboardFilterChips = Array.from(document.querySelectorAll(".status-chip"));
 
 const connectBtn = document.getElementById("connectBtn");
 const disconnectBtn = document.getElementById("disconnectBtn");
@@ -103,14 +110,43 @@ let _streamingText = "";
 let _runInProgress = false;
 let _messageInputComposing = false;
 let _dashboardPollHandle = null;
+let _dashboardRefreshHandle = null;
+let _dashboardRefreshPromise = null;
 const dashboardState = {
   sessionBackend: "-",
   sessionNamespace: "",
   pendingApprovals: [],
   recentApprovals: [],
   recentTasks: [],
-  openTaskCount: 0
+  openTaskCount: 0,
+  searchQuery: "",
+  taskStatusFilter: "all",
+  approvalStateFilter: "all",
+  selectedKind: null,
+  selectedId: null,
+  selectedTask: null,
+  selectedApproval: null,
+  relatedTasks: [],
+  relatedApprovals: [],
+  childTasks: [],
+  subagentRun: null
 };
+const KNOWN_STATUS_TAGS = new Set([
+  "accepted",
+  "approved",
+  "approving",
+  "cancelled",
+  "completed",
+  "denied",
+  "denying",
+  "expired",
+  "failed",
+  "idle",
+  "pending",
+  "propagated",
+  "resolved",
+  "running"
+]);
 
 // -----------------------------------------------------------------------
 // Settings
@@ -442,9 +478,109 @@ function formatTimestamp(ts) {
 }
 
 function statusTag(status) {
+  const normalized = String(status || "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "-");
   const safe = escapeHtml(status || "unknown");
-  const cls = `tag status-tag status-${String(status || "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "-")}`;
+  const fallbackClass = KNOWN_STATUS_TAGS.has(normalized) ? "" : " status-fallback";
+  const cls = `tag status-tag status-${normalized}${fallbackClass}`;
   return `<span class="${cls}">${safe}</span>`;
+}
+
+function formatJsonBlock(value) {
+  try {
+    return escapeHtml(JSON.stringify(value ?? {}, null, 2));
+  } catch (_) {
+    return escapeHtml(String(value ?? ""));
+  }
+}
+
+function compactText(value, limit = 180) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1)}…`;
+}
+
+function isOpenTaskStatus(status) {
+  const normalized = String(status || "").toLowerCase();
+  return !["completed", "failed", "cancelled", "expired"].includes(normalized);
+}
+
+function matchesTaskStatusFilter(task, filter) {
+  const normalized = String(task?.status || "").toLowerCase();
+  switch (filter) {
+    case "open":
+      return isOpenTaskStatus(normalized);
+    case "running":
+    case "pending":
+    case "completed":
+    case "failed":
+      return normalized === filter;
+    default:
+      return true;
+  }
+}
+
+function matchesApprovalStateFilter(approval, filter) {
+  if (!filter || filter === "all") return true;
+  return String(approval?.state || "").toLowerCase() === filter;
+}
+
+function matchesDashboardQuery(item, query, kind) {
+  if (!query) return true;
+  const normalized = query.toLowerCase();
+  if (kind === "task") {
+    const haystack = [
+      item.task_id,
+      item.kind,
+      item.title,
+      item.run_id,
+      item.status,
+      item.error,
+      JSON.stringify(item.artifacts || {}),
+      JSON.stringify(item.metadata || {}),
+      (item.approval_dependencies || []).join(" "),
+      (item.loser_task_ids || []).join(" "),
+      item.winner_task_id,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(normalized);
+  }
+
+  const haystack = [
+    item.request_id,
+    item.source_request_id,
+    item.tool_name,
+    item.tool_pattern,
+    item.agent_name,
+    item.reason,
+    item.resolve_reason,
+    item.path_scope,
+    item.scope,
+    item.state,
+    JSON.stringify(item.args || {}),
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(normalized);
+}
+
+function filteredDashboardApprovals() {
+  const query = dashboardState.searchQuery.trim();
+  return dashboardState.recentApprovals.filter((item) => (
+    matchesApprovalStateFilter(item, dashboardState.approvalStateFilter)
+    && matchesDashboardQuery(item, query, "approval")
+  ));
+}
+
+function filteredDashboardTasks() {
+  const query = dashboardState.searchQuery.trim();
+  return dashboardState.recentTasks.filter((item) => (
+    matchesTaskStatusFilter(item, dashboardState.taskStatusFilter)
+    && matchesDashboardQuery(item, query, "task")
+  ));
 }
 
 function renderApprovalListItem(item) {
@@ -456,16 +592,21 @@ function renderApprovalListItem(item) {
   if (item.tool_pattern && item.tool_pattern !== item.tool_name) scopeBits.push(`tool=${item.tool_pattern}`);
   if (item.path_scope) scopeBits.push(`path=${item.path_scope}`);
   if (item.propagate_to_subagents) scopeBits.push("subagents");
+  if (item.source_request_id) scopeBits.push(`source=${item.source_request_id}`);
   const extra = scopeBits.length ? `<div class="item-meta mono">${escapeHtml(scopeBits.join(" · "))}</div>` : "";
   return [
     "<li>",
+    `<button class="list-item-button${dashboardState.selectedKind === "approval" && dashboardState.selectedId === item.request_id ? " active" : ""}" type="button" data-approval-id="${escapeAttr(item.request_id || "")}">`,
+    `<div class="item-card">`,
     `<div class="item-head">`,
     `<div class="item-title">${escapeHtml(title)}</div>`,
     statusTag(item.state || "pending"),
     "</div>",
     `<div class="item-meta">${escapeHtml(meta)}</div>`,
-    detail ? `<div class="item-detail">${escapeHtml(detail)}</div>` : "",
+    detail ? `<div class="item-detail">${escapeHtml(compactText(detail))}</div>` : "",
     extra,
+    `</div>`,
+    `</button>`,
     "</li>"
   ].join("");
 }
@@ -474,6 +615,7 @@ function renderTaskListItem(task) {
   const metaBits = [task.kind || "-", formatTimestamp(task.updated_at)];
   if (task.task_id) metaBits.unshift(task.task_id);
   const detailBits = [];
+  if (task.run_id) detailBits.push(`run=${task.run_id}`);
   if (task.winner_task_id) detailBits.push(`winner=${task.winner_task_id}`);
   if (Array.isArray(task.loser_task_ids) && task.loser_task_ids.length) {
     detailBits.push(`losers=${task.loser_task_ids.length}`);
@@ -487,13 +629,17 @@ function renderTaskListItem(task) {
     : [];
   return [
     "<li>",
+    `<button class="list-item-button${dashboardState.selectedKind === "task" && dashboardState.selectedId === task.task_id ? " active" : ""}" type="button" data-task-id="${escapeAttr(task.task_id || "")}">`,
+    `<div class="item-card">`,
     `<div class="item-head">`,
     `<div class="item-title">${escapeHtml(task.title || task.kind || task.task_id || "task")}</div>`,
     statusTag(task.status || "unknown"),
     "</div>",
     `<div class="item-meta mono">${escapeHtml(metaBits.join(" · "))}</div>`,
-    detailBits.length ? `<div class="item-detail mono">${escapeHtml(detailBits.join(" · "))}</div>` : "",
+    detailBits.length ? `<div class="item-detail mono">${escapeHtml(compactText(detailBits.join(" · "), 220))}</div>` : "",
     artifactKeys.length ? `<div class="item-meta mono">artifacts=${escapeHtml(artifactKeys.join(", "))}</div>` : "",
+    `</div>`,
+    `</button>`,
     "</li>"
   ].join("");
 }
@@ -510,6 +656,8 @@ function renderCompactList(targetEl, items, renderer, emptyText) {
 function updateDashboardUi() {
   const pendingCount = dashboardState.pendingApprovals.length;
   const openTaskCount = dashboardState.openTaskCount;
+  const filteredApprovals = filteredDashboardApprovals();
+  const filteredTasks = filteredDashboardTasks();
   if (dashboardSessionBackendEl) {
     dashboardSessionBackendEl.textContent = dashboardState.sessionBackend || "-";
   }
@@ -523,14 +671,12 @@ function updateDashboardUi() {
     dashboardOpenTasksEl.textContent = String(openTaskCount);
   }
   if (dashboardApprovalsCaptionEl) {
-    dashboardApprovalsCaptionEl.textContent = pendingCount
-      ? `${pendingCount} pending`
-      : "latest";
+    dashboardApprovalsCaptionEl.textContent = `${filteredApprovals.length} shown`;
   }
   if (dashboardTasksCaptionEl) {
     dashboardTasksCaptionEl.textContent = currentSessionId
-      ? `session ${currentSessionId}`
-      : "latest";
+      ? `${filteredTasks.length} shown · ${currentSessionId}`
+      : `${filteredTasks.length} shown`;
   }
   if (inspectorSessionBackendEl) {
     inspectorSessionBackendEl.textContent = dashboardState.sessionBackend || "-";
@@ -565,16 +711,467 @@ function updateDashboardUi() {
   );
   renderCompactList(
     dashboardApprovalsListEl,
-    dashboardState.recentApprovals,
+    filteredApprovals,
     renderApprovalListItem,
     "No approvals yet."
   );
   renderCompactList(
     dashboardTasksListEl,
-    dashboardState.recentTasks,
+    filteredTasks,
     renderTaskListItem,
     "No tasks yet."
   );
+
+  renderSelectionDetail();
+}
+
+function renderRelationChips(kind, items, emptyText) {
+  if (!items.length) {
+    return `<div class="muted">${escapeHtml(emptyText)}</div>`;
+  }
+  return [
+    `<div class="relation-list">`,
+    ...items.map((item) => {
+      if (kind === "task") {
+        return `<button class="relation-chip mono" type="button" data-task-ref="${escapeAttr(item.task_id || "")}">${escapeHtml(item.title || item.task_id || "task")}</button>`;
+      }
+      return `<button class="relation-chip mono" type="button" data-approval-ref="${escapeAttr(item.request_id || "")}">${escapeHtml(item.tool_name || item.request_id || "approval")}</button>`;
+    }),
+    `</div>`
+  ].join("");
+}
+
+function renderReuseSuggestions(reuseSuggestions) {
+  if (!Array.isArray(reuseSuggestions) || !reuseSuggestions.length) {
+    return "";
+  }
+  const items = reuseSuggestions.map((item) => {
+    const metaBits = [];
+    if (item.memory_id != null) metaBits.push(`#${item.memory_id}`);
+    if (item.score != null) metaBits.push(`score=${Number(item.score).toFixed(3)}`);
+    const diffStat = item.metadata && item.metadata.diff_stat ? String(item.metadata.diff_stat) : "";
+    return [
+      `<div class="detail-card">`,
+      `<div class="item-meta mono">${escapeHtml(metaBits.join(" · "))}</div>`,
+      `<div>${escapeHtml(compactText(item.content, 240))}</div>`,
+      diffStat ? `<div class="item-meta mono">${escapeHtml(diffStat)}</div>` : "",
+      `</div>`
+    ].join("");
+  });
+  return [
+    `<div class="detail-section">`,
+    `<div class="k">Reusable Approved Improvements</div>`,
+    `<div class="detail-grid">`,
+    ...items,
+    `</div>`,
+    `</div>`
+  ].join("");
+}
+
+function renderTaskDetail(task) {
+  const relatedTasks = dashboardState.relatedTasks || [];
+  const childTasks = dashboardState.childTasks || [];
+  const relatedApprovals = dashboardState.relatedApprovals || [];
+  const subagentRun = dashboardState.subagentRun;
+  const artifacts = task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const metadata = task.metadata && typeof task.metadata === "object" ? task.metadata : {};
+  const reuseSuggestions = Array.isArray(artifacts.reuse_suggestions) ? artifacts.reuse_suggestions : [];
+  const detailMeta = [
+    task.task_id,
+    task.kind || "-",
+    `updated ${formatTimestamp(task.updated_at)}`,
+  ].filter(Boolean);
+  const subagentArtifacts = artifacts.subagent && typeof artifacts.subagent === "object" ? artifacts.subagent : {};
+  const isSessionSubagent = task.kind === "subagent" && String(subagentArtifacts.mode || "").toLowerCase() === "session";
+  const canKillSubagent = Boolean(subagentRun && ["accepted", "running", "idle"].includes(String(subagentRun.status || "").toLowerCase()));
+
+  return [
+    `<div class="detail-section">`,
+    `<div class="detail-heading">`,
+    `<div>`,
+    `<h5>${escapeHtml(task.title || task.task_id || "task")}</h5>`,
+    `<div class="detail-meta mono">${escapeHtml(detailMeta.join(" · "))}</div>`,
+    `</div>`,
+    statusTag(task.status || "unknown"),
+    `</div>`,
+    `</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Owner</div><div class="mono">${escapeHtml(task.owner_session_id || "-")}</div><div class="item-meta">${escapeHtml(task.owner_user_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Run</div><div class="mono">${escapeHtml(task.run_id || "-")}</div><div class="item-meta">${escapeHtml(formatTimestamp(task.created_at))}</div></div>`,
+    `<div class="detail-card"><div class="k">Started</div><div class="mono">${escapeHtml(formatTimestamp(task.started_at))}</div><div class="item-meta">ended ${escapeHtml(formatTimestamp(task.ended_at))}</div></div>`,
+    `<div class="detail-card"><div class="k">Error</div><div class="detail-error mono">${escapeHtml(task.error || "-")}</div></div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Related Tasks</div>`,
+    renderRelationChips("task", relatedTasks.concat(childTasks), "No linked tasks."),
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Approval Dependencies</div>`,
+    renderRelationChips("approval", relatedApprovals, "No linked approvals."),
+    `</div>`,
+    subagentRun ? [
+      `<div class="detail-section">`,
+      `<div class="k">Subagent Run</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Run Status</div><div>${statusTag(subagentRun.status || "unknown")}</div><div class="item-meta mono">${escapeHtml(subagentRun.run_id || "-")}</div></div>`,
+      `<div class="detail-card"><div class="k">Mode</div><div>${escapeHtml(subagentRun.mode || "-")}</div><div class="item-meta mono">pending=${escapeHtml(String(subagentRun.pending_messages ?? "-"))}</div></div>`,
+      `<div class="detail-card"><div class="k">Subagent Session</div><div class="mono">${escapeHtml(subagentRun.session_id || "-")}</div><div class="item-meta mono">processed=${escapeHtml(String(subagentRun.messages_processed ?? "-"))}</div></div>`,
+      `<div class="detail-card"><div class="k">Current Task</div><div>${escapeHtml(compactText(subagentRun.current_task || "-", 180))}</div></div>`,
+      `</div>`,
+      `<div class="detail-form">`,
+      isSessionSubagent ? `<textarea class="mono" rows="3" data-role="steer-message" placeholder="追加の指示を送る..."></textarea>` : `<div class="muted">This subagent was not started in session mode, so steer is unavailable.</div>`,
+      `<div class="detail-actions">`,
+      `<button class="btn primary" type="button" data-action="subagent-steer" data-run-id="${escapeAttr(subagentRun.run_id || "")}" ${isSessionSubagent ? "" : "disabled"}>Steer</button>`,
+      `<button class="btn danger" type="button" data-action="subagent-kill" data-run-id="${escapeAttr(subagentRun.run_id || "")}" ${canKillSubagent ? "" : "disabled"}>Kill</button>`,
+      `</div>`,
+      `</div>`,
+      `</div>`
+    ].join("") : "",
+    renderReuseSuggestions(reuseSuggestions),
+    artifacts.resume_context ? [
+      `<div class="detail-section">`,
+      `<div class="k">Resume Context</div>`,
+      `<pre class="detail-pre">${formatJsonBlock(artifacts.resume_context)}</pre>`,
+      `</div>`
+    ].join("") : "",
+    `<div class="detail-section">`,
+    `<div class="k">Artifacts</div>`,
+    `<pre class="detail-pre">${formatJsonBlock(artifacts)}</pre>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Metadata</div>`,
+    `<pre class="detail-pre">${formatJsonBlock(metadata)}</pre>`,
+    `</div>`
+  ].join("");
+}
+
+function renderApprovalDetail(approval) {
+  const relatedTasks = dashboardState.relatedTasks || [];
+  const history = Array.isArray(approval.history) ? approval.history : [];
+  const historyText = history.map((entry) => {
+    const reason = entry.reason ? ` · ${entry.reason}` : "";
+    const metadata = entry.metadata && Object.keys(entry.metadata).length
+      ? ` · ${JSON.stringify(entry.metadata)}`
+      : "";
+    return `${new Date((entry.ts || 0) * 1000).toLocaleString()} · ${entry.state}${reason}${metadata}`;
+  }).join("\n");
+
+  return [
+    `<div class="detail-section">`,
+    `<div class="detail-heading">`,
+    `<div>`,
+    `<h5>${escapeHtml(approval.tool_name || approval.request_id || "approval")}</h5>`,
+    `<div class="detail-meta mono">${escapeHtml([approval.request_id, approval.agent_name || "-", formatTimestamp(approval.created_at)].filter(Boolean).join(" · "))}</div>`,
+    `</div>`,
+    statusTag(approval.state || "pending"),
+    `</div>`,
+    `</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Scope</div><div>${escapeHtml(approval.scope || "-")}</div><div class="item-meta mono">${escapeHtml(approval.tool_pattern || approval.tool_name || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Path Scope</div><div class="mono">${escapeHtml(approval.path_scope || "-")}</div><div class="item-meta">${approval.propagate_to_subagents ? "propagates to subagents" : "local only"}</div></div>`,
+    `<div class="detail-card"><div class="k">Session</div><div class="mono">${escapeHtml(approval.session_id || "-")}</div><div class="item-meta mono">${escapeHtml(approval.source_request_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Reason</div><div>${escapeHtml(compactText(approval.reason || approval.resolve_reason || "-", 200))}</div></div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Related Tasks</div>`,
+    renderRelationChips("task", relatedTasks, "No related tasks."),
+    `</div>`,
+    approval.state === "pending" ? [
+      `<div class="detail-section">`,
+      `<div class="k">Resolve Approval</div>`,
+      `<div class="detail-form">`,
+      `<div class="detail-form-grid">`,
+      `<label class="field-label">scope<select class="text-input mono" data-approval-field="scope"><option value="single"${approval.scope === "single" ? " selected" : ""}>single</option><option value="session"${approval.scope === "session" ? " selected" : ""}>session</option></select></label>`,
+      `<label class="field-label">tool pattern<input class="text-input mono" type="text" value="${escapeAttr(approval.tool_pattern || approval.tool_name || "")}" data-approval-field="tool-pattern" /></label>`,
+      `<label class="field-label">path scope<input class="text-input mono" type="text" value="${escapeAttr(approval.path_scope || "")}" data-approval-field="path-scope" /></label>`,
+      `<label class="field-label"><input type="checkbox" data-approval-field="propagate"${approval.propagate_to_subagents ? " checked" : ""} /> propagate to subagents</label>`,
+      `</div>`,
+      `<div class="detail-actions">`,
+      `<button class="btn primary" type="button" data-action="approval-resolve" data-approved="true" data-request-id="${escapeAttr(approval.request_id || "")}">Approve</button>`,
+      `<button class="btn danger" type="button" data-action="approval-resolve" data-approved="false" data-request-id="${escapeAttr(approval.request_id || "")}">Deny</button>`,
+      `</div>`,
+      `</div>`,
+      `</div>`
+    ].join("") : "",
+    `<div class="detail-section">`,
+    `<div class="k">Arguments</div>`,
+    `<pre class="detail-pre">${formatJsonBlock(approval.args || {})}</pre>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">History</div>`,
+    `<pre class="detail-pre">${escapeHtml(historyText || "No approval history yet.")}</pre>`,
+    `</div>`
+  ].join("");
+}
+
+function renderSelectionDetail() {
+  let badge = "none";
+  let html = "Click a task or approval to inspect full metadata, links, and actions.";
+  if (dashboardState.selectedKind === "task" && dashboardState.selectedTask) {
+    badge = dashboardState.selectedTask.task_id || "task";
+    html = renderTaskDetail(dashboardState.selectedTask);
+  } else if (dashboardState.selectedKind === "approval" && dashboardState.selectedApproval) {
+    badge = dashboardState.selectedApproval.request_id || "approval";
+    html = renderApprovalDetail(dashboardState.selectedApproval);
+  }
+  if (dashboardDetailBadgeEl) {
+    dashboardDetailBadgeEl.textContent = badge;
+  }
+  if (inspectorSelectionBadgeEl) {
+    inspectorSelectionBadgeEl.textContent = badge;
+  }
+  for (const target of [dashboardDetailPanelEl, inspectorSelectionDetailEl]) {
+    if (!target) continue;
+    target.classList.toggle("selection-detail-empty", badge === "none");
+    target.innerHTML = html;
+  }
+}
+
+async function fetchJsonOrThrow(url, init = {}) {
+  const response = await apiFetch(url, init);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data?.detail || `HTTP ${response.status}`);
+  }
+  return data;
+}
+
+async function loadTaskDetail(taskId) {
+  if (!taskId) return;
+  const base = toHttpBaseUrl(currentSettings());
+  try {
+    const taskPayload = await fetchJsonOrThrow(`${base}/tasks/${encodeURIComponent(taskId)}`);
+    const task = taskPayload.task || {};
+    const relatedTaskIds = [
+      task.parent_task_id,
+      task.winner_task_id,
+      ...(Array.isArray(task.loser_task_ids) ? task.loser_task_ids : []),
+    ].filter(Boolean);
+    const [relatedTasksPayload, relatedApprovals, subagentRunsPayload, childTasksPayload] = await Promise.all([
+      Promise.all(
+        Array.from(new Set(relatedTaskIds)).map(async (relatedTaskId) => {
+          try {
+            const payload = await fetchJsonOrThrow(`${base}/tasks/${encodeURIComponent(relatedTaskId)}`);
+            return payload.task || null;
+          } catch (_) {
+            return null;
+          }
+        })
+      ),
+      Promise.all(
+        (Array.isArray(task.approval_dependencies) ? task.approval_dependencies : []).map(async (approvalId) => {
+          try {
+            const payload = await fetchJsonOrThrow(`${base}/tools/approvals/${encodeURIComponent(approvalId)}`);
+            return payload.approval || null;
+          } catch (_) {
+            return null;
+          }
+        })
+      ),
+      task.kind === "subagent" && task.owner_session_id
+        ? fetchJsonOrThrow(`${base}/subagents/${encodeURIComponent(task.owner_session_id)}`).catch(() => ({ runs: [] }))
+        : Promise.resolve({ runs: [] }),
+      fetchJsonOrThrow(
+        `${base}/tasks?${new URLSearchParams({ session_id: task.owner_session_id || "", parent_task_id: task.task_id || "", limit: "50" })}`
+      ).catch(() => ({ tasks: [] })),
+    ]);
+    const runs = Array.isArray(subagentRunsPayload.runs) ? subagentRunsPayload.runs : [];
+    dashboardState.selectedKind = "task";
+    dashboardState.selectedId = taskId;
+    dashboardState.selectedTask = task;
+    dashboardState.selectedApproval = null;
+    dashboardState.relatedTasks = relatedTasksPayload.filter(Boolean);
+    dashboardState.relatedApprovals = relatedApprovals.filter(Boolean);
+    dashboardState.childTasks = Array.isArray(childTasksPayload.tasks) ? childTasksPayload.tasks : [];
+    dashboardState.subagentRun = runs.find((run) => run.run_id === task.run_id) || null;
+  } catch (err) {
+    dashboardState.selectedKind = "task";
+    dashboardState.selectedId = taskId;
+    dashboardState.selectedTask = {
+      task_id: taskId,
+      title: "Failed to load task",
+      status: "failed",
+      error: String(err),
+      artifacts: {},
+      metadata: {},
+    };
+    dashboardState.selectedApproval = null;
+    dashboardState.relatedTasks = [];
+    dashboardState.relatedApprovals = [];
+    dashboardState.childTasks = [];
+    dashboardState.subagentRun = null;
+  }
+  renderSelectionDetail();
+  updateDashboardUi();
+}
+
+async function loadApprovalDetail(requestId) {
+  if (!requestId) return;
+  const base = toHttpBaseUrl(currentSettings());
+  try {
+    const payload = await fetchJsonOrThrow(`${base}/tools/approvals/${encodeURIComponent(requestId)}`);
+    const approval = payload.approval || {};
+    const taskPayload = approval.session_id
+      ? await fetchJsonOrThrow(
+          `${base}/tasks?${new URLSearchParams({ session_id: approval.session_id, limit: "100" })}`
+        ).catch(() => ({ tasks: [] }))
+      : { tasks: [] };
+    const ids = new Set([approval.request_id, approval.source_request_id].filter(Boolean));
+    const relatedTasks = (Array.isArray(taskPayload.tasks) ? taskPayload.tasks : []).filter((task) => (
+      Array.isArray(task.approval_dependencies)
+      && task.approval_dependencies.some((dependency) => ids.has(dependency))
+    ));
+    dashboardState.selectedKind = "approval";
+    dashboardState.selectedId = requestId;
+    dashboardState.selectedApproval = approval;
+    dashboardState.selectedTask = null;
+    dashboardState.relatedTasks = relatedTasks;
+    dashboardState.relatedApprovals = [];
+    dashboardState.childTasks = [];
+    dashboardState.subagentRun = null;
+  } catch (err) {
+    dashboardState.selectedKind = "approval";
+    dashboardState.selectedId = requestId;
+    dashboardState.selectedApproval = {
+      request_id: requestId,
+      tool_name: "Failed to load approval",
+      state: "failed",
+      reason: String(err),
+      history: [],
+      args: {},
+    };
+    dashboardState.selectedTask = null;
+    dashboardState.relatedTasks = [];
+    dashboardState.relatedApprovals = [];
+    dashboardState.childTasks = [];
+    dashboardState.subagentRun = null;
+  }
+  renderSelectionDetail();
+  updateDashboardUi();
+}
+
+async function refreshSelectedDetail() {
+  if (dashboardState.selectedKind === "task" && dashboardState.selectedId) {
+    await loadTaskDetail(dashboardState.selectedId);
+    return;
+  }
+  if (dashboardState.selectedKind === "approval" && dashboardState.selectedId) {
+    await loadApprovalDetail(dashboardState.selectedId);
+    return;
+  }
+  renderSelectionDetail();
+}
+
+function scheduleDashboardRefresh(delay = 250) {
+  if (_dashboardRefreshHandle) {
+    window.clearTimeout(_dashboardRefreshHandle);
+  }
+  _dashboardRefreshHandle = window.setTimeout(() => {
+    _dashboardRefreshHandle = null;
+    void refreshDashboard();
+  }, delay);
+}
+
+async function resolveApprovalFromPanel(container, requestId, approved) {
+  const base = toHttpBaseUrl(currentSettings());
+  const scope = container.querySelector('[data-approval-field="scope"]')?.value || "single";
+  const toolPattern = container.querySelector('[data-approval-field="tool-pattern"]')?.value || "";
+  const pathScope = container.querySelector('[data-approval-field="path-scope"]')?.value || "";
+  const propagate = Boolean(container.querySelector('[data-approval-field="propagate"]')?.checked);
+  const sessionId = dashboardState.selectedApproval?.session_id || currentSessionId || "";
+  const reason = approved ? "Approved in Control UI panel" : "Denied in Control UI panel";
+  try {
+    await fetchJsonOrThrow(`${base}/tools/approvals/${encodeURIComponent(requestId)}/resolve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        approved,
+        reason,
+        session_id: sessionId,
+        scope,
+        tool_pattern: toolPattern,
+        path_scope: pathScope,
+        propagate_to_subagents: propagate,
+      }),
+    });
+    scheduleDashboardRefresh(100);
+  } catch (err) {
+    addSystemMessage(`approval error: ${err}`);
+  }
+}
+
+async function steerSubagentFromPanel(container, runId) {
+  const base = toHttpBaseUrl(currentSettings());
+  const message = container.querySelector('[data-role="steer-message"]')?.value?.trim() || "";
+  if (!message) {
+    addSystemMessage("steer message is required");
+    return;
+  }
+  try {
+    await fetchJsonOrThrow(`${base}/subagents/${encodeURIComponent(runId)}/steer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+    scheduleDashboardRefresh(100);
+  } catch (err) {
+    addSystemMessage(`subagent steer error: ${err}`);
+  }
+}
+
+async function killSubagentFromPanel(runId) {
+  const base = toHttpBaseUrl(currentSettings());
+  try {
+    await fetchJsonOrThrow(`${base}/subagents/${encodeURIComponent(runId)}`, {
+      method: "DELETE",
+    });
+    scheduleDashboardRefresh(100);
+  } catch (err) {
+    addSystemMessage(`subagent kill error: ${err}`);
+  }
+}
+
+function handleDashboardListSelectionClick(event) {
+  const taskButton = event.target.closest("[data-task-id]");
+  if (taskButton?.dataset.taskId) {
+    void loadTaskDetail(taskButton.dataset.taskId);
+    return;
+  }
+  const approvalButton = event.target.closest("[data-approval-id]");
+  if (approvalButton?.dataset.approvalId) {
+    void loadApprovalDetail(approvalButton.dataset.approvalId);
+  }
+}
+
+function handleSelectionPanelClick(event) {
+  const taskRef = event.target.closest("[data-task-ref]");
+  if (taskRef?.dataset.taskRef) {
+    void loadTaskDetail(taskRef.dataset.taskRef);
+    return;
+  }
+  const approvalRef = event.target.closest("[data-approval-ref]");
+  if (approvalRef?.dataset.approvalRef) {
+    void loadApprovalDetail(approvalRef.dataset.approvalRef);
+    return;
+  }
+  const actionButton = event.target.closest("[data-action]");
+  if (!actionButton) return;
+  const container = event.currentTarget;
+  if (actionButton.dataset.action === "approval-resolve") {
+    void resolveApprovalFromPanel(
+      container,
+      actionButton.dataset.requestId || "",
+      actionButton.dataset.approved === "true",
+    );
+    return;
+  }
+  if (actionButton.dataset.action === "subagent-steer") {
+    void steerSubagentFromPanel(container, actionButton.dataset.runId || "");
+    return;
+  }
+  if (actionButton.dataset.action === "subagent-kill") {
+    void killSubagentFromPanel(actionButton.dataset.runId || "");
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -738,7 +1335,7 @@ async function fetchDashboardHealth(base) {
 async function fetchDashboardApprovals(base) {
   const params = new URLSearchParams({ state: "pending", limit: "50" });
   if (currentSessionId) params.set("session_id", currentSessionId);
-  const recentParams = new URLSearchParams({ state: "all", limit: "12" });
+  const recentParams = new URLSearchParams({ state: "all", limit: "50" });
   if (currentSessionId) recentParams.set("session_id", currentSessionId);
   try {
     const [pendingRes, recentRes] = await Promise.all([
@@ -764,7 +1361,7 @@ async function fetchDashboardApprovals(base) {
 }
 
 async function fetchDashboardTasks(base) {
-  const params = new URLSearchParams({ limit: "50" });
+  const params = new URLSearchParams({ limit: "100" });
   if (currentSessionId) params.set("session_id", currentSessionId);
   try {
     const res = await apiFetch(`${base}/tasks?${params}`);
@@ -783,13 +1380,26 @@ async function fetchDashboardTasks(base) {
 }
 
 async function refreshDashboard() {
+  if (_dashboardRefreshPromise) {
+    return _dashboardRefreshPromise;
+  }
   const base = toHttpBaseUrl(currentSettings());
-  await Promise.all([
-    fetchDashboardHealth(base),
-    fetchDashboardApprovals(base),
-    fetchDashboardTasks(base)
-  ]);
-  updateDashboardUi();
+  _dashboardRefreshPromise = (async () => {
+    await Promise.all([
+      fetchDashboardHealth(base),
+      fetchDashboardApprovals(base),
+      fetchDashboardTasks(base)
+    ]);
+    updateDashboardUi();
+    if (dashboardState.selectedKind && dashboardState.selectedId) {
+      await refreshSelectedDetail();
+    }
+  })();
+  try {
+    await _dashboardRefreshPromise;
+  } finally {
+    _dashboardRefreshPromise = null;
+  }
 }
 
 function ensureDashboardPolling() {
@@ -812,7 +1422,7 @@ function handleConnected(payload) {
   // Request history from Gateway (source of truth)
   requestGatewayHistory();
   void syncServerSessions();
-  void refreshDashboard();
+  scheduleDashboardRefresh(50);
 }
 
 function handleChatDone(payload) {
@@ -832,7 +1442,7 @@ function handleChatDone(payload) {
   setRunInProgress(false);
   logEvent("chat.done", { aborted: payload.aborted, len: (payload.text || "").length });
   void syncServerSessions();
-  void refreshDashboard();
+  scheduleDashboardRefresh(50);
 }
 
 function handleChatToken(payload) {
@@ -860,7 +1470,7 @@ function handleSystemEvent(payload) {
     }
   }
   addSystemMessage(msg);
-  void refreshDashboard();
+  scheduleDashboardRefresh(50);
 }
 
 function handleHealthTick(payload) {
@@ -869,7 +1479,7 @@ function handleHealthTick(payload) {
     setTimeout(() => heartbeatDotEl.classList.remove("pulse"), 400);
   }
   logEvent("health.tick", { active_sessions: payload.active_sessions });
-  void refreshDashboard();
+  scheduleDashboardRefresh(50);
 }
 
 function handleCronUpdate(payload) {
@@ -892,7 +1502,7 @@ function handleToolsApprovalRequest(payload) {
     status: "pending",
     note: "Respond inline to continue this run."
   });
-  void refreshDashboard();
+  scheduleDashboardRefresh(50);
 }
 
 function handleControlApprovalRequest(payload) {
@@ -914,7 +1524,7 @@ function handleControlApprovalRequest(payload) {
     status: "pending",
     note: "Respond inline to continue the control loop."
   });
-  void refreshDashboard();
+  scheduleDashboardRefresh(50);
 }
 
 function sendApproval(requestId, approved) {
@@ -932,7 +1542,7 @@ function sendApproval(requestId, approved) {
     approved ? "approving" : "denying",
     approved ? "Approval sent. Waiting for gateway confirmation..." : "Denial sent. Waiting for gateway confirmation..."
   );
-  void refreshDashboard();
+  scheduleDashboardRefresh(50);
 }
 
 // -----------------------------------------------------------------------
@@ -1244,7 +1854,7 @@ function activateTab(tabKey) {
   tabTitle.textContent = meta.title;
   tabSubtitle.textContent = meta.subtitle;
   if (tabKey === "chat") restoreMessages();
-  if (tabKey === "dashboard") void refreshDashboard();
+  if (tabKey === "dashboard") scheduleDashboardRefresh(0);
   if (tabKey === "sessions") void syncServerSessions();
   if (tabKey === "skills") void fetchSkills();
   if (tabKey === "memory") void fetchMemory();
@@ -1298,7 +1908,7 @@ function connect(targetSessionId = null) {
     _streamingText = "";
     addSystemMessage(`disconnected (code=${event.code})`);
     logEvent("socket.close", { code: event.code, reason: event.reason || "" });
-    void refreshDashboard();
+    scheduleDashboardRefresh(50);
   };
 
   socket.onerror = () => {
@@ -1414,7 +2024,51 @@ disconnectBtn.addEventListener("click", disconnect);
 abortBtn.addEventListener("click", abortRun);
 saveSettingsBtn.addEventListener("click", persistSettings);
 resetSettingsBtn.addEventListener("click", resetSettings);
-refreshDashboardBtn.addEventListener("click", () => void refreshDashboard());
+refreshDashboardBtn.addEventListener("click", () => scheduleDashboardRefresh(0));
+clearDashboardFiltersBtn?.addEventListener("click", () => {
+  dashboardState.searchQuery = "";
+  dashboardState.taskStatusFilter = "all";
+  dashboardState.approvalStateFilter = "all";
+  if (dashboardSearchInputEl) dashboardSearchInputEl.value = "";
+  dashboardFilterChips.forEach((chip) => {
+    const active = chip.dataset.filterValue === "all";
+    chip.classList.toggle("active", active);
+  });
+  updateDashboardUi();
+});
+dashboardSearchInputEl?.addEventListener("input", () => {
+  dashboardState.searchQuery = dashboardSearchInputEl.value || "";
+  updateDashboardUi();
+});
+dashboardFilterChips.forEach((chip) => {
+  chip.addEventListener("click", () => {
+    const kind = chip.dataset.filterKind;
+    const value = chip.dataset.filterValue || "all";
+    if (kind === "task-status") {
+      dashboardState.taskStatusFilter = value;
+    } else if (kind === "approval-state") {
+      dashboardState.approvalStateFilter = value;
+    }
+    dashboardFilterChips
+      .filter((candidate) => candidate.dataset.filterKind === kind)
+      .forEach((candidate) => candidate.classList.toggle("active", candidate === chip));
+    updateDashboardUi();
+  });
+});
+[
+  dashboardApprovalsListEl,
+  dashboardTasksListEl,
+  inspectorApprovalsListEl,
+  inspectorTasksListEl,
+].forEach((element) => {
+  element?.addEventListener("click", handleDashboardListSelectionClick);
+});
+[
+  dashboardDetailPanelEl,
+  inspectorSelectionDetailEl,
+].forEach((element) => {
+  element?.addEventListener("click", handleSelectionPanelClick);
+});
 refreshSkillsBtn.addEventListener("click", () => void fetchSkills());
 runSkillBtn.addEventListener("click", () => void executeSkill());
 refreshMemoryBtn.addEventListener("click", () => void fetchMemory());
@@ -1461,6 +2115,6 @@ activateTab("chat");
 setStatus(false, "offline");
 setRunInProgress(false);
 ensureDashboardPolling();
-void refreshDashboard();
+scheduleDashboardRefresh(0);
 addSystemMessage("ready: Configure settings then press Connect");
 logEvent("ui.ready", currentSettings());

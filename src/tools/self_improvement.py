@@ -15,7 +15,7 @@ from src.computer_use.trajectory_store import get_computer_trajectory_store
 from src.config.settings import get_settings
 from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
-from src.tools.memory import memory_store
+from src.tools.memory import memory_search, memory_store
 from src.tools.shell import run_shell_guarded
 from src.tools.tasks import create_task_record, update_task_record
 
@@ -165,6 +165,59 @@ def _trajectory_improvement_summary(trajectory: dict[str, Any]) -> str:
         f"Demo candidate for failed computer trajectory {trajectory.get('id')}: "
         f"improve {action} handling around {target} after {_trajectory_failure_reason(trajectory)}."
     )
+
+
+def _trajectory_reuse_query(trajectory: dict[str, Any]) -> str:
+    request = trajectory.get("request") or {}
+    parts = [
+        str(trajectory.get("action") or "").strip(),
+        str(request.get("selector") or "").strip(),
+        str(request.get("title") or "").strip(),
+        str(request.get("identifier") or "").strip(),
+        str(trajectory.get("final_surface") or "").strip(),
+        _trajectory_failure_reason(trajectory),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+async def _find_reuse_suggestions(
+    trajectory: dict[str, Any],
+    *,
+    limit: int = 3,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    query = _trajectory_reuse_query(trajectory)
+    if not query:
+        return {"query": "", "results": []}
+
+    search = await memory_search(
+        query=query,
+        kind="approved_improvement",
+        limit=max(1, min(limit, 10)),
+        tool_context=tool_context,
+    )
+    if not search.get("success"):
+        return {
+            "query": query,
+            "results": [],
+            "error": search.get("error") or "failed to search approved improvements",
+        }
+
+    results: list[dict[str, Any]] = []
+    for item in search.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        results.append(
+            {
+                "memory_id": item.get("id"),
+                "content": item.get("content"),
+                "score": item.get("score"),
+                "created_at": item.get("created_at"),
+                "tags": item.get("tags") or [],
+                "metadata": item.get("metadata") or {},
+            }
+        )
+    return {"query": query, "results": results}
 
 
 def _parse_candidate_specs(candidate_specs_json: str) -> list[dict[str, Any]]:
@@ -602,6 +655,7 @@ async def self_improvement_demo_from_trajectory(
 
     resolved_goal = goal or _trajectory_demo_goal(trajectory)
     resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
+    reuse = await _find_reuse_suggestions(trajectory, tool_context=tool_context)
     task_record = create_task_record(
         kind="self_improvement_demo",
         title=resolved_goal,
@@ -610,6 +664,8 @@ async def self_improvement_demo_from_trajectory(
             "trajectory": trajectory,
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
+            "reuse_query": reuse.get("query", ""),
+            "reuse_suggestions": reuse.get("results", []),
         },
         metadata={
             "trajectory_id": trajectory_id,
@@ -651,6 +707,8 @@ async def self_improvement_demo_from_trajectory(
             "failure_reason": _trajectory_failure_reason(trajectory),
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
+            "reuse_query": reuse.get("query", ""),
+            "reuse_suggestions": reuse.get("results", []),
             "started_at": time.time(),
         },
     )
@@ -701,6 +759,8 @@ async def self_improvement_demo_from_trajectory(
         "package": packaged,
         "goal": resolved_goal,
         "improvement_summary": resolved_summary,
+        "reuse_query": reuse.get("query", ""),
+        "reuse_suggestions": reuse.get("results", []),
     }
     if auto_cleanup:
         payload["cleanup"] = await self_improvement_cleanup_canary(
@@ -750,6 +810,7 @@ async def self_improvement_search_from_trajectory(
 
     resolved_goal = goal or _trajectory_search_goal(trajectory)
     resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
+    reuse = await _find_reuse_suggestions(trajectory, tool_context=tool_context)
     parent_task = create_task_record(
         kind="self_improvement_search",
         title=resolved_goal,
@@ -758,6 +819,8 @@ async def self_improvement_search_from_trajectory(
             "trajectory": trajectory,
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
+            "reuse_query": reuse.get("query", ""),
+            "reuse_suggestions": reuse.get("results", []),
         },
         metadata={
             "trajectory_id": trajectory_id,
@@ -836,6 +899,8 @@ async def self_improvement_search_from_trajectory(
                 "failure_reason": _trajectory_failure_reason(trajectory),
                 "goal": candidate_goal,
                 "improvement_summary": candidate_summary,
+                "reuse_query": reuse.get("query", ""),
+                "reuse_suggestions": reuse.get("results", []),
                 "started_at": time.time(),
             },
         )
@@ -948,6 +1013,8 @@ async def self_improvement_search_from_trajectory(
         "trajectory": trajectory,
         "goal": resolved_goal,
         "improvement_summary": resolved_summary,
+        "reuse_query": reuse.get("query", ""),
+        "reuse_suggestions": reuse.get("results", []),
         "candidates": candidates,
     }
     if winner is not None:
@@ -968,6 +1035,8 @@ async def self_improvement_search_from_trajectory(
             "candidate_task_ids": candidate_task_ids,
             "winner_name": payload.get("winner_name"),
             "winner_task_id": winner_task_id,
+            "reuse_query": reuse.get("query", ""),
+            "reuse_suggestions": reuse.get("results", []),
         },
         error=payload.get("error"),
     )
