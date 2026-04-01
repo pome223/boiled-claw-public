@@ -1704,6 +1704,7 @@ class GatewayServer:
             session_id: Optional[str] = None,
             state: Optional[str] = None,
             include_expired: bool = False,
+            limit: Optional[int] = None,
         ):
             selected_state = state or "pending"
             return {
@@ -1711,6 +1712,7 @@ class GatewayServer:
                     session_id=session_id,
                     state=selected_state,
                     include_expired=include_expired,
+                    limit=max(1, min(limit, 100)) if limit is not None else None,
                 )
             }
 

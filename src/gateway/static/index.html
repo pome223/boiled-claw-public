@@ -24,6 +24,7 @@
 
       <nav class="nav">
         <button class="nav-item active" data-tab="chat">Chat</button>
+        <button class="nav-item" data-tab="dashboard">Dashboard</button>
         <button class="nav-item" data-tab="sessions">Sessions</button>
         <button class="nav-item" data-tab="channels">Channels</button>
         <button class="nav-item" data-tab="skills">Skills</button>
@@ -74,6 +75,38 @@
             </form>
           </div>
           <aside class="inspector">
+            <div class="dashboard-summary inspector-summary">
+              <div class="summary-card">
+                <div class="k">Session Backend</div>
+                <div id="inspectorSessionBackend" class="summary-value mono">-</div>
+              </div>
+              <div class="summary-card">
+                <div class="k">Current Session</div>
+                <div id="inspectorCurrentSession" class="summary-value mono">-</div>
+              </div>
+              <div class="summary-card">
+                <div class="k">Pending Approvals</div>
+                <div id="inspectorPendingApprovals" class="summary-value">0</div>
+              </div>
+              <div class="summary-card">
+                <div class="k">Open Tasks</div>
+                <div id="inspectorOpenTasks" class="summary-value">0</div>
+              </div>
+            </div>
+            <details class="event-stream-panel" open>
+              <summary>
+                <span>Pending Approvals</span>
+                <span id="inspectorApprovalCountBadge" class="tag">0</span>
+              </summary>
+              <ul id="inspectorApprovalsList" class="list compact-list"></ul>
+            </details>
+            <details class="event-stream-panel" open>
+              <summary>
+                <span>Recent Tasks</span>
+                <span id="inspectorTaskCountBadge" class="tag">0</span>
+              </summary>
+              <ul id="inspectorTasksList" class="list compact-list"></ul>
+            </details>
             <details id="eventStreamPanel" class="event-stream-panel">
               <summary>
                 <span>Event Stream</span>
@@ -82,6 +115,54 @@
               <div id="eventLog" class="event-log"></div>
             </details>
           </aside>
+        </div>
+      </section>
+
+      <section id="tab-dashboard" class="tab">
+        <div class="panel dashboard-panel">
+          <div class="skills-toolbar">
+            <div>
+              <h3>Task / Approval Dashboard</h3>
+              <p class="muted">Live task objects, approval state, and session backend status for the current Gateway.</p>
+            </div>
+            <button id="refreshDashboardBtn" class="btn" type="button">Refresh</button>
+          </div>
+
+          <div class="dashboard-summary">
+            <div class="summary-card">
+              <div class="k">Session Backend</div>
+              <div id="dashboardSessionBackend" class="summary-value mono">-</div>
+            </div>
+            <div class="summary-card">
+              <div class="k">Session Namespace</div>
+              <div id="dashboardSessionNamespace" class="summary-value mono">-</div>
+            </div>
+            <div class="summary-card">
+              <div class="k">Pending Approvals</div>
+              <div id="dashboardPendingApprovals" class="summary-value">0</div>
+            </div>
+            <div class="summary-card">
+              <div class="k">Open Tasks</div>
+              <div id="dashboardOpenTasks" class="summary-value">0</div>
+            </div>
+          </div>
+
+          <div class="dashboard-grid">
+            <div class="dashboard-column">
+              <div class="dashboard-section-header">
+                <h4>Approvals</h4>
+                <span id="dashboardApprovalsCaption" class="muted mono">latest</span>
+              </div>
+              <ul id="dashboardApprovalsList" class="list compact-list"></ul>
+            </div>
+            <div class="dashboard-column">
+              <div class="dashboard-section-header">
+                <h4>Tasks</h4>
+                <span id="dashboardTasksCaption" class="muted mono">latest</span>
+              </div>
+              <ul id="dashboardTasksList" class="list compact-list"></ul>
+            </div>
+          </div>
         </div>
       </section>
 

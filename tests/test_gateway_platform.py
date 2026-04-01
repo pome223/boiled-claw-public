@@ -1149,23 +1149,52 @@ def test_http_tool_approvals_list_exposes_stateful_metadata(monkeypatch, tmp_pat
             expires_at=time.time() + 60,
             propagate_to_subagents=True,
         )
+        second = gateway.tool_policy.create_approval_request(
+            request_id="req-stateful-2",
+            tool_name="write_file",
+            agent_name="boiled_claw",
+            args={"path": str(tmp_path / "note.txt")},
+            session_id="sess-stateful",
+            reason="file writes need approval",
+        )
+        gateway.tool_policy.resolve_approval(
+            second.request_id,
+            False,
+            "denied in test",
+        )
 
         response = client.get(
             "/tools/approvals",
             params={
                 "session_id": "sess-stateful",
                 "state": "all",
+                "limit": 1,
             },
         )
 
     assert response.status_code == 200
     approvals = response.json()["approvals"]
     assert len(approvals) == 1
-    assert approvals[0]["state"] == "approved"
-    assert approvals[0]["scope"] == "session"
-    assert approvals[0]["tool_pattern"] == "run_shell"
-    assert approvals[0]["path_scope"] == str(tmp_path.resolve())
-    assert approvals[0]["propagate_to_subagents"] is True
+    assert approvals[0]["request_id"] == second.request_id
+    assert approvals[0]["state"] == "denied"
+
+    full_response = client.get(
+        "/tools/approvals",
+        params={
+            "session_id": "sess-stateful",
+            "state": "all",
+            "limit": 10,
+        },
+    )
+
+    assert full_response.status_code == 200
+    approvals = full_response.json()["approvals"]
+    assert len(approvals) == 2
+    assert approvals[1]["state"] == "approved"
+    assert approvals[1]["scope"] == "session"
+    assert approvals[1]["tool_pattern"] == "run_shell"
+    assert approvals[1]["path_scope"] == str(tmp_path.resolve())
+    assert approvals[1]["propagate_to_subagents"] is True
 
 
 def test_websocket_tool_approval_resolution_accepts_scope_fields(monkeypatch, tmp_path):

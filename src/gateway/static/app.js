@@ -1,5 +1,6 @@
 const NAV_META = {
   chat: { title: "Chat", subtitle: "Gateway WebSocket chat" },
+  dashboard: { title: "Dashboard", subtitle: "Task objects, approvals, and runtime status" },
   sessions: { title: "Sessions", subtitle: "Current browser sessions" },
   channels: { title: "Channels", subtitle: "Channel status overview" },
   skills: { title: "Skills", subtitle: "OpenClaw-style skill catalog and run" },
@@ -26,6 +27,23 @@ const eventLogEl = document.getElementById("eventLog");
 const eventCountBadgeEl = document.getElementById("eventCountBadge");
 const rawLogEl = document.getElementById("rawLog");
 const sessionListEl = document.getElementById("sessionList");
+const refreshDashboardBtn = document.getElementById("refreshDashboardBtn");
+const dashboardSessionBackendEl = document.getElementById("dashboardSessionBackend");
+const dashboardSessionNamespaceEl = document.getElementById("dashboardSessionNamespace");
+const dashboardPendingApprovalsEl = document.getElementById("dashboardPendingApprovals");
+const dashboardOpenTasksEl = document.getElementById("dashboardOpenTasks");
+const dashboardApprovalsListEl = document.getElementById("dashboardApprovalsList");
+const dashboardTasksListEl = document.getElementById("dashboardTasksList");
+const dashboardApprovalsCaptionEl = document.getElementById("dashboardApprovalsCaption");
+const dashboardTasksCaptionEl = document.getElementById("dashboardTasksCaption");
+const inspectorSessionBackendEl = document.getElementById("inspectorSessionBackend");
+const inspectorCurrentSessionEl = document.getElementById("inspectorCurrentSession");
+const inspectorPendingApprovalsEl = document.getElementById("inspectorPendingApprovals");
+const inspectorOpenTasksEl = document.getElementById("inspectorOpenTasks");
+const inspectorApprovalsListEl = document.getElementById("inspectorApprovalsList");
+const inspectorTasksListEl = document.getElementById("inspectorTasksList");
+const inspectorApprovalCountBadgeEl = document.getElementById("inspectorApprovalCountBadge");
+const inspectorTaskCountBadgeEl = document.getElementById("inspectorTaskCountBadge");
 const statusDotEl = document.getElementById("statusDot");
 const statusTextEl = document.getElementById("statusText");
 const sessionBadgeEl = document.getElementById("sessionBadge");
@@ -77,12 +95,22 @@ const messageHistory = [];
 let currentSessionId = null;
 const inlineApprovals = new Map();
 const MAX_EVENT_ROWS = 200;
+const DASHBOARD_POLL_INTERVAL_MS = 5000;
 
 // --- streaming state ---
 let _streamingBubble = null;
 let _streamingText = "";
 let _runInProgress = false;
 let _messageInputComposing = false;
+let _dashboardPollHandle = null;
+const dashboardState = {
+  sessionBackend: "-",
+  sessionNamespace: "",
+  pendingApprovals: [],
+  recentApprovals: [],
+  recentTasks: [],
+  openTaskCount: 0
+};
 
 // -----------------------------------------------------------------------
 // Settings
@@ -404,6 +432,151 @@ function escapeAttr(str) {
   return escapeHtml(str).replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
+function formatTimestamp(ts) {
+  if (!ts) return "-";
+  try {
+    return new Date(ts * 1000).toLocaleString();
+  } catch (_) {
+    return "-";
+  }
+}
+
+function statusTag(status) {
+  const safe = escapeHtml(status || "unknown");
+  const cls = `tag status-tag status-${String(status || "unknown").toLowerCase().replace(/[^a-z0-9_-]/g, "-")}`;
+  return `<span class="${cls}">${safe}</span>`;
+}
+
+function renderApprovalListItem(item) {
+  const title = item.tool_name || item.tool_pattern || "approval";
+  const sessionScope = item.scope === "session" ? "session" : "single";
+  const meta = [item.agent_name || "-", sessionScope, formatTimestamp(item.created_at)].join(" · ");
+  const detail = item.reason || item.resolve_reason || "";
+  const scopeBits = [];
+  if (item.tool_pattern && item.tool_pattern !== item.tool_name) scopeBits.push(`tool=${item.tool_pattern}`);
+  if (item.path_scope) scopeBits.push(`path=${item.path_scope}`);
+  if (item.propagate_to_subagents) scopeBits.push("subagents");
+  const extra = scopeBits.length ? `<div class="item-meta mono">${escapeHtml(scopeBits.join(" · "))}</div>` : "";
+  return [
+    "<li>",
+    `<div class="item-head">`,
+    `<div class="item-title">${escapeHtml(title)}</div>`,
+    statusTag(item.state || "pending"),
+    "</div>",
+    `<div class="item-meta">${escapeHtml(meta)}</div>`,
+    detail ? `<div class="item-detail">${escapeHtml(detail)}</div>` : "",
+    extra,
+    "</li>"
+  ].join("");
+}
+
+function renderTaskListItem(task) {
+  const metaBits = [task.kind || "-", formatTimestamp(task.updated_at)];
+  if (task.task_id) metaBits.unshift(task.task_id);
+  const detailBits = [];
+  if (task.winner_task_id) detailBits.push(`winner=${task.winner_task_id}`);
+  if (Array.isArray(task.loser_task_ids) && task.loser_task_ids.length) {
+    detailBits.push(`losers=${task.loser_task_ids.length}`);
+  }
+  if (Array.isArray(task.approval_dependencies) && task.approval_dependencies.length) {
+    detailBits.push(`approvals=${task.approval_dependencies.length}`);
+  }
+  if (task.error) detailBits.push(`error=${task.error}`);
+  const artifactKeys = task.artifacts && typeof task.artifacts === "object"
+    ? Object.keys(task.artifacts).slice(0, 4)
+    : [];
+  return [
+    "<li>",
+    `<div class="item-head">`,
+    `<div class="item-title">${escapeHtml(task.title || task.kind || task.task_id || "task")}</div>`,
+    statusTag(task.status || "unknown"),
+    "</div>",
+    `<div class="item-meta mono">${escapeHtml(metaBits.join(" · "))}</div>`,
+    detailBits.length ? `<div class="item-detail mono">${escapeHtml(detailBits.join(" · "))}</div>` : "",
+    artifactKeys.length ? `<div class="item-meta mono">artifacts=${escapeHtml(artifactKeys.join(", "))}</div>` : "",
+    "</li>"
+  ].join("");
+}
+
+function renderCompactList(targetEl, items, renderer, emptyText) {
+  if (!targetEl) return;
+  if (!items.length) {
+    targetEl.innerHTML = `<li class="muted">${escapeHtml(emptyText)}</li>`;
+    return;
+  }
+  targetEl.innerHTML = items.map((item) => renderer(item)).join("");
+}
+
+function updateDashboardUi() {
+  const pendingCount = dashboardState.pendingApprovals.length;
+  const openTaskCount = dashboardState.openTaskCount;
+  if (dashboardSessionBackendEl) {
+    dashboardSessionBackendEl.textContent = dashboardState.sessionBackend || "-";
+  }
+  if (dashboardSessionNamespaceEl) {
+    dashboardSessionNamespaceEl.textContent = dashboardState.sessionNamespace || "-";
+  }
+  if (dashboardPendingApprovalsEl) {
+    dashboardPendingApprovalsEl.textContent = String(pendingCount);
+  }
+  if (dashboardOpenTasksEl) {
+    dashboardOpenTasksEl.textContent = String(openTaskCount);
+  }
+  if (dashboardApprovalsCaptionEl) {
+    dashboardApprovalsCaptionEl.textContent = pendingCount
+      ? `${pendingCount} pending`
+      : "latest";
+  }
+  if (dashboardTasksCaptionEl) {
+    dashboardTasksCaptionEl.textContent = currentSessionId
+      ? `session ${currentSessionId}`
+      : "latest";
+  }
+  if (inspectorSessionBackendEl) {
+    inspectorSessionBackendEl.textContent = dashboardState.sessionBackend || "-";
+  }
+  if (inspectorCurrentSessionEl) {
+    inspectorCurrentSessionEl.textContent = currentSessionId || "-";
+  }
+  if (inspectorPendingApprovalsEl) {
+    inspectorPendingApprovalsEl.textContent = String(pendingCount);
+  }
+  if (inspectorOpenTasksEl) {
+    inspectorOpenTasksEl.textContent = String(openTaskCount);
+  }
+  if (inspectorApprovalCountBadgeEl) {
+    inspectorApprovalCountBadgeEl.textContent = String(pendingCount);
+  }
+  if (inspectorTaskCountBadgeEl) {
+    inspectorTaskCountBadgeEl.textContent = String(dashboardState.recentTasks.length);
+  }
+
+  renderCompactList(
+    inspectorApprovalsListEl,
+    dashboardState.pendingApprovals.slice(0, 4),
+    renderApprovalListItem,
+    "No pending approvals."
+  );
+  renderCompactList(
+    inspectorTasksListEl,
+    dashboardState.recentTasks.slice(0, 5),
+    renderTaskListItem,
+    "No recent tasks."
+  );
+  renderCompactList(
+    dashboardApprovalsListEl,
+    dashboardState.recentApprovals,
+    renderApprovalListItem,
+    "No approvals yet."
+  );
+  renderCompactList(
+    dashboardTasksListEl,
+    dashboardState.recentTasks,
+    renderTaskListItem,
+    "No tasks yet."
+  );
+}
+
 // -----------------------------------------------------------------------
 // Gateway history (source of truth)
 // -----------------------------------------------------------------------
@@ -546,6 +719,87 @@ async function syncServerSessions() {
 }
 
 // -----------------------------------------------------------------------
+// Dashboard
+// -----------------------------------------------------------------------
+
+async function fetchDashboardHealth(base) {
+  try {
+    const res = await apiFetch(`${base}/health`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    dashboardState.sessionBackend = data.session_backend || "memory";
+    dashboardState.sessionNamespace = data.session_namespace || "";
+  } catch (_) {
+    dashboardState.sessionBackend = "-";
+    dashboardState.sessionNamespace = "";
+  }
+}
+
+async function fetchDashboardApprovals(base) {
+  const params = new URLSearchParams({ state: "pending", limit: "50" });
+  if (currentSessionId) params.set("session_id", currentSessionId);
+  const recentParams = new URLSearchParams({ state: "all", limit: "12" });
+  if (currentSessionId) recentParams.set("session_id", currentSessionId);
+  try {
+    const [pendingRes, recentRes] = await Promise.all([
+      apiFetch(`${base}/tools/approvals?${params}`),
+      apiFetch(`${base}/tools/approvals?${recentParams}`)
+    ]);
+    if (pendingRes.ok) {
+      const pendingData = await pendingRes.json();
+      dashboardState.pendingApprovals = Array.isArray(pendingData.approvals) ? pendingData.approvals : [];
+    } else {
+      dashboardState.pendingApprovals = [];
+    }
+    if (recentRes.ok) {
+      const recentData = await recentRes.json();
+      dashboardState.recentApprovals = Array.isArray(recentData.approvals) ? recentData.approvals : [];
+    } else {
+      dashboardState.recentApprovals = [];
+    }
+  } catch (_) {
+    dashboardState.pendingApprovals = [];
+    dashboardState.recentApprovals = [];
+  }
+}
+
+async function fetchDashboardTasks(base) {
+  const params = new URLSearchParams({ limit: "50" });
+  if (currentSessionId) params.set("session_id", currentSessionId);
+  try {
+    const res = await apiFetch(`${base}/tasks?${params}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const tasks = Array.isArray(data.tasks) ? data.tasks : [];
+    dashboardState.recentTasks = tasks.slice(0, 12);
+    dashboardState.openTaskCount = tasks.filter((task) => {
+      const status = String(task.status || "").toLowerCase();
+      return !["completed", "failed", "cancelled", "expired"].includes(status);
+    }).length;
+  } catch (_) {
+    dashboardState.recentTasks = [];
+    dashboardState.openTaskCount = 0;
+  }
+}
+
+async function refreshDashboard() {
+  const base = toHttpBaseUrl(currentSettings());
+  await Promise.all([
+    fetchDashboardHealth(base),
+    fetchDashboardApprovals(base),
+    fetchDashboardTasks(base)
+  ]);
+  updateDashboardUi();
+}
+
+function ensureDashboardPolling() {
+  if (_dashboardPollHandle) return;
+  _dashboardPollHandle = window.setInterval(() => {
+    void refreshDashboard();
+  }, DASHBOARD_POLL_INTERVAL_MS);
+}
+
+// -----------------------------------------------------------------------
 // WS event handlers
 // -----------------------------------------------------------------------
 
@@ -558,6 +812,7 @@ function handleConnected(payload) {
   // Request history from Gateway (source of truth)
   requestGatewayHistory();
   void syncServerSessions();
+  void refreshDashboard();
 }
 
 function handleChatDone(payload) {
@@ -577,6 +832,7 @@ function handleChatDone(payload) {
   setRunInProgress(false);
   logEvent("chat.done", { aborted: payload.aborted, len: (payload.text || "").length });
   void syncServerSessions();
+  void refreshDashboard();
 }
 
 function handleChatToken(payload) {
@@ -604,6 +860,7 @@ function handleSystemEvent(payload) {
     }
   }
   addSystemMessage(msg);
+  void refreshDashboard();
 }
 
 function handleHealthTick(payload) {
@@ -612,6 +869,7 @@ function handleHealthTick(payload) {
     setTimeout(() => heartbeatDotEl.classList.remove("pulse"), 400);
   }
   logEvent("health.tick", { active_sessions: payload.active_sessions });
+  void refreshDashboard();
 }
 
 function handleCronUpdate(payload) {
@@ -634,6 +892,7 @@ function handleToolsApprovalRequest(payload) {
     status: "pending",
     note: "Respond inline to continue this run."
   });
+  void refreshDashboard();
 }
 
 function handleControlApprovalRequest(payload) {
@@ -655,6 +914,7 @@ function handleControlApprovalRequest(payload) {
     status: "pending",
     note: "Respond inline to continue the control loop."
   });
+  void refreshDashboard();
 }
 
 function sendApproval(requestId, approved) {
@@ -672,6 +932,7 @@ function sendApproval(requestId, approved) {
     approved ? "approving" : "denying",
     approved ? "Approval sent. Waiting for gateway confirmation..." : "Denial sent. Waiting for gateway confirmation..."
   );
+  void refreshDashboard();
 }
 
 // -----------------------------------------------------------------------
@@ -983,6 +1244,7 @@ function activateTab(tabKey) {
   tabTitle.textContent = meta.title;
   tabSubtitle.textContent = meta.subtitle;
   if (tabKey === "chat") restoreMessages();
+  if (tabKey === "dashboard") void refreshDashboard();
   if (tabKey === "sessions") void syncServerSessions();
   if (tabKey === "skills") void fetchSkills();
   if (tabKey === "memory") void fetchMemory();
@@ -1036,6 +1298,7 @@ function connect(targetSessionId = null) {
     _streamingText = "";
     addSystemMessage(`disconnected (code=${event.code})`);
     logEvent("socket.close", { code: event.code, reason: event.reason || "" });
+    void refreshDashboard();
   };
 
   socket.onerror = () => {
@@ -1151,6 +1414,7 @@ disconnectBtn.addEventListener("click", disconnect);
 abortBtn.addEventListener("click", abortRun);
 saveSettingsBtn.addEventListener("click", persistSettings);
 resetSettingsBtn.addEventListener("click", resetSettings);
+refreshDashboardBtn.addEventListener("click", () => void refreshDashboard());
 refreshSkillsBtn.addEventListener("click", () => void fetchSkills());
 runSkillBtn.addEventListener("click", () => void executeSkill());
 refreshMemoryBtn.addEventListener("click", () => void fetchMemory());
@@ -1192,8 +1456,11 @@ document.addEventListener("keydown", (e) => {
 const initialSettings = { ...parseStoredSettings(), ...parseUrlSettings() };
 applySettings(initialSettings);
 renderSessions();
+updateDashboardUi();
 activateTab("chat");
 setStatus(false, "offline");
 setRunInProgress(false);
+ensureDashboardPolling();
+void refreshDashboard();
 addSystemMessage("ready: Configure settings then press Connect");
 logEvent("ui.ready", currentSettings());

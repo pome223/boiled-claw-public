@@ -52,11 +52,11 @@ The Web UI is the easiest way to understand the system. The CLI hits the same Ga
 
 ## Control UI
 
-The Gateway ships a browser-based chat and event stream so you can see routing, approvals, tool results, and recovery in one place.
+The Gateway ships a browser-based chat, task dashboard, and event stream so you can see routing, approvals, tool results, and recovery in one place.
 
 ![boiled-claw Control UI example](assets/control-ui-demo.png)
 
-The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, an agent response, and the live event stream that explains what happened.
+The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened.
 
 ## Thesis
 
@@ -119,6 +119,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
+- 📊 **Task / Approval Dashboard** - Control UI surfaces pending approvals, recent workflow tasks, and the active session backend
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`

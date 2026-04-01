@@ -243,9 +243,62 @@ body {
   padding: 14px;
   background: rgba(7, 14, 26, 0.6);
   display: grid;
-  grid-template-rows: min-content;
+  grid-template-rows: repeat(4, min-content);
+  gap: 12px;
   align-content: start;
   min-height: 0;
+}
+
+.dashboard-panel {
+  display: grid;
+  gap: 16px;
+}
+
+.dashboard-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.summary-card {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 12px;
+  background: rgba(15, 27, 50, 0.42);
+  min-width: 0;
+}
+
+.summary-value {
+  font-size: 1rem;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.inspector-summary .summary-value {
+  font-size: 0.92rem;
+}
+
+.dashboard-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.dashboard-column {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.dashboard-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dashboard-section-header h4 {
+  margin: 0;
 }
 
 .messages {
@@ -437,6 +490,68 @@ textarea {
   background: rgba(16, 31, 56, 0.5);
 }
 
+.compact-list {
+  margin-top: 0;
+}
+
+.inspector .compact-list {
+  max-height: 180px;
+  overflow: auto;
+}
+
+.compact-list li {
+  display: grid;
+  gap: 6px;
+}
+
+.compact-list .item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
+.compact-list .item-title {
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.compact-list .item-meta,
+.compact-list .item-detail {
+  font-size: 0.82rem;
+  color: var(--muted);
+  word-break: break-word;
+}
+
+.compact-list .item-detail {
+  color: var(--text);
+  opacity: 0.92;
+}
+
+.status-tag {
+  text-transform: lowercase;
+}
+
+.status-tag.status-pending,
+.status-tag.status-approved,
+.status-tag.status-propagated,
+.status-tag.status-accepted,
+.status-tag.status-running,
+.status-tag.status-idle {
+  color: var(--ok);
+}
+
+.status-tag.status-denied,
+.status-tag.status-failed,
+.status-tag.status-cancelled,
+.status-tag.status-expired {
+  color: var(--bad);
+}
+
+.status-tag.status-completed {
+  color: var(--blue);
+}
+
 .placeholder-box {
   margin-top: 12px;
   border: 1px dashed var(--line);
@@ -534,6 +649,10 @@ textarea {
     border-top: 1px solid var(--line);
     max-height: none;
   }
+
+  .dashboard-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 900px) {
@@ -554,6 +673,10 @@ textarea {
   .nav {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .dashboard-summary {
+    grid-template-columns: 1fr;
   }
 }
 
