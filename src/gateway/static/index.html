@@ -25,6 +25,7 @@
       <nav class="nav">
         <button class="nav-item active" data-tab="chat">Chat</button>
         <button class="nav-item" data-tab="dashboard">Dashboard</button>
+        <button class="nav-item" data-tab="audit">Audit</button>
         <button class="nav-item" data-tab="sessions">Sessions</button>
         <button class="nav-item" data-tab="channels">Channels</button>
         <button class="nav-item" data-tab="skills">Skills</button>
@@ -229,6 +230,71 @@
             </div>
             <div id="dashboardDetailPanel" class="selection-detail selection-detail-empty">
               Click a task or approval to inspect full artifacts, metadata, related records, and intervention actions.
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="tab-audit" class="tab">
+        <div class="panel dashboard-panel">
+          <div class="skills-toolbar">
+            <div>
+              <h3>Audit Log Explorer</h3>
+              <p class="muted">Filter runtime audit events by actor, session, tool, source, and result.</p>
+            </div>
+            <div class="actions">
+              <button id="clearAuditFiltersBtn" class="btn" type="button">Clear Filters</button>
+              <button id="refreshAuditBtn" class="btn" type="button">Refresh</button>
+            </div>
+          </div>
+
+          <div class="dashboard-filter-row audit-filter-grid">
+            <input
+              id="auditSearchInput"
+              class="text-input mono"
+              type="search"
+              placeholder="Search approval ids, tool names, resource paths, before/after scopes..."
+            />
+            <input id="auditActorInput" class="text-input mono" type="search" placeholder="actor user id" />
+            <input id="auditSessionInput" class="text-input mono" type="search" placeholder="session id" />
+            <input id="auditToolInput" class="text-input mono" type="search" placeholder="tool / resource" />
+            <input id="auditSourceInput" class="text-input mono" type="search" placeholder="source (http, websocket, ...)" />
+            <input id="auditResultInput" class="text-input mono" type="search" placeholder="result (resolved, success, failed...)" />
+          </div>
+
+          <div class="dashboard-summary">
+            <div class="summary-card">
+              <div class="k">Current Session</div>
+              <div id="auditCurrentSession" class="summary-value mono">-</div>
+            </div>
+            <div class="summary-card">
+              <div class="k">Matching Events</div>
+              <div id="auditMatchCount" class="summary-value">0</div>
+            </div>
+          </div>
+
+          <div class="dashboard-grid">
+            <div class="dashboard-column">
+              <div class="dashboard-section-header">
+                <h4>Events</h4>
+                <div class="dashboard-section-controls">
+                  <span id="auditCaption" class="muted mono">latest</span>
+                  <div class="pager-controls">
+                    <button id="auditPrevBtn" class="btn btn-sm" type="button">Prev</button>
+                    <button id="auditNextBtn" class="btn btn-sm" type="button">Next</button>
+                  </div>
+                </div>
+              </div>
+              <ul id="auditList" class="list compact-list"></ul>
+            </div>
+            <div class="dashboard-column">
+              <div class="dashboard-section-header">
+                <h4>Event Detail</h4>
+                <span id="auditDetailBadge" class="muted mono">none selected</span>
+              </div>
+              <div id="auditDetailPanel" class="selection-detail selection-detail-empty">
+                Select an audit event to inspect actor, source, result, and before/after scope changes.
+              </div>
             </div>
           </div>
         </div>

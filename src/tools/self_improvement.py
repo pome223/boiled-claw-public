@@ -45,6 +45,13 @@ def _trim_output(text: str, limit: int = 4000) -> str:
     return f"{text[:limit]}...[truncated]"
 
 
+def _compact_text(text: str, limit: int = 180) -> str:
+    normalized = str(text or "").strip()
+    if len(normalized) <= limit:
+        return normalized
+    return f"{normalized[:limit - 1]}..."
+
+
 def _repo_path(repo_path: Optional[str]) -> Path:
     return Path(repo_path or ".").resolve()
 
@@ -344,6 +351,86 @@ async def _find_reuse_suggestions(
     )
     results = results[: max(1, min(limit, 10))]
     return {"query": query, "results": results}
+
+
+def _reuse_guidance_lines(reuse: dict[str, Any], *, limit: int = 3) -> list[str]:
+    results = reuse.get("results") if isinstance(reuse, dict) else None
+    if not isinstance(results, list):
+        return []
+
+    guidance: list[str] = []
+    for item in results[: max(1, min(limit, 5))]:
+        if not isinstance(item, dict):
+            continue
+        content = _compact_text(str(item.get("content") or ""), limit=160)
+        if not content:
+            continue
+        metadata = item.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        qualifiers = []
+        if metadata.get("trajectory_key"):
+            qualifiers.append(str(metadata["trajectory_key"]))
+        elif metadata.get("selector"):
+            qualifiers.append(f"selector={metadata['selector']}")
+        if metadata.get("surface"):
+            qualifiers.append(f"surface={metadata['surface']}")
+        if item.get("memory_id") is not None:
+            qualifiers.append(f"memory={item['memory_id']}")
+        qualifier_text = f" ({'; '.join(qualifiers)})" if qualifiers else ""
+        guidance.append(f"- {content}{qualifier_text}")
+    return guidance
+
+
+def _reuse_guidance_text(reuse: dict[str, Any], *, limit: int = 3) -> str:
+    lines = _reuse_guidance_lines(reuse, limit=limit)
+    if not lines:
+        return ""
+    return "\n".join(
+        [
+            "Approved improvement reuse hints:",
+            *lines,
+            "Prefer adapting these approved improvements before inventing a new fix.",
+        ]
+    )
+
+
+def _improvement_summary_with_reuse(base_summary: str, reuse: dict[str, Any]) -> str:
+    guidance = _reuse_guidance_text(reuse)
+    if not guidance:
+        return base_summary
+    return f"{base_summary}\n\n{guidance}"
+
+
+def _build_repair_prompt(
+    *,
+    goal: str,
+    improvement_summary: str,
+    trajectory: dict[str, Any],
+    reuse: dict[str, Any],
+) -> str:
+    request = trajectory.get("request") or {}
+    target = (
+        request.get("selector")
+        or request.get("title")
+        or request.get("identifier")
+        or request.get("value_contains")
+        or trajectory.get("final_surface")
+        or "unknown-target"
+    )
+    surface = str(trajectory.get("final_surface") or "unknown")
+    lines = [
+        goal,
+        "",
+        f"Failure reason: {_trajectory_failure_reason(trajectory)}",
+        f"Target: {target}",
+        f"Surface: {surface}",
+        "",
+        f"Improvement summary: {improvement_summary}",
+    ]
+    guidance = _reuse_guidance_text(reuse)
+    if guidance:
+        lines.extend(["", guidance])
+    return "\n".join(lines)
 
 
 def _parse_candidate_specs(candidate_specs_json: str) -> list[dict[str, Any]]:
@@ -787,6 +874,13 @@ async def self_improvement_demo_from_trajectory(
     resolved_goal = goal or _trajectory_demo_goal(trajectory)
     resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
     reuse = await _find_reuse_suggestions(trajectory, tool_context=tool_context)
+    resolved_summary_with_reuse = _improvement_summary_with_reuse(resolved_summary, reuse)
+    repair_prompt = _build_repair_prompt(
+        goal=resolved_goal,
+        improvement_summary=resolved_summary_with_reuse,
+        trajectory=trajectory,
+        reuse=reuse,
+    )
     task_record = create_task_record(
         kind="self_improvement_demo",
         title=resolved_goal,
@@ -795,6 +889,8 @@ async def self_improvement_demo_from_trajectory(
             "trajectory": trajectory,
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
+            "improvement_summary_with_reuse": resolved_summary_with_reuse,
+            "repair_prompt": repair_prompt,
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
         },
@@ -838,6 +934,8 @@ async def self_improvement_demo_from_trajectory(
             "failure_reason": _trajectory_failure_reason(trajectory),
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
+            "improvement_summary_with_reuse": resolved_summary_with_reuse,
+            "repair_prompt": repair_prompt,
             "reuse_hints": _trajectory_reuse_hints(trajectory),
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
@@ -876,7 +974,7 @@ async def self_improvement_demo_from_trajectory(
     packaged = await self_improvement_package_candidate(
         canary_path=str(canary),
         benchmark_commands=benchmark_commands,
-        improvement_summary=resolved_summary,
+        improvement_summary=resolved_summary_with_reuse,
         repo_path=repo_path,
         timeout_seconds=timeout_seconds,
         record_as_approved=record_as_approved,
@@ -891,6 +989,8 @@ async def self_improvement_demo_from_trajectory(
         "package": packaged,
         "goal": resolved_goal,
         "improvement_summary": resolved_summary,
+        "improvement_summary_with_reuse": resolved_summary_with_reuse,
+        "repair_prompt": repair_prompt,
         "reuse_query": reuse.get("query", ""),
         "reuse_suggestions": reuse.get("results", []),
     }
@@ -943,6 +1043,13 @@ async def self_improvement_search_from_trajectory(
     resolved_goal = goal or _trajectory_search_goal(trajectory)
     resolved_summary = improvement_summary or _trajectory_improvement_summary(trajectory)
     reuse = await _find_reuse_suggestions(trajectory, tool_context=tool_context)
+    resolved_summary_with_reuse = _improvement_summary_with_reuse(resolved_summary, reuse)
+    repair_prompt = _build_repair_prompt(
+        goal=resolved_goal,
+        improvement_summary=resolved_summary_with_reuse,
+        trajectory=trajectory,
+        reuse=reuse,
+    )
     parent_task = create_task_record(
         kind="self_improvement_search",
         title=resolved_goal,
@@ -951,6 +1058,8 @@ async def self_improvement_search_from_trajectory(
             "trajectory": trajectory,
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
+            "improvement_summary_with_reuse": resolved_summary_with_reuse,
+            "repair_prompt": repair_prompt,
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
         },
@@ -976,6 +1085,13 @@ async def self_improvement_search_from_trajectory(
             candidate_name,
             spec.get("improvement_summary"),
         )
+        candidate_summary_with_reuse = _improvement_summary_with_reuse(candidate_summary, reuse)
+        candidate_generation_prompt = _build_repair_prompt(
+            goal=candidate_goal,
+            improvement_summary=candidate_summary_with_reuse,
+            trajectory=trajectory,
+            reuse=reuse,
+        )
 
         prepare = await self_improvement_prepare_canary(
             goal=candidate_goal,
@@ -989,6 +1105,8 @@ async def self_improvement_search_from_trajectory(
             "index": index,
             "goal": candidate_goal,
             "improvement_summary": candidate_summary,
+            "improvement_summary_with_reuse": candidate_summary_with_reuse,
+            "candidate_generation_prompt": candidate_generation_prompt,
         }
         candidate_task = create_task_record(
             kind="self_improvement_candidate",
@@ -1000,6 +1118,8 @@ async def self_improvement_search_from_trajectory(
                 "candidate_name": candidate_name,
                 "goal": candidate_goal,
                 "improvement_summary": candidate_summary,
+                "improvement_summary_with_reuse": candidate_summary_with_reuse,
+                "candidate_generation_prompt": candidate_generation_prompt,
             },
             metadata={"candidate_index": index},
             tool_context=tool_context,
@@ -1031,6 +1151,8 @@ async def self_improvement_search_from_trajectory(
                 "failure_reason": _trajectory_failure_reason(trajectory),
                 "goal": candidate_goal,
                 "improvement_summary": candidate_summary,
+                "improvement_summary_with_reuse": candidate_summary_with_reuse,
+                "candidate_generation_prompt": candidate_generation_prompt,
                 "reuse_hints": _trajectory_reuse_hints(trajectory),
                 "reuse_query": reuse.get("query", ""),
                 "reuse_suggestions": reuse.get("results", []),
@@ -1069,7 +1191,7 @@ async def self_improvement_search_from_trajectory(
         packaged = await self_improvement_package_candidate(
             canary_path=str(canary),
             benchmark_commands=benchmark_commands,
-            improvement_summary=candidate_summary,
+            improvement_summary=candidate_summary_with_reuse,
             repo_path=repo_path,
             timeout_seconds=timeout_seconds,
             record_as_approved=False,
@@ -1108,7 +1230,9 @@ async def self_improvement_search_from_trajectory(
         refreshed = await self_improvement_package_candidate(
             canary_path=str(winner_canary),
             benchmark_commands=benchmark_commands,
-            improvement_summary=str(winner["improvement_summary"]),
+            improvement_summary=str(
+                winner.get("improvement_summary_with_reuse") or winner.get("improvement_summary") or ""
+            ),
             repo_path=repo_path,
             timeout_seconds=timeout_seconds,
             record_as_approved=True,
@@ -1146,6 +1270,8 @@ async def self_improvement_search_from_trajectory(
         "trajectory": trajectory,
         "goal": resolved_goal,
         "improvement_summary": resolved_summary,
+        "improvement_summary_with_reuse": resolved_summary_with_reuse,
+        "repair_prompt": repair_prompt,
         "reuse_query": reuse.get("query", ""),
         "reuse_suggestions": reuse.get("results", []),
         "candidates": candidates,

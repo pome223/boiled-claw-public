@@ -109,8 +109,27 @@ class TaskStore:
                     "ALTER TABLE tasks ADD COLUMN search_text TEXT NOT NULL DEFAULT ''"
                 )
 
-            self._rebuild_search_index(cursor)
+            if self._should_rebuild_search_index(cursor):
+                self._rebuild_search_index(cursor)
             conn.commit()
+
+    def _should_rebuild_search_index(self, cursor: sqlite3.Cursor) -> bool:
+        cursor.execute("SELECT COUNT(*) FROM tasks")
+        total_tasks = int(cursor.fetchone()[0] or 0)
+        if total_tasks <= 0:
+            return False
+        cursor.execute("SELECT COUNT(*) FROM tasks WHERE search_text = ''")
+        missing_search_text = int(cursor.fetchone()[0] or 0)
+        if missing_search_text > 0:
+            return True
+        if not self._fts_enabled:
+            return False
+        try:
+            cursor.execute("SELECT COUNT(*) FROM tasks_search")
+            indexed_rows = int(cursor.fetchone()[0] or 0)
+        except sqlite3.OperationalError:
+            return True
+        return indexed_rows != total_tasks
 
     def _rebuild_search_index(self, cursor: sqlite3.Cursor) -> None:
         cursor.execute(
@@ -167,10 +186,6 @@ class TaskStore:
         task_id: str,
         search_text: str,
     ) -> None:
-        cursor.execute(
-            "UPDATE tasks SET search_text = ? WHERE task_id = ?",
-            (search_text, task_id),
-        )
         if not self._fts_enabled:
             return
         cursor.execute("DELETE FROM tasks_search WHERE task_id = ?", (task_id,))
@@ -178,6 +193,41 @@ class TaskStore:
             "INSERT INTO tasks_search(task_id, search_text) VALUES (?, ?)",
             (task_id, search_text),
         )
+
+    @staticmethod
+    def _task_payload(
+        *,
+        task_id: str,
+        kind: str,
+        title: str,
+        status: str,
+        owner_session_id: Optional[str],
+        owner_user_id: Optional[str],
+        parent_task_id: Optional[str],
+        run_id: Optional[str],
+        winner_task_id: Optional[str],
+        loser_task_ids: list[str],
+        approval_dependencies: list[str],
+        artifacts: dict[str, Any],
+        metadata: dict[str, Any],
+        error: Optional[str],
+    ) -> dict[str, Any]:
+        return {
+            "task_id": task_id,
+            "kind": kind,
+            "title": title,
+            "status": status,
+            "owner_session_id": owner_session_id,
+            "owner_user_id": owner_user_id,
+            "parent_task_id": parent_task_id,
+            "run_id": run_id,
+            "winner_task_id": winner_task_id,
+            "loser_task_ids": loser_task_ids,
+            "approval_dependencies": approval_dependencies,
+            "artifacts": artifacts,
+            "metadata": metadata,
+            "error": error,
+        }
 
     @staticmethod
     def _open_status_filter(status: str) -> bool:
@@ -239,6 +289,27 @@ class TaskStore:
         resolved_task_id = (task_id or f"task_{uuid.uuid4().hex[:12]}").strip()
         started_at = now if status in {"accepted", "running", "idle"} else None
         ended_at = now if status in {"completed", "failed", "cancelled", "expired"} else None
+        loser_items = loser_task_ids or []
+        approval_items = approval_dependencies or []
+        artifacts_payload = artifacts or {}
+        metadata_payload = metadata or {}
+        task_payload = self._task_payload(
+            task_id=resolved_task_id,
+            kind=kind,
+            title=title,
+            status=status,
+            owner_session_id=owner_session_id,
+            owner_user_id=owner_user_id,
+            parent_task_id=parent_task_id,
+            run_id=run_id,
+            winner_task_id=winner_task_id,
+            loser_task_ids=loser_items,
+            approval_dependencies=approval_items,
+            artifacts=artifacts_payload,
+            metadata=metadata_payload,
+            error=error,
+        )
+        search_text = self._task_search_text(task_payload)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -276,28 +347,11 @@ class TaskStore:
                     parent_task_id,
                     run_id,
                     winner_task_id,
-                    json.dumps(loser_task_ids or [], ensure_ascii=True),
-                    json.dumps(approval_dependencies or [], ensure_ascii=True),
-                    json.dumps(artifacts or {}, ensure_ascii=True),
-                    json.dumps(metadata or {}, ensure_ascii=True),
-                    self._task_search_text(
-                        {
-                            "task_id": resolved_task_id,
-                            "kind": kind,
-                            "title": title,
-                            "status": status,
-                            "owner_session_id": owner_session_id,
-                            "owner_user_id": owner_user_id,
-                            "parent_task_id": parent_task_id,
-                            "run_id": run_id,
-                            "winner_task_id": winner_task_id,
-                            "loser_task_ids": loser_task_ids or [],
-                            "approval_dependencies": approval_dependencies or [],
-                            "artifacts": artifacts or {},
-                            "metadata": metadata or {},
-                            "error": error,
-                        }
-                    ),
+                    json.dumps(loser_items, ensure_ascii=True),
+                    json.dumps(approval_items, ensure_ascii=True),
+                    json.dumps(artifacts_payload, ensure_ascii=True),
+                    json.dumps(metadata_payload, ensure_ascii=True),
+                    search_text,
                     error,
                     now,
                     now,
@@ -308,24 +362,7 @@ class TaskStore:
             self._sync_task_search(
                 cursor,
                 task_id=resolved_task_id,
-                search_text=self._task_search_text(
-                    {
-                        "task_id": resolved_task_id,
-                        "kind": kind,
-                        "title": title,
-                        "status": status,
-                        "owner_session_id": owner_session_id,
-                        "owner_user_id": owner_user_id,
-                        "parent_task_id": parent_task_id,
-                        "run_id": run_id,
-                        "winner_task_id": winner_task_id,
-                        "loser_task_ids": loser_task_ids or [],
-                        "approval_dependencies": approval_dependencies or [],
-                        "artifacts": artifacts or {},
-                        "metadata": metadata or {},
-                        "error": error,
-                    }
-                ),
+                search_text=search_text,
             )
             conn.commit()
         return self.get(resolved_task_id) or {"task_id": resolved_task_id}
@@ -423,6 +460,7 @@ class TaskStore:
             "metadata": next_metadata,
             "error": current["error"] if error is _UNSET else error,
         }
+        search_text = self._task_search_text(next_task)
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -461,7 +499,7 @@ class TaskStore:
                     ),
                     json.dumps(next_artifacts, ensure_ascii=True),
                     json.dumps(next_metadata, ensure_ascii=True),
-                    self._task_search_text(next_task),
+                    search_text,
                     current["error"] if error is _UNSET else error,
                     time.time(),
                     started_at,
@@ -472,7 +510,7 @@ class TaskStore:
             self._sync_task_search(
                 cursor,
                 task_id=task_id,
-                search_text=self._task_search_text(next_task),
+                search_text=search_text,
             )
             conn.commit()
         return self.get(task_id)

@@ -1649,6 +1649,30 @@ class GatewayServer:
                 raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
             return {"task": task}
 
+        @self.app.get("/audit")
+        async def audit_list_endpoint(
+            actor_user_id: Optional[str] = None,
+            session_id: Optional[str] = None,
+            tool: Optional[str] = None,
+            source: Optional[str] = None,
+            result: Optional[str] = None,
+            q: Optional[str] = None,
+            page: int = 1,
+            page_size: Optional[int] = None,
+            limit: int = 20,
+        ):
+            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
+            return self.audit_logger.query_logs(
+                actor_user_id=actor_user_id,
+                session_id=session_id,
+                tool=tool,
+                source=source,
+                result=result,
+                q=q,
+                page=page,
+                page_size=resolved_page_size,
+            )
+
         @self.app.post("/subagents/{run_id}/steer")
         async def subagents_steer_endpoint(run_id: str, payload: Dict[str, Any] | None = Body(default=None)):
             message = ""

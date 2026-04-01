@@ -1369,6 +1369,63 @@ def test_http_task_list_endpoint_supports_search_and_pagination(monkeypatch, tmp
     assert payload["pagination"]["total"] == 1
 
 
+def test_http_audit_list_endpoint_supports_filters_and_pagination(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    from src.security.audit import AuditEventType, AuditLogger
+
+    gateway.audit_logger = AuditLogger(str(tmp_path / "audit.log"))
+    gateway.audit_logger.log(
+        event_type=AuditEventType.TOOL_APPROVAL,
+        user_id="alice",
+        session_id="sess-audit",
+        action="resolve",
+        resource="req-audit",
+        result="resolved",
+        metadata={
+            "tool_name": "run_shell",
+            "source": "http",
+            "scope_before": "single",
+            "scope_after": "session",
+            "actor_user_id": "alice",
+            "resolve_reason": "approved in control ui",
+        },
+    )
+    gateway.audit_logger.log(
+        event_type=AuditEventType.SHELL_COMMAND,
+        user_id="bob",
+        session_id="sess-other",
+        action="execute",
+        resource="echo hello",
+        result="success",
+        metadata={"source": "websocket", "command": "echo hello"},
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.get(
+            "/audit",
+            params={
+                "actor_user_id": "alice",
+                "session_id": "sess-audit",
+                "tool": "run_shell",
+                "source": "http",
+                "result": "resolved",
+                "q": "scope_after",
+                "page": 1,
+                "page_size": 1,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pagination"]["total"] == 1
+    assert payload["pagination"]["page_size"] == 1
+    assert len(payload["entries"]) == 1
+    assert payload["entries"][0]["event_type"] == "tool_approval"
+    assert payload["entries"][0]["metadata"]["scope_before"] == "single"
+    assert payload["entries"][0]["metadata"]["scope_after"] == "session"
+
+
 def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
     captured: dict[str, str] = {}

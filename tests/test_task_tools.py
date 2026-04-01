@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.runtime import task_store as task_store_module
 from src.tools.tasks import task_create, task_get, task_list, task_update
 
 
@@ -93,3 +94,30 @@ async def test_task_list_supports_query_and_pagination():
     assert result["pagination"]["page"] == 1
     assert result["pagination"]["page_size"] == 1
     assert result["pagination"]["total"] == 1
+
+
+def test_task_store_reopen_skips_full_search_rebuild(monkeypatch, tmp_path):
+    db_path = tmp_path / "tasks.db"
+    store = task_store_module.TaskStore(str(db_path))
+    store.create(
+        kind="repair",
+        title="Repair selector for save button",
+        artifacts={"selector": "#save"},
+    )
+
+    rebuild_calls = 0
+    original_rebuild = task_store_module.TaskStore._rebuild_search_index
+
+    def _spy(self, cursor):
+        nonlocal rebuild_calls
+        rebuild_calls += 1
+        return original_rebuild(self, cursor)
+
+    monkeypatch.setattr(task_store_module.TaskStore, "_rebuild_search_index", _spy)
+    reopened = task_store_module.TaskStore(str(db_path))
+
+    result = reopened.query(q="#save", page=1, page_size=10)
+
+    assert rebuild_calls == 0
+    assert result["pagination"]["total"] == 1
+    assert result["tasks"][0]["title"] == "Repair selector for save button"
