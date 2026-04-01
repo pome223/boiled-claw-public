@@ -32,6 +32,9 @@ HTTP surfaces:
   chat.history        entries[], session_id
   tool.start          tool_name, agent_name, args, metadata?
   tool.result         tool_name, agent_name, ok, result, metadata?
+  task.update         task_id, task, timeline_event?
+  tools.approval_update  request_id, approval, approval_event
+  audit.append        entry
   system.event        source, status, message, run_id?, task_id?, agent_name?
   health.tick         active_sessions, ts
   cron.update         job_id, status, message
@@ -195,6 +198,40 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
             "ts": {"type": "number"},
         },
     },
+    "task.update": {
+        "type": "object",
+        "required": ["event", "task_id", "task"],
+        "properties": {
+            "event": {"const": "task.update"},
+            "v": {"type": "integer"},
+            "task_id": {"type": "string"},
+            "task": {"type": "object"},
+            "timeline_event": {"type": "object"},
+            "ts": {"type": "number"},
+        },
+    },
+    "tools.approval_update": {
+        "type": "object",
+        "required": ["event", "request_id", "approval"],
+        "properties": {
+            "event": {"const": "tools.approval_update"},
+            "v": {"type": "integer"},
+            "request_id": {"type": "string"},
+            "approval": {"type": "object"},
+            "approval_event": {"type": "string"},
+            "ts": {"type": "number"},
+        },
+    },
+    "audit.append": {
+        "type": "object",
+        "required": ["event", "entry"],
+        "properties": {
+            "event": {"const": "audit.append"},
+            "v": {"type": "integer"},
+            "entry": {"type": "object"},
+            "ts": {"type": "number"},
+        },
+    },
     "health.tick": {
         "type": "object",
         "required": ["event", "active_sessions", "ts"],
@@ -273,6 +310,21 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "GET /tasks/{task_id}/timeline": {
+        "description": "Return a merged task timeline combining task state changes, approval lifecycle, and related audit events.",
+        "query": {
+            "page": {"type": "integer"},
+            "page_size": {"type": "integer"},
+        },
+        "response": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "object"},
+                "entries": {"type": "array"},
+                "pagination": {"type": "object"},
+            },
+        },
+    },
     "GET /runtime/resources": {
         "description": "List runtime resources such as bridge surfaces and loaded skills.",
         "response": {
@@ -503,6 +555,37 @@ def ev_tool_result(
     d["result"] = result or {}
     if metadata:
         d["metadata"] = metadata
+    return d
+
+
+def ev_task_update(
+    task: dict[str, Any],
+    timeline_event: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    d = _base("task.update")
+    d["task_id"] = str(task.get("task_id") or "")
+    d["task"] = task
+    if timeline_event:
+        d["timeline_event"] = timeline_event
+    return d
+
+
+def ev_tools_approval_update(
+    approval: dict[str, Any],
+    *,
+    approval_event: Optional[str] = None,
+) -> dict[str, Any]:
+    d = _base("tools.approval_update", str(approval.get("request_id") or ""))
+    d["request_id"] = str(approval.get("request_id") or "")
+    d["approval"] = approval
+    if approval_event:
+        d["approval_event"] = approval_event
+    return d
+
+
+def ev_audit_append(entry: dict[str, Any]) -> dict[str, Any]:
+    d = _base("audit.append")
+    d["entry"] = entry
     return d
 
 

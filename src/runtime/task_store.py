@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from src.config.settings import get_settings
 
@@ -38,6 +39,7 @@ class TaskStore:
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._fts_enabled = False
+        self._notifier: Optional[Callable[[dict[str, Any]], Awaitable[None]]] = None
         self._init_db()
 
     def _init_db(self) -> None:
@@ -92,6 +94,41 @@ class TaskStore:
                 """
                 CREATE INDEX IF NOT EXISTS idx_tasks_run_id
                 ON tasks(run_id)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS task_events (
+                    event_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    owner_session_id TEXT,
+                    owner_user_id TEXT,
+                    run_id TEXT,
+                    timestamp REAL NOT NULL,
+                    event_type TEXT NOT NULL,
+                    status TEXT,
+                    title TEXT,
+                    error TEXT,
+                    payload_json TEXT NOT NULL
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_task_events_task_ts
+                ON task_events(task_id, timestamp DESC, event_id DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_task_events_session_ts
+                ON task_events(owner_session_id, timestamp DESC, event_id DESC)
+                """
+            )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_task_events_run_id
+                ON task_events(run_id)
                 """
             )
             try:
@@ -214,6 +251,12 @@ class TaskStore:
                     (task["task_id"], search_text),
                 )
 
+    def set_notifier(
+        self,
+        notifier: Optional[Callable[[dict[str, Any]], Awaitable[None]]],
+    ) -> None:
+        self._notifier = notifier
+
     @staticmethod
     def _truncate_search_text(text: str, limit: int = _SEARCH_FRAGMENT_CHAR_LIMIT) -> str:
         compact = re.sub(r"\s+", " ", text.strip())
@@ -311,6 +354,147 @@ class TaskStore:
             "INSERT INTO tasks_search(task_id, search_text) VALUES (?, ?)",
             (task_id, search_text),
         )
+
+    @staticmethod
+    def _task_event_payload(
+        *,
+        previous: Optional[dict[str, Any]],
+        current: dict[str, Any],
+        artifacts_patch: Optional[dict[str, Any]] = None,
+        metadata_patch: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "task_id": current["task_id"],
+            "status": current.get("status"),
+            "title": current.get("title"),
+            "error": current.get("error"),
+        }
+        changes: dict[str, Any] = {}
+        if previous is None:
+            changes["created"] = True
+        else:
+            for field in (
+                "status",
+                "title",
+                "error",
+                "run_id",
+                "winner_task_id",
+                "loser_task_ids",
+                "approval_dependencies",
+            ):
+                if previous.get(field) != current.get(field):
+                    changes[field] = {
+                        "before": previous.get(field),
+                        "after": current.get(field),
+                    }
+        if artifacts_patch:
+            changes["artifacts"] = artifacts_patch
+        if metadata_patch:
+            changes["metadata"] = metadata_patch
+        payload["changes"] = changes
+        return payload
+
+    @staticmethod
+    def _task_event_type(
+        *,
+        previous: Optional[dict[str, Any]],
+        current: dict[str, Any],
+    ) -> str:
+        if previous is None:
+            return "created"
+        if previous.get("status") != current.get("status"):
+            return "status_changed"
+        return "updated"
+
+    @staticmethod
+    def _row_to_task_event(row: tuple[Any, ...]) -> dict[str, Any]:
+        return {
+            "entry_id": f"taskevt-{row[0]}",
+            "event_id": row[0],
+            "task_id": row[1],
+            "owner_session_id": row[2],
+            "owner_user_id": row[3],
+            "run_id": row[4],
+            "timestamp": row[5],
+            "event_type": row[6],
+            "status": row[7],
+            "title": row[8],
+            "error": row[9],
+            "payload": json.loads(row[10]) if row[10] else {},
+        }
+
+    def _append_task_event(
+        self,
+        cursor: sqlite3.Cursor,
+        *,
+        current: dict[str, Any],
+        previous: Optional[dict[str, Any]] = None,
+        artifacts_patch: Optional[dict[str, Any]] = None,
+        metadata_patch: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        payload = self._task_event_payload(
+            previous=previous,
+            current=current,
+            artifacts_patch=artifacts_patch,
+            metadata_patch=metadata_patch,
+        )
+        event_type = self._task_event_type(previous=previous, current=current)
+        ts = time.time()
+        cursor.execute(
+            """
+            INSERT INTO task_events (
+                task_id,
+                owner_session_id,
+                owner_user_id,
+                run_id,
+                timestamp,
+                event_type,
+                status,
+                title,
+                error,
+                payload_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                current["task_id"],
+                current.get("owner_session_id"),
+                current.get("owner_user_id"),
+                current.get("run_id"),
+                ts,
+                event_type,
+                current.get("status"),
+                current.get("title"),
+                current.get("error"),
+                json.dumps(payload, ensure_ascii=True),
+            ),
+        )
+        return {
+            "event": self._row_to_task_event(
+                (
+                    cursor.lastrowid,
+                    current["task_id"],
+                    current.get("owner_session_id"),
+                    current.get("owner_user_id"),
+                    current.get("run_id"),
+                    ts,
+                    event_type,
+                    current.get("status"),
+                    current.get("title"),
+                    current.get("error"),
+                    json.dumps(payload, ensure_ascii=True),
+                )
+            ),
+            "task": current,
+        }
+
+    def _notify(self, payload: dict[str, Any]) -> None:
+        if self._notifier is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._notifier(payload))
 
     @staticmethod
     def _task_payload(
@@ -490,8 +674,23 @@ class TaskStore:
                 task_id=resolved_task_id,
                 search_text=search_text,
             )
+            current_task = {
+                **task_payload,
+                "created_at": now,
+                "updated_at": now,
+                "started_at": started_at,
+                "ended_at": ended_at,
+            }
+            event_payload = self._append_task_event(
+                cursor,
+                current=current_task,
+                previous=None,
+                artifacts_patch=artifacts_payload,
+                metadata_patch=metadata_payload,
+            )
             conn.commit()
-        return self.get(resolved_task_id) or {"task_id": resolved_task_id}
+        self._notify(event_payload)
+        return current_task
 
     def get(self, task_id: str) -> dict[str, Any] | None:
         with sqlite3.connect(self.db_path) as conn:
@@ -648,8 +847,63 @@ class TaskStore:
                 task_id=task_id,
                 search_text=search_text,
             )
+            updated_task = {
+                **next_task,
+                "created_at": current["created_at"],
+                "updated_at": time.time(),
+                "started_at": started_at,
+                "ended_at": resolved_ended_at,
+            }
+            event_payload = self._append_task_event(
+                cursor,
+                current=updated_task,
+                previous=current,
+                artifacts_patch=artifacts,
+                metadata_patch=metadata,
+            )
             conn.commit()
-        return self.get(task_id)
+        self._notify(event_payload)
+        return updated_task
+
+    def query_timeline(
+        self,
+        task_id: str,
+        *,
+        page: int = 1,
+        page_size: int = 100,
+    ) -> dict[str, Any]:
+        resolved_page = max(1, int(page or 1))
+        resolved_page_size = max(1, min(int(page_size or 100), 500))
+        offset = (resolved_page - 1) * resolved_page_size
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ?",
+                (task_id,),
+            )
+            total = int(cursor.fetchone()[0] or 0)
+            cursor.execute(
+                """
+                SELECT event_id, task_id, owner_session_id, owner_user_id, run_id,
+                       timestamp, event_type, status, title, error, payload_json
+                FROM task_events
+                WHERE task_id = ?
+                ORDER BY timestamp DESC, event_id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (task_id, resolved_page_size, offset),
+            )
+            rows = cursor.fetchall()
+        events = [self._row_to_task_event(row) for row in rows]
+        return {
+            "events": events,
+            "pagination": {
+                "page": resolved_page,
+                "page_size": resolved_page_size,
+                "total": total,
+                "has_more": offset + len(events) < total,
+            },
+        }
 
     def query(
         self,
@@ -765,6 +1019,7 @@ class TaskStore:
     def clear(self) -> None:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("DELETE FROM tasks")
+            conn.execute("DELETE FROM task_events")
             if self._fts_enabled:
                 conn.execute("DELETE FROM tasks_search")
             conn.commit()

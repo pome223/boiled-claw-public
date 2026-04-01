@@ -97,6 +97,33 @@ async def test_task_list_supports_query_and_pagination():
     assert result["pagination"]["total"] == 1
 
 
+@pytest.mark.asyncio
+async def test_task_store_timeline_records_create_and_update():
+    ctx = _tool_context()
+    created = await task_create(
+        kind="repair",
+        title="Timeline demo",
+        status="pending",
+        artifacts_json='{"selector":"#save"}',
+        tool_context=ctx,
+    )
+
+    updated = await task_update(
+        task_id=created["task_id"],
+        status="running",
+        artifacts_json='{"step":"observe"}',
+        tool_context=ctx,
+    )
+
+    timeline = task_store_module.get_task_store().query_timeline(created["task_id"], page=1, page_size=10)
+
+    assert updated["success"] is True
+    assert timeline["pagination"]["total"] == 2
+    assert timeline["events"][0]["event_type"] == "status_changed"
+    assert timeline["events"][0]["payload"]["changes"]["status"]["after"] == "running"
+    assert timeline["events"][1]["event_type"] == "created"
+
+
 def test_task_store_reopen_skips_full_search_rebuild(monkeypatch, tmp_path):
     db_path = tmp_path / "tasks.db"
     store = task_store_module.TaskStore(str(db_path))

@@ -303,7 +303,7 @@ class SubagentManager:
             action="subagent_spawn",
             resource=agent_name,
             result="accepted",
-            metadata={"run_id": run_id, "mode": normalized_mode},
+            metadata={"run_id": run_id, "task_id": state.task_id, "mode": normalized_mode},
         )
 
         return {
@@ -394,7 +394,7 @@ class SubagentManager:
             action="subagent_kill",
             resource=state.agent_name,
             result="cancelled",
-            metadata={"run_id": run_id, "killed_children": killed_children},
+            metadata={"run_id": run_id, "task_id": state.task_id, "killed_children": killed_children},
         )
 
         return {
@@ -441,7 +441,7 @@ class SubagentManager:
                     action="subagent_kill_cascade",
                     resource=child.agent_name,
                     result="cancelled",
-                    metadata={"run_id": child.run_id, "killed_by_parent": run_id},
+                    metadata={"run_id": child.run_id, "task_id": child.task_id, "killed_by_parent": run_id},
                 )
 
         return killed
@@ -670,7 +670,7 @@ class SubagentManager:
             action=f"subagent_{event}",
             resource=state.agent_name,
             result=state.status,
-            metadata={"run_id": state.run_id, "message_preview": message[:120]},
+            metadata={"run_id": state.run_id, "task_id": state.task_id, "message_preview": message[:120]},
         )
 
         if self._notifier is None:

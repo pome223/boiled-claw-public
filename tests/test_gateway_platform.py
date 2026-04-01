@@ -89,6 +89,17 @@ def _build_gateway(
     return gateway, scheduler
 
 
+_WS_BACKGROUND_EVENTS = {"audit.append", "task.update", "tools.approval_update"}
+
+
+def _receive_foreground_event(ws):
+    while True:
+        payload = ws.receive_json()
+        if payload.get("event") in _WS_BACKGROUND_EVENTS:
+            continue
+        return payload
+
+
 def test_http_run_persists_transcript_and_session_listing(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
@@ -266,13 +277,13 @@ def test_websocket_history_and_protocol_validation(monkeypatch, tmp_path):
             assert connected["session_id"] == session_id
 
             ws.send_json({"event": "chat.history", "limit": 20})
-            history = ws.receive_json()
+            history = _receive_foreground_event(ws)
             assert history["event"] == "chat.history"
             assert history["session_id"] == session_id
             assert [entry["role"] for entry in history["entries"]] == ["user", "assistant"]
 
             ws.send_json({"event": "chat.send", "text": ""})
-            protocol_error = ws.receive_json()
+            protocol_error = _receive_foreground_event(ws)
             assert protocol_error["event"] == "system.event"
             assert protocol_error["source"] == "protocol"
             assert protocol_error["status"] == "error"
@@ -720,11 +731,11 @@ def test_websocket_forces_web_search_for_fresh_query(monkeypatch, tmp_path):
 
             ws.send_json({"event": "chat.send", "text": "今年日本へやってくる海外のアーティストで有名な人は"})
 
-            route_selected = ws.receive_json()
-            tool_start = ws.receive_json()
-            tool_result = ws.receive_json()
-            route_forwarded = ws.receive_json()
-            done = ws.receive_json()
+            route_selected = _receive_foreground_event(ws)
+            tool_start = _receive_foreground_event(ws)
+            tool_result = _receive_foreground_event(ws)
+            route_forwarded = _receive_foreground_event(ws)
+            done = _receive_foreground_event(ws)
 
             assert recorded["query"] == "今年日本へやってくる海外のアーティストで有名な人は"
             assert recorded["timelimit"] == "y"
@@ -844,8 +855,8 @@ def test_websocket_auto_routes_longform_research_to_control_loop(monkeypatch, tm
 
             ws.send_json({"event": "chat.send", "text": "中東情勢を詳細に調べてレポートを書いて"})
 
-            route_selected = ws.receive_json()
-            done = ws.receive_json()
+            route_selected = _receive_foreground_event(ws)
+            done = _receive_foreground_event(ws)
 
             assert route_selected["event"] == "system.event"
             assert route_selected["source"] == "router"
@@ -914,9 +925,9 @@ def test_websocket_auto_routes_desktop_query_to_desktop_operator(monkeypatch, tm
 
             ws.send_json({"event": "chat.send", "text": "前面アプリとウィンドウを確認してまとめて"})
 
-            route_selected = ws.receive_json()
-            route_forwarded = ws.receive_json()
-            done = ws.receive_json()
+            route_selected = _receive_foreground_event(ws)
+            route_forwarded = _receive_foreground_event(ws)
+            done = _receive_foreground_event(ws)
 
             assert route_selected["event"] == "system.event"
             assert route_selected["source"] == "router"
@@ -973,8 +984,8 @@ def test_websocket_auto_routes_computer_use_query_to_computer_operator(monkeypat
 
             ws.send_json({"event": "chat.send", "text": "このブラウザの画面を見て押せるボタンを教えて"})
 
-            route_selected = ws.receive_json()
-            done = ws.receive_json()
+            route_selected = _receive_foreground_event(ws)
+            done = _receive_foreground_event(ws)
 
             assert route_selected["event"] == "system.event"
             assert route_selected["source"] == "router"
@@ -1112,7 +1123,7 @@ def test_websocket_tool_approval_resolution(monkeypatch, tmp_path):
                     "reason": "approved in test",
                 }
             )
-            resolved = ws.receive_json()
+            resolved = _receive_foreground_event(ws)
             assert resolved["event"] == "system.event"
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
@@ -1310,7 +1321,7 @@ def test_websocket_tool_approval_resolution_accepts_scope_fields(monkeypatch, tm
                     "propagate_to_subagents": True,
                 }
             )
-            resolved = ws.receive_json()
+            resolved = _receive_foreground_event(ws)
             assert resolved["event"] == "system.event"
             assert resolved["status"] == "resolved"
 
@@ -1426,6 +1437,87 @@ def test_http_audit_list_endpoint_supports_filters_and_pagination(monkeypatch, t
     assert payload["entries"][0]["metadata"]["scope_after"] == "session"
 
 
+def test_http_audit_list_endpoint_backfills_indexed_store_from_jsonl(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    from src.security.audit import AuditLogger
+
+    log_path = tmp_path / "audit.log"
+    log_path.write_text(
+        '{"timestamp": 1.0, "datetime": "1970-01-01T00:00:01", "event_type": "shell_command", "user_id": "alice", "session_id": "sess-legacy", "action": "execute", "resource": "echo hello", "result": "success", "metadata": {"source": "websocket", "tool_name": "run_shell"}}\n',
+        encoding="utf-8",
+    )
+    gateway.audit_logger = AuditLogger(str(log_path))
+
+    with TestClient(gateway.app) as client:
+        response = client.get("/audit", params={"session_id": "sess-legacy", "tool": "run_shell"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["pagination"]["total"] == 1
+    assert payload["entries"][0]["event_type"] == "shell_command"
+    assert payload["entries"][0]["metadata"]["tool_name"] == "run_shell"
+
+
+def test_http_task_timeline_endpoint_merges_task_approval_and_audit_entries(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    store = server_module.get_task_store()
+    task = store.create(
+        kind="subagent",
+        title="Trace timeline",
+        owner_session_id="sess-timeline",
+        owner_user_id="alice",
+        run_id="run-timeline",
+        approval_dependencies=["apr_timeline"],
+        artifacts={"step": "prepare"},
+    )
+    store.update(
+        task["task_id"],
+        status="running",
+        artifacts={"step": "act"},
+    )
+    gateway.tool_policy.create_approval_request(
+        request_id="apr_timeline",
+        tool_name="run_shell",
+        agent_name="root_agent",
+        args={"command": "pwd"},
+        session_id="sess-timeline",
+        reason="Need shell access",
+    )
+    gateway.tool_policy.resolve_approval(
+        "apr_timeline",
+        True,
+        "approved",
+        history_metadata={"actor_user_id": "alice", "source": "http"},
+    )
+    gateway.audit_logger.log(
+        event_type=server_module.AuditEventType.TOOL_APPROVAL,
+        user_id="alice",
+        session_id="sess-timeline",
+        action="resolve",
+        resource="apr_timeline",
+        result="resolved",
+        metadata={
+            "request_id": "apr_timeline",
+            "tool_name": "run_shell",
+            "source": "http",
+            "actor_user_id": "alice",
+            "task_id": task["task_id"],
+            "run_id": "run-timeline",
+        },
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.get(f"/tasks/{task['task_id']}/timeline", params={"page": 1, "page_size": 20})
+
+    assert response.status_code == 200
+    payload = response.json()
+    kinds = {entry["kind"] for entry in payload["entries"]}
+    assert "task_event" in kinds
+    assert "approval" in kinds
+    assert "audit" in kinds
+
+
 def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
     captured: dict[str, str] = {}
@@ -1445,7 +1537,7 @@ def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_p
 
             ws.send_json({"event": "chat.abort"})
 
-            done = ws.receive_json()
+            done = _receive_foreground_event(ws)
             assert done["event"] == "chat.done"
 
     assert captured["user_id"] == "alice"
@@ -1517,7 +1609,7 @@ def test_websocket_tool_approval_falls_back_to_control_loop(monkeypatch, tmp_pat
                 }
             )
 
-            resolved = ws.receive_json()
+            resolved = _receive_foreground_event(ws)
             assert resolved["event"] == "system.event"
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
@@ -1564,7 +1656,7 @@ def test_websocket_control_loop_approval_resume_uses_session_task_goal(monkeypat
                 }
             )
 
-            resolved = ws.receive_json()
+            resolved = _receive_foreground_event(ws)
             assert resolved["event"] == "system.event"
             assert resolved["source"] == "tools.approval"
             assert resolved["status"] == "resolved"
@@ -1694,8 +1786,8 @@ def test_websocket_control_run_emits_control_approval_request(monkeypatch, tmp_p
 
             ws.send_json({"event": "control.run", "goal": "Review production diff"})
 
-            approval = ws.receive_json()
-            done = ws.receive_json()
+            approval = _receive_foreground_event(ws)
+            done = _receive_foreground_event(ws)
             assert approval["event"] == "control.approval_request"
             assert approval["request_id"] == "plan_req_2"
             assert done["event"] == "chat.done"
