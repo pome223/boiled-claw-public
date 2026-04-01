@@ -158,9 +158,14 @@ async def test_package_candidate_is_benchmark_gated_and_can_record_approved_memo
     async def _memory_store(content, tags=None, metadata=None, kind="fact", tool_context=None):
         recorded["content"] = content
         recorded["kind"] = kind
+        recorded["metadata"] = json.loads(metadata or "{}")
         return {"success": True, "memory_id": 7, "kind": kind}
 
     monkeypatch.setattr(self_improvement, "memory_store", _memory_store)
+    self_improvement._persist_state(
+        canary,
+        demo={"reuse_hints": {"trajectory_key": "click::current_tab::#save", "selector": "#save"}},
+    )
 
     result = await self_improvement.self_improvement_package_candidate(
         canary_path=str(canary),
@@ -173,6 +178,8 @@ async def test_package_candidate_is_benchmark_gated_and_can_record_approved_memo
     assert result["promotable"] is True
     assert "README.md" in result["diff_stat"]
     assert recorded["kind"] == "approved_improvement"
+    assert recorded["metadata"]["trajectory_key"] == "click::current_tab::#save"
+    assert recorded["metadata"]["selector"] == "#save"
 
 
 @pytest.mark.asyncio
@@ -573,6 +580,56 @@ async def test_search_from_failed_trajectory_includes_reuse_suggestions(
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["artifacts"]["reuse_suggestions"][0]["memory_id"] == 11
+
+
+@pytest.mark.asyncio
+async def test_reuse_prefilter_avoids_semantic_search_when_metadata_matches(
+    computer_trajectory_store,
+    monkeypatch,
+):
+    trajectory_id = computer_trajectory_store.record(
+        action="click",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[],
+        verification=None,
+        request={"selector": "#save"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+    trajectory = computer_trajectory_store.get(trajectory_id)
+    assert trajectory is not None
+
+    class _FakeMemoryStore:
+        def search(self, query=None, tags=None, kinds=None, limit=10, embedding=None):
+            assert query is None
+            assert kinds == ["approved_improvement"]
+            return [
+                {
+                    "id": 19,
+                    "content": "Reuse the current-tab save selector repair.",
+                    "kind": "approved_improvement",
+                    "metadata": {
+                        "trajectory_key": "click::current_tab::#save",
+                        "selector": "#save",
+                        "action": "click",
+                        "surface": "current_tab",
+                        "diff_stat": " README.md | 1 +",
+                    },
+                    "tags": ["self-improvement", "approved"],
+                    "created_at": 99.0,
+                }
+            ]
+
+    async def _memory_search(**kwargs):
+        raise AssertionError("semantic memory search should not run when prefilter is enough")
+
+    monkeypatch.setattr(self_improvement, "get_memory_store", lambda: _FakeMemoryStore())
+    monkeypatch.setattr(self_improvement, "memory_search", _memory_search)
+
+    result = await self_improvement._find_reuse_suggestions(trajectory, limit=1)
+
+    assert result["results"][0]["memory_id"] == 19
+    assert result["results"][0]["match_type"] == "prefilter"
 
 
 def test_cli_self_improvement_search_invokes_tool(monkeypatch):

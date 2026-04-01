@@ -1173,28 +1173,36 @@ def test_http_tool_approvals_list_exposes_stateful_metadata(monkeypatch, tmp_pat
         )
 
     assert response.status_code == 200
-    approvals = response.json()["approvals"]
+    response_payload = response.json()
+    approvals = response_payload["approvals"]
     assert len(approvals) == 1
     assert approvals[0]["request_id"] == second.request_id
     assert approvals[0]["state"] == "denied"
+    assert response_payload["pagination"]["page"] == 1
+    assert response_payload["pagination"]["total"] == 2
 
     full_response = client.get(
         "/tools/approvals",
         params={
             "session_id": "sess-stateful",
             "state": "all",
-            "limit": 10,
+            "q": "approved for session",
+            "page": 1,
+            "page_size": 10,
+            "include_expired": True,
         },
     )
 
     assert full_response.status_code == 200
-    approvals = full_response.json()["approvals"]
-    assert len(approvals) == 2
-    assert approvals[1]["state"] == "approved"
-    assert approvals[1]["scope"] == "session"
-    assert approvals[1]["tool_pattern"] == "run_shell"
-    assert approvals[1]["path_scope"] == str(tmp_path.resolve())
-    assert approvals[1]["propagate_to_subagents"] is True
+    full_payload = full_response.json()
+    approvals = full_payload["approvals"]
+    assert len(approvals) == 1
+    assert approvals[0]["state"] == "approved"
+    assert approvals[0]["scope"] == "session"
+    assert approvals[0]["tool_pattern"] == "run_shell"
+    assert approvals[0]["path_scope"] == str(tmp_path.resolve())
+    assert approvals[0]["propagate_to_subagents"] is True
+    assert full_payload["pagination"]["total"] == 1
 
 
 def test_http_tool_approval_get_exposes_history(monkeypatch, tmp_path):
@@ -1228,6 +1236,8 @@ def test_http_tool_approval_get_exposes_history(monkeypatch, tmp_path):
 
 def test_http_tool_approval_resolve_endpoint_updates_scope(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    audit_events = []
+    gateway.audit_logger.log = lambda **kwargs: audit_events.append(kwargs)
 
     gateway.tool_policy.create_approval_request(
         request_id="req-resolve-http",
@@ -1260,10 +1270,19 @@ def test_http_tool_approval_resolve_endpoint_updates_scope(monkeypatch, tmp_path
     assert payload["approval"]["tool_pattern"] == "run_*"
     assert payload["approval"]["path_scope"] == str(tmp_path.resolve())
     assert payload["approval"]["propagate_to_subagents"] is True
+    assert payload["approval"]["history"][-1]["metadata"]["actor_user_id"] == "api_user"
+    assert payload["approval"]["history"][-1]["metadata"]["source"] == "http"
+    approval_audit = next(
+        event for event in reversed(audit_events) if event.get("event_type").value == "tool_approval"
+    )
+    assert approval_audit["metadata"]["source"] == "http"
+    assert approval_audit["metadata"]["scope_after"] == "session"
 
 
 def test_websocket_tool_approval_resolution_accepts_scope_fields(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    audit_events = []
+    gateway.audit_logger.log = lambda **kwargs: audit_events.append(kwargs)
 
     with TestClient(gateway.app) as client:
         with client.websocket_connect("/ws/alice") as ws:
@@ -1304,6 +1323,50 @@ def test_websocket_tool_approval_resolution_accepts_scope_fields(monkeypatch, tm
     assert approvals[0]["tool_pattern"] == "write_*"
     assert approvals[0]["path_scope"] == str(tmp_path.resolve())
     assert approvals[0]["propagate_to_subagents"] is True
+    assert approvals[0]["history"][-1]["metadata"]["actor_user_id"] == "alice"
+    assert approvals[0]["history"][-1]["metadata"]["source"] == "websocket"
+    approval_audit = next(
+        event for event in reversed(audit_events) if event.get("event_type").value == "tool_approval"
+    )
+    assert approval_audit["metadata"]["source"] == "websocket"
+
+
+def test_http_task_list_endpoint_supports_search_and_pagination(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    store = server_module.get_task_store()
+    store.create(
+        kind="self_improvement_demo",
+        title="Repair save selector",
+        owner_session_id="sess-dashboard",
+        owner_user_id="alice",
+        artifacts={"selector": "#save", "summary": "repair selector"},
+    )
+    store.create(
+        kind="self_improvement_demo",
+        title="Repair query field",
+        owner_session_id="sess-dashboard",
+        owner_user_id="alice",
+        artifacts={"selector": "#query", "summary": "repair input"},
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.get(
+            "/tasks",
+            params={
+                "session_id": "sess-dashboard",
+                "q": "#save",
+                "page": 1,
+                "page_size": 1,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["tasks"]) == 1
+    assert payload["tasks"][0]["title"] == "Repair save selector"
+    assert payload["pagination"]["page"] == 1
+    assert payload["pagination"]["page_size"] == 1
+    assert payload["pagination"]["total"] == 1
 
 
 def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_path):

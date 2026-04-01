@@ -15,7 +15,7 @@ from src.computer_use.trajectory_store import get_computer_trajectory_store
 from src.config.settings import get_settings
 from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
-from src.tools.memory import memory_search, memory_store
+from src.tools.memory import get_memory_store, memory_search, memory_store
 from src.tools.shell import run_shell_guarded
 from src.tools.tasks import create_task_record, update_task_record
 
@@ -168,16 +168,124 @@ def _trajectory_improvement_summary(trajectory: dict[str, Any]) -> str:
 
 
 def _trajectory_reuse_query(trajectory: dict[str, Any]) -> str:
-    request = trajectory.get("request") or {}
+    hints = _trajectory_reuse_hints(trajectory)
     parts = [
-        str(trajectory.get("action") or "").strip(),
-        str(request.get("selector") or "").strip(),
-        str(request.get("title") or "").strip(),
-        str(request.get("identifier") or "").strip(),
-        str(trajectory.get("final_surface") or "").strip(),
-        _trajectory_failure_reason(trajectory),
+        hints.get("action"),
+        hints.get("selector"),
+        hints.get("title"),
+        hints.get("identifier"),
+        hints.get("surface"),
+        hints.get("failure_reason"),
     ]
-    return " ".join(part for part in parts if part)
+    return " ".join(str(part).strip() for part in parts if part)
+
+
+def _normalize_reuse_value(value: Any) -> str:
+    return str(value or "").strip().lower()
+
+
+def _trajectory_reuse_hints(trajectory: dict[str, Any]) -> dict[str, str]:
+    request = trajectory.get("request") or {}
+    action = _normalize_reuse_value(trajectory.get("action"))
+    selector = _normalize_reuse_value(request.get("selector"))
+    title = _normalize_reuse_value(request.get("title"))
+    identifier = _normalize_reuse_value(request.get("identifier"))
+    value_contains = _normalize_reuse_value(request.get("value_contains"))
+    surface = _normalize_reuse_value(trajectory.get("final_surface"))
+    failure_reason = _normalize_reuse_value(_trajectory_failure_reason(trajectory))
+    target = selector or title or identifier or value_contains or surface or "unknown-target"
+    trajectory_key = "::".join(part for part in [action, surface, target] if part)
+    return {
+        "trajectory_key": trajectory_key,
+        "action": action,
+        "selector": selector,
+        "title": title,
+        "identifier": identifier,
+        "value_contains": value_contains,
+        "surface": surface,
+        "failure_reason": failure_reason,
+        "target": target,
+    }
+
+
+def _state_reuse_hints(canary: Path) -> dict[str, str]:
+    state = _read_state(canary)
+    for key in ("search", "demo"):
+        candidate = state.get(key)
+        if not isinstance(candidate, dict):
+            continue
+        reuse_hints = candidate.get("reuse_hints")
+        if isinstance(reuse_hints, dict):
+            return {str(name): _normalize_reuse_value(value) for name, value in reuse_hints.items()}
+    return {}
+
+
+def _cheap_reuse_match_score(
+    hints: dict[str, str],
+    metadata: dict[str, Any],
+) -> int:
+    score = 0
+    metadata_key = _normalize_reuse_value(metadata.get("trajectory_key"))
+    if metadata_key and metadata_key == hints.get("trajectory_key"):
+        score += 10
+    for field, weight in {
+        "selector": 5,
+        "identifier": 4,
+        "title": 3,
+        "value_contains": 2,
+        "action": 3,
+        "surface": 2,
+    }.items():
+        hint_value = hints.get(field)
+        metadata_value = _normalize_reuse_value(metadata.get(field))
+        if hint_value and metadata_value and hint_value == metadata_value:
+            score += weight
+    if hints.get("failure_reason") and _normalize_reuse_value(metadata.get("failure_reason")) == hints.get("failure_reason"):
+        score += 1
+    return score
+
+
+def _prefilter_reuse_suggestions(
+    trajectory: dict[str, Any],
+    *,
+    limit: int,
+) -> list[dict[str, Any]]:
+    hints = _trajectory_reuse_hints(trajectory)
+    try:
+        candidates = get_memory_store().search(
+            query=None,
+            kinds=["approved_improvement"],
+            limit=max(limit * 10, 50),
+        )
+    except Exception:
+        return []
+
+    matches: list[dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        metadata = item.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        score = _cheap_reuse_match_score(hints, metadata)
+        if score <= 0:
+            continue
+        matches.append(
+            {
+                "memory_id": item.get("id"),
+                "content": item.get("content"),
+                "score": float(score),
+                "created_at": item.get("created_at"),
+                "tags": item.get("tags") or [],
+                "metadata": metadata,
+                "match_type": "prefilter",
+            }
+        )
+
+    matches.sort(
+        key=lambda item: (float(item.get("score") or 0.0), float(item.get("created_at") or 0.0)),
+        reverse=True,
+    )
+    return matches[:limit]
 
 
 async def _find_reuse_suggestions(
@@ -189,6 +297,13 @@ async def _find_reuse_suggestions(
     query = _trajectory_reuse_query(trajectory)
     if not query:
         return {"query": "", "results": []}
+
+    prefiltered = _prefilter_reuse_suggestions(
+        trajectory,
+        limit=max(1, min(limit, 10)),
+    )
+    if len(prefiltered) >= max(1, min(limit, 10)):
+        return {"query": query, "results": prefiltered}
 
     search = await memory_search(
         query=query,
@@ -203,20 +318,31 @@ async def _find_reuse_suggestions(
             "error": search.get("error") or "failed to search approved improvements",
         }
 
-    results: list[dict[str, Any]] = []
+    results_by_id: dict[Any, dict[str, Any]] = {
+        item.get("memory_id"): item for item in prefiltered if item.get("memory_id") is not None
+    }
     for item in search.get("results") or []:
         if not isinstance(item, dict):
             continue
-        results.append(
-            {
-                "memory_id": item.get("id"),
-                "content": item.get("content"),
-                "score": item.get("score"),
-                "created_at": item.get("created_at"),
-                "tags": item.get("tags") or [],
-                "metadata": item.get("metadata") or {},
-            }
-        )
+        payload = {
+            "memory_id": item.get("id"),
+            "content": item.get("content"),
+            "score": item.get("score"),
+            "created_at": item.get("created_at"),
+            "tags": item.get("tags") or [],
+            "metadata": item.get("metadata") or {},
+            "match_type": "semantic",
+        }
+        memory_id = payload.get("memory_id")
+        if memory_id in results_by_id:
+            continue
+        results_by_id[memory_id] = payload
+    results = list(results_by_id.values())
+    results.sort(
+        key=lambda item: (float(item.get("score") or 0.0), float(item.get("created_at") or 0.0)),
+        reverse=True,
+    )
+    results = results[: max(1, min(limit, 10))]
     return {"query": query, "results": results}
 
 
@@ -553,6 +679,8 @@ async def self_improvement_package_candidate(
     }
 
     if record_as_approved and benchmark_result["all_passed"]:
+        reuse_hints = _state_reuse_hints(canary)
+        ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
         memory_payload = await memory_store(
             content=improvement_summary,
             tags="self-improvement,approved",
@@ -562,6 +690,9 @@ async def self_improvement_package_candidate(
                     "branch": payload["branch"],
                     "benchmark_results": benchmark_result["results"],
                     "diff_stat": payload["diff_stat"],
+                    **reuse_hints,
+                    "approved_by_user_id": ctx.get("user_id") or "",
+                    "approved_in_session_id": ctx.get("session_id") or "",
                 },
                 ensure_ascii=True,
             ),
@@ -707,6 +838,7 @@ async def self_improvement_demo_from_trajectory(
             "failure_reason": _trajectory_failure_reason(trajectory),
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
+            "reuse_hints": _trajectory_reuse_hints(trajectory),
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
             "started_at": time.time(),
@@ -899,6 +1031,7 @@ async def self_improvement_search_from_trajectory(
                 "failure_reason": _trajectory_failure_reason(trajectory),
                 "goal": candidate_goal,
                 "improvement_summary": candidate_summary,
+                "reuse_hints": _trajectory_reuse_hints(trajectory),
                 "reuse_query": reuse.get("query", ""),
                 "reuse_suggestions": reuse.get("results", []),
                 "started_at": time.time(),

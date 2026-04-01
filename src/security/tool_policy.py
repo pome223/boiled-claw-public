@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import fnmatch
+import json
 from pathlib import Path
 import time
 import uuid
@@ -384,6 +385,7 @@ class ToolPolicyEngine:
         path_scope: Optional[str] = None,
         expires_at: Optional[float] = None,
         propagate_to_subagents: Optional[bool] = None,
+        history_metadata: Optional[dict[str, Any]] = None,
     ) -> Optional[ApprovalRecord]:
         approval = self._approvals.get(request_id)
         if approval is None or approval.state != "pending":
@@ -411,6 +413,7 @@ class ToolPolicyEngine:
                 "tool_pattern": approval.tool_pattern,
                 "path_scope": approval.path_scope,
                 "propagate_to_subagents": approval.propagate_to_subagents,
+                **(history_metadata or {}),
             },
             ts=approval.resolved_at,
         )
@@ -455,6 +458,58 @@ class ToolPolicyEngine:
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         self.cleanup_expired()
+        page_size = limit
+        if page_size is None:
+            approvals = list(self._approvals.values())
+            if session_id:
+                approvals = [item for item in approvals if item.session_id == session_id]
+            if state and state.lower() != "all":
+                approvals = [item for item in approvals if item.state == state]
+            if not include_expired:
+                approvals = [item for item in approvals if item.state != "expired"]
+            page_size = max(1, len(approvals) or 1)
+        result = self.query_approvals(
+            session_id=session_id,
+            state=state,
+            include_expired=include_expired,
+            page=1,
+            page_size=page_size,
+        )
+        return result["approvals"]
+
+    @staticmethod
+    def _approval_search_text(approval: ApprovalRecord) -> str:
+        payload = approval.to_dict()
+        parts = [
+            payload.get("request_id"),
+            payload.get("source_request_id"),
+            payload.get("tool_name"),
+            payload.get("tool_pattern"),
+            payload.get("agent_name"),
+            payload.get("session_id"),
+            payload.get("reason"),
+            payload.get("resolve_reason"),
+            payload.get("path_scope"),
+            payload.get("scope"),
+            payload.get("state"),
+        ]
+        if payload.get("args"):
+            parts.append(json.dumps(payload["args"], ensure_ascii=False, sort_keys=True))
+        if payload.get("history"):
+            parts.append(json.dumps(payload["history"], ensure_ascii=False, sort_keys=True))
+        return " ".join(str(part).strip() for part in parts if part).lower()
+
+    def query_approvals(
+        self,
+        *,
+        session_id: Optional[str] = None,
+        state: Optional[str] = None,
+        include_expired: bool = False,
+        q: Optional[str] = None,
+        page: int = 1,
+        page_size: int = 20,
+    ) -> Dict[str, Any]:
+        self.cleanup_expired()
         approvals = list(self._approvals.values())
         if session_id:
             approvals = [item for item in approvals if item.session_id == session_id]
@@ -462,10 +517,33 @@ class ToolPolicyEngine:
             approvals = [item for item in approvals if item.state == state]
         if not include_expired:
             approvals = [item for item in approvals if item.state != "expired"]
+        query_text = (q or "").strip().lower()
+        if query_text:
+            approvals = [
+                item
+                for item in approvals
+                if query_text in self._approval_search_text(item)
+            ]
         approvals.sort(key=lambda item: item.created_at, reverse=True)
-        if limit is not None:
-            approvals = approvals[: max(1, limit)]
-        return [item.to_dict() for item in approvals]
+        resolved_page = max(1, int(page or 1))
+        resolved_page_size = max(1, min(int(page_size or 20), 100))
+        start = (resolved_page - 1) * resolved_page_size
+        page_items = approvals[start:start + resolved_page_size]
+        return {
+            "approvals": [item.to_dict() for item in page_items],
+            "pagination": {
+                "page": resolved_page,
+                "page_size": resolved_page_size,
+                "total": len(approvals),
+                "has_more": start + len(page_items) < len(approvals),
+            },
+            "filters": {
+                "session_id": session_id,
+                "state": state,
+                "include_expired": include_expired,
+                "q": query_text,
+            },
+        }
 
     def cleanup_expired(self, max_age: float = _DEFAULT_APPROVAL_TTL_SECONDS) -> int:
         """Expire old approval requests and grants without deleting history."""

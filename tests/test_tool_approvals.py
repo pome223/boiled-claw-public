@@ -178,6 +178,47 @@ def test_tool_policy_marks_expired_approvals():
     assert approvals[0]["state"] == "expired"
 
 
+def test_tool_policy_query_approvals_supports_search_and_pagination(tmp_path):
+    engine = ToolPolicyEngine()
+    first = engine.create_approval_request(
+        request_id="req-save",
+        tool_name="write_file",
+        agent_name="boiled_claw",
+        args={"path": str(tmp_path / "save.txt")},
+        session_id="session-1",
+        reason="save note",
+    )
+    engine.resolve_approval(
+        first.request_id,
+        True,
+        "approved save",
+        scope="session",
+        history_metadata={"actor_user_id": "alice", "source": "http"},
+    )
+    second = engine.create_approval_request(
+        request_id="req-query",
+        tool_name="write_file",
+        agent_name="boiled_claw",
+        args={"path": str(tmp_path / "query.txt")},
+        session_id="session-1",
+        reason="query note",
+    )
+    engine.resolve_approval(second.request_id, False, "denied query")
+
+    result = engine.query_approvals(
+        session_id="session-1",
+        state="all",
+        include_expired=True,
+        q="approved save",
+        page=1,
+        page_size=1,
+    )
+
+    assert result["pagination"]["total"] == 1
+    assert result["approvals"][0]["request_id"] == "req-save"
+    assert result["approvals"][0]["history"][-1]["metadata"]["actor_user_id"] == "alice"
+
+
 @pytest.mark.asyncio
 async def test_run_shell_waits_for_approval(monkeypatch):
     engine = ToolPolicyEngine()

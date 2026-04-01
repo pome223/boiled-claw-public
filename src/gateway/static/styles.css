@@ -356,6 +356,19 @@ body {
   margin: 0;
 }
 
+.dashboard-section-controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.pager-controls {
+  display: flex;
+  gap: 6px;
+}
+
 .messages {
   padding: 14px;
   overflow: auto;

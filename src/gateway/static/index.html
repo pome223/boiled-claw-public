@@ -197,14 +197,26 @@
             <div class="dashboard-column">
               <div class="dashboard-section-header">
                 <h4>Approvals</h4>
-                <span id="dashboardApprovalsCaption" class="muted mono">latest</span>
+                <div class="dashboard-section-controls">
+                  <span id="dashboardApprovalsCaption" class="muted mono">latest</span>
+                  <div class="pager-controls">
+                    <button id="dashboardApprovalsPrevBtn" class="btn btn-sm" type="button">Prev</button>
+                    <button id="dashboardApprovalsNextBtn" class="btn btn-sm" type="button">Next</button>
+                  </div>
+                </div>
               </div>
               <ul id="dashboardApprovalsList" class="list compact-list"></ul>
             </div>
             <div class="dashboard-column">
               <div class="dashboard-section-header">
                 <h4>Tasks</h4>
-                <span id="dashboardTasksCaption" class="muted mono">latest</span>
+                <div class="dashboard-section-controls">
+                  <span id="dashboardTasksCaption" class="muted mono">latest</span>
+                  <div class="pager-controls">
+                    <button id="dashboardTasksPrevBtn" class="btn btn-sm" type="button">Prev</button>
+                    <button id="dashboardTasksNextBtn" class="btn btn-sm" type="button">Next</button>
+                  </div>
+                </div>
               </div>
               <ul id="dashboardTasksList" class="list compact-list"></ul>
             </div>
