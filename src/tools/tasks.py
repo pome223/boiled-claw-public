@@ -166,20 +166,31 @@ async def task_list(
     kind: Optional[str] = None,
     status: Optional[str] = None,
     parent_task_id: Optional[str] = None,
+    query: Optional[str] = None,
+    page: int = 1,
+    page_size: Optional[int] = None,
     limit: int = 20,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     """List task objects for the current session."""
 
     owner = _resolve_owner(tool_context)
-    tasks = get_task_store().list(
+    result = get_task_store().query(
         owner_session_id=owner["session_id"],
         kind=kind,
         status=status,
         parent_task_id=parent_task_id,
-        limit=max(1, min(int(limit or 20), 100)),
+        q=query,
+        page=page,
+        page_size=max(1, min(int(page_size or limit or 20), 100)),
     )
-    return {"success": True, "tasks": tasks, "count": len(tasks)}
+    return {
+        "success": True,
+        "tasks": result["tasks"],
+        "count": len(result["tasks"]),
+        "pagination": result["pagination"],
+        "filters": result["filters"],
+    }
 
 
 async def task_update(

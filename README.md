@@ -119,7 +119,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
-- 📊 **Task / Approval Dashboard** - Control UI surfaces pending approvals, recent workflow tasks, session backend status, and a clickable detail / intervention panel
+- 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state and exposes a clickable detail / intervention panel
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
@@ -127,7 +127,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🗃️ **Redis Sessions** - Optional Redis-backed ADK live session state while transcript / task / memory stores remain SQLite-backed
 - ⏰ **Cron Platform** - System event integration, delivery targets, and retry support
 - 🔌 **MCP Support** - Bundled sample MCP server supporting SSE / HTTP / stdio connections
-- 🔒 **Security** - Audit logs, command policies, and stateful tool approvals with scope / expiry / propagation
+- 🔒 **Security** - Audit logs, command policies, stateful tool approvals, and approval resolve history with actor / source tracking
 - 📦 **Extensible** - Skill plugin system
 - 🐳 **Docker Ready** - Easy deployment with `docker compose`
 
@@ -428,7 +428,7 @@ The self-improvement slice is intentionally offline and benchmark-gated:
 - `self_improvement_search_from_trajectory` fans one failed computer trajectory out into multiple canaries, compares benchmarked candidates, and keeps the winner
 - `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, and can record approved changes into memory
 - `self_improvement_cleanup_canary` removes the worktree and deletes the canary branch when finished
-- new failed trajectories automatically surface matching `approved_improvement` memories as reuse suggestions so the operator can see what already worked
+- new failed trajectories automatically surface matching `approved_improvement` memories as reuse suggestions, using cheap trajectory-key / selector / action / surface prefilters before semantic fallback
 
 Optional `.env`:
 
@@ -518,6 +518,7 @@ The Control UI dashboard builds on top of that task layer:
 - follow `winner_task_id`, `loser_task_ids`, `approval_dependencies`, and child tasks without leaving the UI
 - steer or kill active session-mode subagents directly from the panel
 - inspect approval history, scope, path scope, propagation flags, and resolve pending requests in-place
+- dashboard task / approval lists use server-side search and paging so large artifacts stay inspectable without pushing full-text filtering into the browser
 
 ## Project Structure
 

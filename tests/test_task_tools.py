@@ -62,3 +62,34 @@ async def test_task_get_rejects_other_session():
     result = await task_get(task_id=created["task_id"], tool_context=_tool_context(session_id="other"))
     assert result["success"] is False
     assert "not owned by this session" in result["error"]
+
+
+@pytest.mark.asyncio
+async def test_task_list_supports_query_and_pagination():
+    ctx = _tool_context()
+    await task_create(
+        kind="repair",
+        title="Repair selector for save button",
+        artifacts_json='{"selector":"#save"}',
+        tool_context=ctx,
+    )
+    await task_create(
+        kind="repair",
+        title="Repair query field",
+        artifacts_json='{"selector":"#query"}',
+        tool_context=ctx,
+    )
+
+    result = await task_list(
+        query="#save",
+        page=1,
+        page_size=1,
+        tool_context=ctx,
+    )
+
+    assert result["success"] is True
+    assert result["count"] == 1
+    assert result["tasks"][0]["title"] == "Repair selector for save button"
+    assert result["pagination"]["page"] == 1
+    assert result["pagination"]["page_size"] == 1
+    assert result["pagination"]["total"] == 1

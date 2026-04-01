@@ -27,6 +27,7 @@ class AuditEventType(Enum):
     CHANNEL_MESSAGE = "channel_message"
     SESSION_START = "session_start"
     SESSION_END = "session_end"
+    TOOL_APPROVAL = "tool_approval"
     ERROR = "error"
 
 

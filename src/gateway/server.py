@@ -1626,17 +1626,21 @@ class GatewayServer:
             kind: Optional[str] = None,
             status: Optional[str] = None,
             parent_task_id: Optional[str] = None,
+            q: Optional[str] = None,
+            page: int = 1,
+            page_size: Optional[int] = None,
             limit: int = 20,
         ):
-            return {
-                "tasks": get_task_store().list(
-                    owner_session_id=session_id,
-                    kind=kind,
-                    status=status,
-                    parent_task_id=parent_task_id,
-                    limit=max(1, min(limit, 100)),
-                )
-            }
+            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
+            return get_task_store().query(
+                owner_session_id=session_id,
+                kind=kind,
+                status=status,
+                parent_task_id=parent_task_id,
+                q=q,
+                page=page,
+                page_size=resolved_page_size,
+            )
 
         @self.app.get("/tasks/{task_id}")
         async def task_get_endpoint(task_id: str):
@@ -1714,17 +1718,21 @@ class GatewayServer:
             session_id: Optional[str] = None,
             state: Optional[str] = None,
             include_expired: bool = False,
+            q: Optional[str] = None,
+            page: int = 1,
+            page_size: Optional[int] = None,
             limit: Optional[int] = None,
         ):
             selected_state = state or "pending"
-            return {
-                "approvals": self.tool_policy.list_approvals(
-                    session_id=session_id,
-                    state=selected_state,
-                    include_expired=include_expired,
-                    limit=max(1, min(limit, 100)) if limit is not None else None,
-                )
-            }
+            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
+            return self.tool_policy.query_approvals(
+                session_id=session_id,
+                state=selected_state,
+                include_expired=include_expired,
+                q=q,
+                page=page,
+                page_size=resolved_page_size,
+            )
 
         @self.app.get("/tools/approvals/{request_id}")
         async def tool_approval_get(request_id: str):
@@ -1756,6 +1764,7 @@ class GatewayServer:
                 reason=reason,
                 session_id=session_id,
                 user_id=user_id,
+                source="http",
                 scope=body.get("scope"),
                 tool_pattern=body.get("tool_pattern"),
                 path_scope=body.get("path_scope"),
@@ -1946,6 +1955,7 @@ class GatewayServer:
                             reason=str(data.get("reason") or ""),
                             session_id=session_id,
                             user_id=user_id,
+                            source="websocket",
                             scope=data.get("scope"),
                             tool_pattern=data.get("tool_pattern"),
                             path_scope=data.get("path_scope"),
@@ -2843,25 +2853,41 @@ class GatewayServer:
         reason: str,
         session_id: str,
         user_id: str,
+        source: str = "unknown",
         scope: Any = None,
         tool_pattern: Any = None,
         path_scope: Any = None,
         expires_at: Any = None,
         propagate_to_subagents: Any = None,
     ) -> dict[str, Any]:
+        before = self.tool_policy.get_approval(request_id)
+        requested_scope = scope if isinstance(scope, str) else None
+        requested_tool_pattern = tool_pattern if isinstance(tool_pattern, str) else None
+        requested_path_scope = path_scope if isinstance(path_scope, str) else None
+        requested_propagate = (
+            bool(propagate_to_subagents)
+            if propagate_to_subagents is not None
+            else None
+        )
         result = self.tool_policy.resolve_approval(
             request_id,
             approved,
             reason,
-            scope=scope if isinstance(scope, str) else None,
-            tool_pattern=tool_pattern if isinstance(tool_pattern, str) else None,
-            path_scope=path_scope if isinstance(path_scope, str) else None,
+            scope=requested_scope,
+            tool_pattern=requested_tool_pattern,
+            path_scope=requested_path_scope,
             expires_at=expires_at if isinstance(expires_at, (int, float)) else None,
-            propagate_to_subagents=(
-                bool(propagate_to_subagents)
-                if propagate_to_subagents is not None
-                else None
-            ),
+            propagate_to_subagents=requested_propagate,
+            history_metadata={
+                "actor_user_id": user_id,
+                "source": source,
+                "scope_before": before.get("scope") if isinstance(before, dict) else None,
+                "tool_pattern_before": before.get("tool_pattern") if isinstance(before, dict) else None,
+                "path_scope_before": before.get("path_scope") if isinstance(before, dict) else None,
+                "propagate_to_subagents_before": (
+                    before.get("propagate_to_subagents") if isinstance(before, dict) else None
+                ),
+            },
         )
         control_loop_resolved = False
         pending_control_request = None
@@ -2909,12 +2935,55 @@ class GatewayServer:
             "status": status,
             "session_id": target_session_id,
         }
+        audit_metadata: dict[str, Any] = {
+            "request_id": request_id,
+            "approved": approved,
+            "source": source,
+            "actor_user_id": user_id,
+            "target_session_id": target_session_id,
+        }
         if result is not None:
             response["approval"] = result.to_dict()
+            after = result.to_dict()
+            audit_metadata.update(
+                {
+                    "resolved_kind": "tool_approval",
+                    "tool_name": after.get("tool_name"),
+                    "agent_name": after.get("agent_name"),
+                    "state_before": before.get("state") if isinstance(before, dict) else None,
+                    "state_after": after.get("state"),
+                    "scope_before": before.get("scope") if isinstance(before, dict) else None,
+                    "scope_after": after.get("scope"),
+                    "tool_pattern_before": before.get("tool_pattern") if isinstance(before, dict) else None,
+                    "tool_pattern_after": after.get("tool_pattern"),
+                    "path_scope_before": before.get("path_scope") if isinstance(before, dict) else None,
+                    "path_scope_after": after.get("path_scope"),
+                    "propagate_to_subagents_before": (
+                        before.get("propagate_to_subagents") if isinstance(before, dict) else None
+                    ),
+                    "propagate_to_subagents_after": after.get("propagate_to_subagents"),
+                    "resolve_reason": reason,
+                }
+            )
         elif control_loop_resolved:
             response["control_loop"] = {"request_id": request_id, "approved": approved}
+            audit_metadata.update(
+                {
+                    "resolved_kind": "control_loop",
+                    "resolve_reason": reason,
+                }
+            )
         else:
             response["error"] = f"approval not found: {request_id}"
+        self.audit_logger.log(
+            event_type=AuditEventType.TOOL_APPROVAL,
+            user_id=user_id or None,
+            session_id=target_session_id or None,
+            action="resolve",
+            resource=request_id,
+            result=status,
+            metadata=audit_metadata,
+        )
         return response
 
     async def _desktop_emergency_stop(

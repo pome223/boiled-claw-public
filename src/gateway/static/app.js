@@ -38,6 +38,10 @@ const dashboardApprovalsListEl = document.getElementById("dashboardApprovalsList
 const dashboardTasksListEl = document.getElementById("dashboardTasksList");
 const dashboardApprovalsCaptionEl = document.getElementById("dashboardApprovalsCaption");
 const dashboardTasksCaptionEl = document.getElementById("dashboardTasksCaption");
+const dashboardApprovalsPrevBtn = document.getElementById("dashboardApprovalsPrevBtn");
+const dashboardApprovalsNextBtn = document.getElementById("dashboardApprovalsNextBtn");
+const dashboardTasksPrevBtn = document.getElementById("dashboardTasksPrevBtn");
+const dashboardTasksNextBtn = document.getElementById("dashboardTasksNextBtn");
 const dashboardDetailPanelEl = document.getElementById("dashboardDetailPanel");
 const dashboardDetailBadgeEl = document.getElementById("dashboardDetailBadge");
 const inspectorSessionBackendEl = document.getElementById("inspectorSessionBackend");
@@ -116,8 +120,19 @@ const dashboardState = {
   sessionBackend: "-",
   sessionNamespace: "",
   pendingApprovals: [],
-  recentApprovals: [],
+  pendingApprovalsTotal: 0,
+  dashboardApprovals: [],
+  approvalPage: 1,
+  approvalPageSize: 12,
+  approvalTotal: 0,
+  approvalHasMore: false,
   recentTasks: [],
+  recentTasksTotal: 0,
+  dashboardTasks: [],
+  taskPage: 1,
+  taskPageSize: 12,
+  taskTotal: 0,
+  taskHasMore: false,
   openTaskCount: 0,
   searchQuery: "",
   taskStatusFilter: "all",
@@ -505,82 +520,71 @@ function isOpenTaskStatus(status) {
   return !["completed", "failed", "cancelled", "expired"].includes(normalized);
 }
 
-function matchesTaskStatusFilter(task, filter) {
-  const normalized = String(task?.status || "").toLowerCase();
-  switch (filter) {
-    case "open":
-      return isOpenTaskStatus(normalized);
-    case "running":
-    case "pending":
-    case "completed":
-    case "failed":
-      return normalized === filter;
-    default:
-      return true;
+function dashboardSearchQuery() {
+  return String(dashboardState.searchQuery || "").trim();
+}
+
+function approvalListIncludesExpired(filter) {
+  return filter === "all" || filter === "expired";
+}
+
+function paginationLabel(total, page, pageSize, currentCount) {
+  if (!total) return "0 shown";
+  if (!currentCount) return `0 / ${total}`;
+  const start = (Math.max(1, page) - 1) * pageSize + 1;
+  const end = start + currentCount - 1;
+  return `${start}-${Math.max(start, end)} / ${total}`;
+}
+
+function updatePagerButtons(prevEl, nextEl, page, hasMore) {
+  if (prevEl) prevEl.disabled = page <= 1;
+  if (nextEl) nextEl.disabled = !hasMore;
+}
+
+function resetDashboardPages() {
+  dashboardState.approvalPage = 1;
+  dashboardState.taskPage = 1;
+}
+
+function updateDashboardFilterButtons() {
+  dashboardFilterChips.forEach((chip) => {
+    const kind = chip.dataset.filterKind;
+    const value = chip.dataset.filterValue || "all";
+    const active = (
+      (kind === "task-status" && dashboardState.taskStatusFilter === value)
+      || (kind === "approval-state" && dashboardState.approvalStateFilter === value)
+    );
+    chip.classList.toggle("active", active);
+  });
+}
+
+function buildDashboardApprovalParams() {
+  const params = new URLSearchParams({
+    state: dashboardState.approvalStateFilter || "all",
+    page: String(dashboardState.approvalPage || 1),
+    page_size: String(dashboardState.approvalPageSize || 12),
+  });
+  if (approvalListIncludesExpired(dashboardState.approvalStateFilter)) {
+    params.set("include_expired", "true");
   }
+  const query = dashboardSearchQuery();
+  if (query) params.set("q", query);
+  if (currentSessionId) params.set("session_id", currentSessionId);
+  return params;
 }
 
-function matchesApprovalStateFilter(approval, filter) {
-  if (!filter || filter === "all") return true;
-  return String(approval?.state || "").toLowerCase() === filter;
-}
-
-function matchesDashboardQuery(item, query, kind) {
-  if (!query) return true;
-  const normalized = query.toLowerCase();
-  if (kind === "task") {
-    const haystack = [
-      item.task_id,
-      item.kind,
-      item.title,
-      item.run_id,
-      item.status,
-      item.error,
-      JSON.stringify(item.artifacts || {}),
-      JSON.stringify(item.metadata || {}),
-      (item.approval_dependencies || []).join(" "),
-      (item.loser_task_ids || []).join(" "),
-      item.winner_task_id,
-    ]
-      .filter(Boolean)
-      .join(" ")
-      .toLowerCase();
-    return haystack.includes(normalized);
+function buildDashboardTaskParams() {
+  const params = new URLSearchParams({
+    page: String(dashboardState.taskPage || 1),
+    page_size: String(dashboardState.taskPageSize || 12),
+  });
+  if (dashboardState.taskStatusFilter && dashboardState.taskStatusFilter !== "all") {
+    params.set("status", dashboardState.taskStatusFilter);
   }
-
-  const haystack = [
-    item.request_id,
-    item.source_request_id,
-    item.tool_name,
-    item.tool_pattern,
-    item.agent_name,
-    item.reason,
-    item.resolve_reason,
-    item.path_scope,
-    item.scope,
-    item.state,
-    JSON.stringify(item.args || {}),
-  ]
-    .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
-  return haystack.includes(normalized);
-}
-
-function filteredDashboardApprovals() {
-  const query = dashboardState.searchQuery.trim();
-  return dashboardState.recentApprovals.filter((item) => (
-    matchesApprovalStateFilter(item, dashboardState.approvalStateFilter)
-    && matchesDashboardQuery(item, query, "approval")
-  ));
-}
-
-function filteredDashboardTasks() {
-  const query = dashboardState.searchQuery.trim();
-  return dashboardState.recentTasks.filter((item) => (
-    matchesTaskStatusFilter(item, dashboardState.taskStatusFilter)
-    && matchesDashboardQuery(item, query, "task")
-  ));
+  const query = dashboardSearchQuery();
+  if (query) params.set("q", query);
+  if (currentSessionId) params.set("session_id", currentSessionId);
+  return params;
 }
 
 function renderApprovalListItem(item) {
@@ -654,10 +658,10 @@ function renderCompactList(targetEl, items, renderer, emptyText) {
 }
 
 function updateDashboardUi() {
-  const pendingCount = dashboardState.pendingApprovals.length;
+  const pendingCount = dashboardState.pendingApprovalsTotal;
   const openTaskCount = dashboardState.openTaskCount;
-  const filteredApprovals = filteredDashboardApprovals();
-  const filteredTasks = filteredDashboardTasks();
+  const filteredApprovals = dashboardState.dashboardApprovals || [];
+  const filteredTasks = dashboardState.dashboardTasks || [];
   if (dashboardSessionBackendEl) {
     dashboardSessionBackendEl.textContent = dashboardState.sessionBackend || "-";
   }
@@ -671,12 +675,23 @@ function updateDashboardUi() {
     dashboardOpenTasksEl.textContent = String(openTaskCount);
   }
   if (dashboardApprovalsCaptionEl) {
-    dashboardApprovalsCaptionEl.textContent = `${filteredApprovals.length} shown`;
+    dashboardApprovalsCaptionEl.textContent = paginationLabel(
+      dashboardState.approvalTotal,
+      dashboardState.approvalPage,
+      dashboardState.approvalPageSize,
+      filteredApprovals.length,
+    );
   }
   if (dashboardTasksCaptionEl) {
+    const label = paginationLabel(
+      dashboardState.taskTotal,
+      dashboardState.taskPage,
+      dashboardState.taskPageSize,
+      filteredTasks.length,
+    );
     dashboardTasksCaptionEl.textContent = currentSessionId
-      ? `${filteredTasks.length} shown · ${currentSessionId}`
-      : `${filteredTasks.length} shown`;
+      ? `${label} · ${currentSessionId}`
+      : label;
   }
   if (inspectorSessionBackendEl) {
     inspectorSessionBackendEl.textContent = dashboardState.sessionBackend || "-";
@@ -694,12 +709,24 @@ function updateDashboardUi() {
     inspectorApprovalCountBadgeEl.textContent = String(pendingCount);
   }
   if (inspectorTaskCountBadgeEl) {
-    inspectorTaskCountBadgeEl.textContent = String(dashboardState.recentTasks.length);
+    inspectorTaskCountBadgeEl.textContent = String(dashboardState.recentTasksTotal);
   }
+  updatePagerButtons(
+    dashboardApprovalsPrevBtn,
+    dashboardApprovalsNextBtn,
+    dashboardState.approvalPage,
+    dashboardState.approvalHasMore,
+  );
+  updatePagerButtons(
+    dashboardTasksPrevBtn,
+    dashboardTasksNextBtn,
+    dashboardState.taskPage,
+    dashboardState.taskHasMore,
+  );
 
   renderCompactList(
     inspectorApprovalsListEl,
-    dashboardState.pendingApprovals.slice(0, 4),
+    dashboardState.pendingApprovals,
     renderApprovalListItem,
     "No pending approvals."
   );
@@ -1333,49 +1360,84 @@ async function fetchDashboardHealth(base) {
 }
 
 async function fetchDashboardApprovals(base) {
-  const params = new URLSearchParams({ state: "pending", limit: "50" });
-  if (currentSessionId) params.set("session_id", currentSessionId);
-  const recentParams = new URLSearchParams({ state: "all", limit: "50" });
-  if (currentSessionId) recentParams.set("session_id", currentSessionId);
+  const pendingParams = new URLSearchParams({ state: "pending", page: "1", page_size: "4" });
+  if (currentSessionId) pendingParams.set("session_id", currentSessionId);
+  const filteredParams = buildDashboardApprovalParams();
   try {
-    const [pendingRes, recentRes] = await Promise.all([
-      apiFetch(`${base}/tools/approvals?${params}`),
-      apiFetch(`${base}/tools/approvals?${recentParams}`)
+    const [pendingRes, filteredRes] = await Promise.all([
+      apiFetch(`${base}/tools/approvals?${pendingParams}`),
+      apiFetch(`${base}/tools/approvals?${filteredParams}`)
     ]);
     if (pendingRes.ok) {
       const pendingData = await pendingRes.json();
       dashboardState.pendingApprovals = Array.isArray(pendingData.approvals) ? pendingData.approvals : [];
+      dashboardState.pendingApprovalsTotal = Number(pendingData.pagination?.total || dashboardState.pendingApprovals.length || 0);
     } else {
       dashboardState.pendingApprovals = [];
+      dashboardState.pendingApprovalsTotal = 0;
     }
-    if (recentRes.ok) {
-      const recentData = await recentRes.json();
-      dashboardState.recentApprovals = Array.isArray(recentData.approvals) ? recentData.approvals : [];
+    if (filteredRes.ok) {
+      const filteredData = await filteredRes.json();
+      dashboardState.dashboardApprovals = Array.isArray(filteredData.approvals) ? filteredData.approvals : [];
+      dashboardState.approvalTotal = Number(filteredData.pagination?.total || 0);
+      dashboardState.approvalHasMore = Boolean(filteredData.pagination?.has_more);
     } else {
-      dashboardState.recentApprovals = [];
+      dashboardState.dashboardApprovals = [];
+      dashboardState.approvalTotal = 0;
+      dashboardState.approvalHasMore = false;
     }
   } catch (_) {
     dashboardState.pendingApprovals = [];
-    dashboardState.recentApprovals = [];
+    dashboardState.pendingApprovalsTotal = 0;
+    dashboardState.dashboardApprovals = [];
+    dashboardState.approvalTotal = 0;
+    dashboardState.approvalHasMore = false;
   }
 }
 
 async function fetchDashboardTasks(base) {
-  const params = new URLSearchParams({ limit: "100" });
-  if (currentSessionId) params.set("session_id", currentSessionId);
+  const recentParams = new URLSearchParams({ page: "1", page_size: "5" });
+  if (currentSessionId) recentParams.set("session_id", currentSessionId);
+  const openParams = new URLSearchParams({ status: "open", page: "1", page_size: "1" });
+  if (currentSessionId) openParams.set("session_id", currentSessionId);
+  const filteredParams = buildDashboardTaskParams();
   try {
-    const res = await apiFetch(`${base}/tasks?${params}`);
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    const tasks = Array.isArray(data.tasks) ? data.tasks : [];
-    dashboardState.recentTasks = tasks.slice(0, 12);
-    dashboardState.openTaskCount = tasks.filter((task) => {
-      const status = String(task.status || "").toLowerCase();
-      return !["completed", "failed", "cancelled", "expired"].includes(status);
-    }).length;
+    const [recentRes, openRes, filteredRes] = await Promise.all([
+      apiFetch(`${base}/tasks?${recentParams}`),
+      apiFetch(`${base}/tasks?${openParams}`),
+      apiFetch(`${base}/tasks?${filteredParams}`),
+    ]);
+    if (recentRes.ok) {
+      const recentData = await recentRes.json();
+      dashboardState.recentTasks = Array.isArray(recentData.tasks) ? recentData.tasks : [];
+      dashboardState.recentTasksTotal = Number(recentData.pagination?.total || dashboardState.recentTasks.length || 0);
+    } else {
+      dashboardState.recentTasks = [];
+      dashboardState.recentTasksTotal = 0;
+    }
+    if (openRes.ok) {
+      const openData = await openRes.json();
+      dashboardState.openTaskCount = Number(openData.pagination?.total || 0);
+    } else {
+      dashboardState.openTaskCount = 0;
+    }
+    if (filteredRes.ok) {
+      const filteredData = await filteredRes.json();
+      dashboardState.dashboardTasks = Array.isArray(filteredData.tasks) ? filteredData.tasks : [];
+      dashboardState.taskTotal = Number(filteredData.pagination?.total || 0);
+      dashboardState.taskHasMore = Boolean(filteredData.pagination?.has_more);
+    } else {
+      dashboardState.dashboardTasks = [];
+      dashboardState.taskTotal = 0;
+      dashboardState.taskHasMore = false;
+    }
   } catch (_) {
     dashboardState.recentTasks = [];
+    dashboardState.recentTasksTotal = 0;
+    dashboardState.dashboardTasks = [];
     dashboardState.openTaskCount = 0;
+    dashboardState.taskTotal = 0;
+    dashboardState.taskHasMore = false;
   }
 }
 
@@ -1867,6 +1929,7 @@ function activateTab(tabKey) {
 
 function switchSession(targetSessionId) {
   if (socket) socket.close();
+  resetDashboardPages();
   messageHistory.length = 0;
   inlineApprovals.clear();
   restoreMessages();
@@ -2029,16 +2092,15 @@ clearDashboardFiltersBtn?.addEventListener("click", () => {
   dashboardState.searchQuery = "";
   dashboardState.taskStatusFilter = "all";
   dashboardState.approvalStateFilter = "all";
+  resetDashboardPages();
   if (dashboardSearchInputEl) dashboardSearchInputEl.value = "";
-  dashboardFilterChips.forEach((chip) => {
-    const active = chip.dataset.filterValue === "all";
-    chip.classList.toggle("active", active);
-  });
-  updateDashboardUi();
+  updateDashboardFilterButtons();
+  scheduleDashboardRefresh(0);
 });
 dashboardSearchInputEl?.addEventListener("input", () => {
   dashboardState.searchQuery = dashboardSearchInputEl.value || "";
-  updateDashboardUi();
+  resetDashboardPages();
+  scheduleDashboardRefresh(250);
 });
 dashboardFilterChips.forEach((chip) => {
   chip.addEventListener("click", () => {
@@ -2046,14 +2108,34 @@ dashboardFilterChips.forEach((chip) => {
     const value = chip.dataset.filterValue || "all";
     if (kind === "task-status") {
       dashboardState.taskStatusFilter = value;
+      dashboardState.taskPage = 1;
     } else if (kind === "approval-state") {
       dashboardState.approvalStateFilter = value;
+      dashboardState.approvalPage = 1;
     }
-    dashboardFilterChips
-      .filter((candidate) => candidate.dataset.filterKind === kind)
-      .forEach((candidate) => candidate.classList.toggle("active", candidate === chip));
-    updateDashboardUi();
+    updateDashboardFilterButtons();
+    scheduleDashboardRefresh(0);
   });
+});
+dashboardApprovalsPrevBtn?.addEventListener("click", () => {
+  if (dashboardState.approvalPage <= 1) return;
+  dashboardState.approvalPage -= 1;
+  scheduleDashboardRefresh(0);
+});
+dashboardApprovalsNextBtn?.addEventListener("click", () => {
+  if (!dashboardState.approvalHasMore) return;
+  dashboardState.approvalPage += 1;
+  scheduleDashboardRefresh(0);
+});
+dashboardTasksPrevBtn?.addEventListener("click", () => {
+  if (dashboardState.taskPage <= 1) return;
+  dashboardState.taskPage -= 1;
+  scheduleDashboardRefresh(0);
+});
+dashboardTasksNextBtn?.addEventListener("click", () => {
+  if (!dashboardState.taskHasMore) return;
+  dashboardState.taskPage += 1;
+  scheduleDashboardRefresh(0);
 });
 [
   dashboardApprovalsListEl,
@@ -2110,6 +2192,7 @@ document.addEventListener("keydown", (e) => {
 const initialSettings = { ...parseStoredSettings(), ...parseUrlSettings() };
 applySettings(initialSettings);
 renderSessions();
+updateDashboardFilterButtons();
 updateDashboardUi();
 activateTab("chat");
 setStatus(false, "offline");
