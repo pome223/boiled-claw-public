@@ -396,6 +396,7 @@ class ToolPolicyEngine:
         session_id: Optional[str] = None,
         state: Optional[str] = None,
         include_expired: bool = False,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         self.cleanup_expired()
         approvals = list(self._approvals.values())
@@ -406,6 +407,8 @@ class ToolPolicyEngine:
         if not include_expired:
             approvals = [item for item in approvals if item.state != "expired"]
         approvals.sort(key=lambda item: item.created_at, reverse=True)
+        if limit is not None:
+            approvals = approvals[: max(1, limit)]
         return [item.to_dict() for item in approvals]
 
     def cleanup_expired(self, max_age: float = _DEFAULT_APPROVAL_TTL_SECONDS) -> int:
