@@ -343,8 +343,10 @@ def status():
     """Show configuration, bridge connectivity, and registered tools."""
     import httpx
     from src.config.settings import get_settings
+    from src.runtime.session_service import describe_session_backend
 
     settings = get_settings()
+    session_backend = describe_session_backend(settings)
 
     # ── Configuration summary ──
     from rich.table import Table
@@ -356,7 +358,9 @@ def status():
     cfg_table.add_row("Gateway", f"{settings.gateway_host}:{settings.gateway_port}")
     cfg_table.add_row("Shell Enabled", str(settings.shell_enabled))
     cfg_table.add_row("Browser Headless", str(settings.browser_headless))
-    cfg_table.add_row("Redis Sessions", settings.redis_url or "-")
+    cfg_table.add_row("Session Backend", session_backend["backend"])
+    if session_backend["namespace"]:
+        cfg_table.add_row("Redis Namespace", session_backend["namespace"])
     cfg_table.add_row("API Key Set", "yes" if os.getenv("GOOGLE_API_KEY") else "no")
     console.print(cfg_table)
 

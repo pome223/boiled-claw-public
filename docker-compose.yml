@@ -5,6 +5,7 @@ services:
       args:
         INSTALL_DEV: "false"
         INSTALL_BROWSER: "false"
+        INSTALL_REDIS: "true"
     container_name: boiled-claw-gateway
     env_file:
       - .env
@@ -55,6 +56,7 @@ services:
       args:
         INSTALL_DEV: "false"
         INSTALL_BROWSER: "false"
+        INSTALL_REDIS: "true"
     env_file:
       - .env
     environment:
@@ -89,6 +91,7 @@ services:
       args:
         INSTALL_DEV: "true"
         INSTALL_BROWSER: "false"
+        INSTALL_REDIS: "true"
     env_file:
       - .env
     environment:
@@ -114,3 +117,23 @@ services:
     command: ["sleep", "infinity"]
     profiles:
       - dev
+
+  boiled-claw-redis:
+    image: redis:7-alpine
+    container_name: boiled-claw-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - boiled-claw-redis-data:/data
+    expose:
+      - "6379"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - redis
+
+volumes:
+  boiled-claw-redis-data:

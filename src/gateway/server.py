@@ -67,7 +67,7 @@ from src.gateway.routing import (
     targets_user_browser,
 )
 from src.runtime.tool_events import set_tool_event_notifier
-from src.runtime.session_service import create_session_service
+from src.runtime.session_service import create_session_service, describe_session_backend
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 from src.runtime.task_store import get_task_store
@@ -256,6 +256,7 @@ class GatewayServer:
 
     def __init__(self):
         self.settings = get_settings()
+        self.session_backend = describe_session_backend(self.settings)
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
         self.session_service = create_session_service(self.settings)
@@ -1233,6 +1234,8 @@ class GatewayServer:
                 "version": "0.3.0",
                 "protocol_version": PROTOCOL_VERSION,
                 "status": "running",
+                "session_backend": self.session_backend["backend"],
+                "session_namespace": self.session_backend["namespace"],
                 "active_sessions": len(self.manager.active_connections),
                 "skills_loaded": get_skills_report().get("loaded", False),
                 "skills_count": get_skills_report().get("count", 0),
@@ -1240,7 +1243,11 @@ class GatewayServer:
 
         @self.app.get("/health")
         async def health():
-            return {"status": "healthy"}
+            return {
+                "status": "healthy",
+                "session_backend": self.session_backend["backend"],
+                "session_namespace": self.session_backend["namespace"],
+            }
 
         @self.app.get("/protocol")
         async def protocol_info():

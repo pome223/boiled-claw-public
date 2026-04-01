@@ -21,10 +21,14 @@ COPY src/ ./src/
 
 # Python依存関係
 ARG INSTALL_DEV=false
+ARG INSTALL_REDIS=false
 RUN if [ "$INSTALL_DEV" = "true" ]; then \
       pip install ".[dev]"; \
     else \
       pip install .; \
+    fi \
+    && if [ "$INSTALL_REDIS" = "true" ]; then \
+      pip install ".[redis]"; \
     fi
 
 # オプション: ブラウザ自動化をコンテナイメージに含める場合のみ有効化
