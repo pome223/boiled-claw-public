@@ -705,6 +705,32 @@ textarea {
   gap: 10px;
 }
 
+.detail-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.detail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(95, 156, 255, 0.28);
+  background: rgba(20, 42, 76, 0.42);
+  font-size: 0.8rem;
+}
+
+.detail-chip-label {
+  color: var(--muted);
+  text-transform: lowercase;
+}
+
+.detail-chip-value {
+  color: var(--text);
+}
+
 .audit-diff-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

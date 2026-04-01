@@ -180,6 +180,7 @@ const auditState = {
   selectedEntryId: null,
   selectedEntry: null,
   autoSelectFirst: false,
+  focus: null,
 };
 const KNOWN_STATUS_TAGS = new Set([
   "accepted",
@@ -650,6 +651,7 @@ function resetAuditFilters() {
   auditState.selectedEntryId = null;
   auditState.selectedEntry = null;
   auditState.autoSelectFirst = false;
+  auditState.focus = null;
   syncAuditInputsFromState();
 }
 
@@ -671,6 +673,147 @@ function buildAuditParams() {
 function auditResultTag(entry) {
   const result = String(entry?.result || entry?.event_type || "unknown");
   return statusTag(result);
+}
+
+function auditMetadata(entry) {
+  return entry?.metadata && typeof entry.metadata === "object" ? entry.metadata : {};
+}
+
+function renderDetailChips(items) {
+  if (!Array.isArray(items) || !items.length) return "";
+  return [
+    `<div class="detail-chip-row">`,
+    ...items.map((item) => (
+      `<span class="detail-chip"><span class="detail-chip-label">${escapeHtml(item.label || "meta")}</span><span class="detail-chip-value">${escapeHtml(item.value || "-")}</span></span>`
+    )),
+    `</div>`,
+  ].join("");
+}
+
+function normalizeAuditFocus(focus) {
+  if (!focus || typeof focus !== "object") return null;
+  const normalized = {};
+  [
+    "entryId",
+    "requestId",
+    "taskId",
+    "runId",
+    "sessionId",
+    "toolName",
+    "source",
+    "result",
+    "searchQuery",
+  ].forEach((key) => {
+    const value = String(focus[key] || "").trim();
+    if (value) normalized[key] = value;
+  });
+  return Object.keys(normalized).length ? normalized : null;
+}
+
+function auditSearchText(entry) {
+  const metadata = auditMetadata(entry);
+  const parts = [
+    entry?.entry_id,
+    entry?.event_type,
+    entry?.user_id,
+    entry?.session_id,
+    entry?.action,
+    entry?.resource,
+    entry?.result,
+    metadata.tool_name,
+    metadata.tool_pattern,
+    metadata.source,
+    metadata.actor_user_id,
+    metadata.target_session_id,
+  ];
+  try {
+    parts.push(JSON.stringify(metadata));
+  } catch (_) {
+    parts.push(String(metadata || ""));
+  }
+  return parts
+    .filter(Boolean)
+    .map((part) => String(part).toLowerCase())
+    .join(" ");
+}
+
+function auditEntryFocusScore(entry, focus) {
+  if (!focus) return 0;
+  const metadata = auditMetadata(entry);
+  const resource = String(entry?.resource || "");
+  const searchText = auditSearchText(entry);
+  let score = 0;
+
+  if (focus.entryId && entry?.entry_id === focus.entryId) score += 1000;
+  if (focus.requestId) {
+    const requestMatches = [
+      resource,
+      metadata.request_id,
+      metadata.source_request_id,
+    ].filter(Boolean).map((value) => String(value));
+    if (requestMatches.includes(focus.requestId)) score += 700;
+    else if (requestMatches.some((value) => value.includes(focus.requestId))) score += 480;
+  }
+  if (focus.taskId) {
+    const taskMatches = [
+      metadata.task_id,
+      metadata.parent_task_id,
+      metadata.winner_task_id,
+      resource,
+    ].filter(Boolean).map((value) => String(value));
+    if (taskMatches.includes(focus.taskId)) score += 520;
+    else if (taskMatches.some((value) => value.includes(focus.taskId))) score += 340;
+  }
+  if (focus.runId) {
+    const runMatches = [
+      metadata.run_id,
+      metadata.runId,
+      resource,
+    ].filter(Boolean).map((value) => String(value));
+    if (runMatches.includes(focus.runId)) score += 460;
+    else if (runMatches.some((value) => value.includes(focus.runId))) score += 300;
+  }
+  if (focus.toolName) {
+    const toolText = [
+      metadata.tool_name,
+      metadata.tool_pattern,
+      entry?.action,
+      resource,
+    ].filter(Boolean).join(" ").toLowerCase();
+    if (toolText.includes(focus.toolName.toLowerCase())) score += 180;
+  }
+  if (focus.source && String(metadata.source || "").toLowerCase() === focus.source.toLowerCase()) {
+    score += 120;
+  }
+  if (focus.result && String(entry?.result || "").toLowerCase() === focus.result.toLowerCase()) {
+    score += 90;
+  }
+  if (
+    focus.sessionId
+    && [entry?.session_id, metadata.target_session_id]
+      .filter(Boolean)
+      .map((value) => String(value))
+      .includes(focus.sessionId)
+  ) {
+    score += 80;
+  }
+  if (focus.searchQuery && searchText.includes(focus.searchQuery.toLowerCase())) score += 50;
+  return score;
+}
+
+function selectPreferredAuditEntry(entries, focus) {
+  if (!Array.isArray(entries) || !entries.length) return null;
+  if (!focus) return entries[0];
+  let bestEntry = entries[0];
+  let bestScore = auditEntryFocusScore(bestEntry, focus);
+  for (const entry of entries.slice(1)) {
+    const score = auditEntryFocusScore(entry, focus);
+    if (score > bestScore) {
+      bestEntry = entry;
+      bestScore = score;
+    }
+  }
+  return bestEntry;
 }
 
 function renderAuditListItem(entry) {
@@ -703,7 +846,7 @@ function renderAuditListItem(entry) {
 }
 
 function renderScopeTransition(entry) {
-  const metadata = entry.metadata && typeof entry.metadata === "object" ? entry.metadata : {};
+  const metadata = auditMetadata(entry);
   const rows = [
     ["State", metadata.state_before, metadata.state_after],
     ["Scope", metadata.scope_before, metadata.scope_after],
@@ -724,8 +867,33 @@ function renderScopeTransition(entry) {
   ].join("");
 }
 
+function renderApprovalAuditSummary(entry) {
+  if (entry?.event_type !== "tool_approval") return "";
+  const metadata = auditMetadata(entry);
+  const requestId = entry.resource || metadata.request_id || metadata.source_request_id || "-";
+  const resolveReason = metadata.resolve_reason || "-";
+  const sourceRequestId = metadata.source_request_id || "-";
+  return [
+    `<div class="detail-section">`,
+    `<div class="k">Approval Resolve Summary</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Request</div><div class="mono">${escapeHtml(requestId)}</div><div class="item-meta mono">${escapeHtml(sourceRequestId)}</div></div>`,
+    `<div class="detail-card"><div class="k">Actor / Source</div><div class="mono">${escapeHtml(metadata.actor_user_id || entry.user_id || "-")}</div><div class="item-meta">${escapeHtml(metadata.source || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Tool / Scope</div><div>${escapeHtml(metadata.tool_name || metadata.tool_pattern || "-")}</div><div class="item-meta mono">${escapeHtml(`${metadata.scope_before || "-"} → ${metadata.scope_after || "-"}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Reason</div><div>${escapeHtml(compactText(resolveReason, 220))}</div><div class="item-meta">${escapeHtml(entry.result || "-")}</div></div>`,
+    `</div>`,
+    `</div>`,
+  ].join("");
+}
+
 function renderAuditDetail(entry) {
-  const metadata = entry.metadata && typeof entry.metadata === "object" ? entry.metadata : {};
+  const metadata = auditMetadata(entry);
+  const chips = [
+    { label: "actor", value: entry.user_id || metadata.actor_user_id || "-" },
+    { label: "source", value: metadata.source || "-" },
+    { label: "result", value: entry.result || "-" },
+    { label: "tool", value: metadata.tool_name || metadata.tool_pattern || "-" },
+  ].filter((item) => item.value && item.value !== "-");
   return [
     `<div class="detail-section">`,
     `<div class="detail-heading">`,
@@ -736,12 +904,14 @@ function renderAuditDetail(entry) {
     auditResultTag(entry),
     `</div>`,
     `</div>`,
+    renderDetailChips(chips),
     `<div class="detail-grid">`,
     `<div class="detail-card"><div class="k">Actor</div><div class="mono">${escapeHtml(entry.user_id || metadata.actor_user_id || "-")}</div><div class="item-meta">${escapeHtml(metadata.source || "-")}</div></div>`,
     `<div class="detail-card"><div class="k">Session</div><div class="mono">${escapeHtml(entry.session_id || metadata.target_session_id || "-")}</div><div class="item-meta">${escapeHtml(entry.action || "-")}</div></div>`,
     `<div class="detail-card"><div class="k">Tool</div><div>${escapeHtml(metadata.tool_name || metadata.tool_pattern || "-")}</div><div class="item-meta mono">${escapeHtml(entry.resource || "-")}</div></div>`,
     `<div class="detail-card"><div class="k">Result</div><div>${escapeHtml(entry.result || "-")}</div><div class="item-meta">${escapeHtml(metadata.resolve_reason || "-")}</div></div>`,
     `</div>`,
+    renderApprovalAuditSummary(entry),
     entry.event_type === "tool_approval" ? renderScopeTransition(entry) : "",
     `<div class="detail-section">`,
     `<div class="k">Metadata</div>`,
@@ -812,8 +982,11 @@ function openAuditView(filters = {}) {
   if (Object.prototype.hasOwnProperty.call(filters, "resultFilter")) {
     auditState.resultFilter = filters.resultFilter || "";
   }
+  auditState.focus = normalizeAuditFocus(filters.focus);
   auditState.page = 1;
   auditState.autoSelectFirst = true;
+  auditState.selectedEntryId = null;
+  auditState.selectedEntry = null;
   syncAuditInputsFromState();
   activateTab("audit");
   scheduleAuditRefresh(0);
@@ -1072,7 +1245,7 @@ function renderTaskDetail(task) {
     `<div class="detail-section">`,
     `<div class="k">Audit Trail</div>`,
     `<div class="detail-actions">`,
-    `<button class="btn" type="button" data-action="open-related-audit" data-audit-session-id="${escapeAttr(task.owner_session_id || "")}" data-audit-query="${escapeAttr(auditQuery)}">Open Related Audit</button>`,
+    `<button class="btn" type="button" data-action="open-related-audit" data-audit-session-id="${escapeAttr(task.owner_session_id || "")}" data-audit-query="${escapeAttr(auditQuery)}" data-audit-task-id="${escapeAttr(task.task_id || "")}" data-audit-run-id="${escapeAttr(task.run_id || "")}">Open Related Audit</button>`,
     `</div>`,
     `</div>`,
     subagentRun ? [
@@ -1145,7 +1318,7 @@ function renderApprovalDetail(approval) {
     `<div class="detail-section">`,
     `<div class="k">Audit Trail</div>`,
     `<div class="detail-actions">`,
-    `<button class="btn" type="button" data-action="open-related-audit" data-audit-session-id="${escapeAttr(approval.session_id || "")}" data-audit-query="${escapeAttr(approval.request_id || approval.source_request_id || "")}">Open Related Audit</button>`,
+    `<button class="btn" type="button" data-action="open-related-audit" data-audit-session-id="${escapeAttr(approval.session_id || "")}" data-audit-query="${escapeAttr(approval.request_id || approval.source_request_id || "")}" data-audit-request-id="${escapeAttr(approval.request_id || approval.source_request_id || "")}" data-audit-tool="${escapeAttr(approval.tool_name || approval.tool_pattern || "")}">Open Related Audit</button>`,
     `</div>`,
     `</div>`,
     approval.state === "pending" ? [
@@ -1457,6 +1630,16 @@ function handleSelectionPanelClick(event) {
       toolFilter: actionButton.dataset.auditTool || "",
       sourceFilter: actionButton.dataset.auditSource || "",
       resultFilter: actionButton.dataset.auditResult || "",
+      focus: {
+        sessionId: actionButton.dataset.auditSessionId || "",
+        searchQuery: actionButton.dataset.auditQuery || "",
+        requestId: actionButton.dataset.auditRequestId || "",
+        taskId: actionButton.dataset.auditTaskId || "",
+        runId: actionButton.dataset.auditRunId || "",
+        toolName: actionButton.dataset.auditTool || "",
+        source: actionButton.dataset.auditSource || "",
+        result: actionButton.dataset.auditResult || "",
+      },
     });
   }
 }
@@ -1710,8 +1893,8 @@ async function fetchAuditEntries(base) {
     auditState.entries = Array.isArray(payload.entries) ? payload.entries : [];
     auditState.total = Number(payload.pagination?.total || 0);
     auditState.hasMore = Boolean(payload.pagination?.has_more);
-    if (auditState.autoSelectFirst) {
-      auditState.selectedEntry = auditState.entries[0] || null;
+    if (auditState.autoSelectFirst || (!auditState.selectedEntryId && auditState.focus)) {
+      auditState.selectedEntry = selectPreferredAuditEntry(auditState.entries, auditState.focus);
       auditState.selectedEntryId = auditState.selectedEntry?.entry_id || null;
       auditState.autoSelectFirst = false;
     } else if (auditState.selectedEntryId) {
@@ -2438,6 +2621,7 @@ auditSearchInputEl?.addEventListener("input", () => {
   auditState.page = 1;
   auditState.selectedEntryId = null;
   auditState.selectedEntry = null;
+  auditState.focus = null;
   scheduleAuditRefresh(250);
 });
 [auditActorInputEl, auditSessionInputEl, auditToolInputEl, auditSourceInputEl, auditResultInputEl].forEach((element) => {
@@ -2450,6 +2634,7 @@ auditSearchInputEl?.addEventListener("input", () => {
     auditState.page = 1;
     auditState.selectedEntryId = null;
     auditState.selectedEntry = null;
+    auditState.focus = null;
     scheduleAuditRefresh(250);
   });
 });

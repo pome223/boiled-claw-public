@@ -56,7 +56,7 @@ The Gateway ships a browser-based chat, task dashboard, audit explorer, detail /
 
 ![boiled-claw Control UI example](assets/control-ui-demo.png)
 
-The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened. The Dashboard and Audit tabs then let you drill into task artifacts, approval scope changes, and audit records without leaving the Control UI.
+The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened. The Dashboard and Audit tabs then let you drill into task artifacts, jump into related audit events, and inspect actor / source / result chips plus approval scope changes without leaving the Control UI.
 
 ## Thesis
 
@@ -120,7 +120,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
 - 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state and exposes a clickable detail / intervention panel
-- 🕵️ **Audit Log Explorer** - Filter audit events by actor / session / tool / source / result and inspect approval resolve before / after state in the browser
+- 🕵️ **Audit Log Explorer** - Filter audit events by actor / session / tool / source / result, deep-link from task or approval detail, and inspect approval resolve before / after state in the browser
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`

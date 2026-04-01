@@ -14,6 +14,9 @@ from src.config.settings import get_settings
 
 
 _UNSET = object()
+_SEARCH_FRAGMENT_CHAR_LIMIT = 4096
+_SEARCH_FRAGMENT_TOKEN_LIMIT = 256
+_SEARCH_FRAGMENT_DEPTH_LIMIT = 6
 
 
 def _merge_json(base: Any, updates: Any) -> Any:
@@ -56,6 +59,8 @@ class TaskStore:
                     approval_dependencies_json TEXT,
                     artifacts_json TEXT NOT NULL,
                     metadata_json TEXT NOT NULL,
+                    artifacts_search_text TEXT NOT NULL DEFAULT '',
+                    metadata_search_text TEXT NOT NULL DEFAULT '',
                     search_text TEXT NOT NULL DEFAULT '',
                     error TEXT,
                     created_at REAL NOT NULL,
@@ -108,6 +113,20 @@ class TaskStore:
                 cursor.execute(
                     "ALTER TABLE tasks ADD COLUMN search_text TEXT NOT NULL DEFAULT ''"
                 )
+            if "artifacts_search_text" not in columns:
+                cursor.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN artifacts_search_text TEXT NOT NULL DEFAULT ''
+                    """
+                )
+            if "metadata_search_text" not in columns:
+                cursor.execute(
+                    """
+                    ALTER TABLE tasks
+                    ADD COLUMN metadata_search_text TEXT NOT NULL DEFAULT ''
+                    """
+                )
 
             if self._should_rebuild_search_index(cursor):
                 self._rebuild_search_index(cursor)
@@ -121,6 +140,28 @@ class TaskStore:
         cursor.execute("SELECT COUNT(*) FROM tasks WHERE search_text = ''")
         missing_search_text = int(cursor.fetchone()[0] or 0)
         if missing_search_text > 0:
+            return True
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM tasks
+            WHERE artifacts_search_text = ''
+              AND COALESCE(artifacts_json, '{}') NOT IN ('', '{}', 'null')
+            """
+        )
+        missing_artifacts_search_text = int(cursor.fetchone()[0] or 0)
+        if missing_artifacts_search_text > 0:
+            return True
+        cursor.execute(
+            """
+            SELECT COUNT(*)
+            FROM tasks
+            WHERE metadata_search_text = ''
+              AND COALESCE(metadata_json, '{}') NOT IN ('', '{}', 'null')
+            """
+        )
+        missing_metadata_search_text = int(cursor.fetchone()[0] or 0)
+        if missing_metadata_search_text > 0:
             return True
         if not self._fts_enabled:
             return False
@@ -136,8 +177,9 @@ class TaskStore:
             """
             SELECT task_id, kind, title, status, owner_session_id, owner_user_id,
                    parent_task_id, run_id, winner_task_id, loser_task_ids_json,
-                   approval_dependencies_json, artifacts_json, metadata_json, error,
-                   created_at, updated_at, started_at, ended_at
+                   approval_dependencies_json, artifacts_json, metadata_json,
+                   artifacts_search_text, metadata_search_text, error, created_at,
+                   updated_at, started_at, ended_at
             FROM tasks
             """
         )
@@ -146,10 +188,25 @@ class TaskStore:
             cursor.execute("DELETE FROM tasks_search")
         for row in rows:
             task = self._row_to_task(row)
-            search_text = self._task_search_text(task)
+            (
+                artifacts_search_text,
+                metadata_search_text,
+                search_text,
+            ) = self._task_search_document(task)
             cursor.execute(
-                "UPDATE tasks SET search_text = ? WHERE task_id = ?",
-                (search_text, task["task_id"]),
+                """
+                UPDATE tasks
+                SET artifacts_search_text = ?,
+                    metadata_search_text = ?,
+                    search_text = ?
+                WHERE task_id = ?
+                """,
+                (
+                    artifacts_search_text,
+                    metadata_search_text,
+                    search_text,
+                    task["task_id"],
+                ),
             )
             if self._fts_enabled:
                 cursor.execute(
@@ -158,7 +215,61 @@ class TaskStore:
                 )
 
     @staticmethod
-    def _task_search_text(task: dict[str, Any]) -> str:
+    def _truncate_search_text(text: str, limit: int = _SEARCH_FRAGMENT_CHAR_LIMIT) -> str:
+        compact = re.sub(r"\s+", " ", text.strip())
+        return compact[:limit]
+
+    @classmethod
+    def _search_fragment(
+        cls,
+        value: Any,
+        *,
+        char_limit: int = _SEARCH_FRAGMENT_CHAR_LIMIT,
+        token_limit: int = _SEARCH_FRAGMENT_TOKEN_LIMIT,
+    ) -> str:
+        tokens: list[str] = []
+        char_budget = max(0, int(char_limit))
+
+        def _append(token: Any) -> bool:
+            nonlocal char_budget
+            if len(tokens) >= token_limit or char_budget <= 0:
+                return False
+            text = cls._truncate_search_text(str(token), limit=char_budget)
+            if not text:
+                return True
+            lowered = text.lower()
+            tokens.append(lowered)
+            char_budget -= len(lowered) + 1
+            return char_budget > 0 and len(tokens) < token_limit
+
+        def _walk(node: Any, depth: int) -> None:
+            if len(tokens) >= token_limit or char_budget <= 0 or depth > _SEARCH_FRAGMENT_DEPTH_LIMIT:
+                return
+            if node is None or isinstance(node, bool):
+                return
+            if isinstance(node, dict):
+                for key, child in node.items():
+                    if not _append(key):
+                        return
+                    _walk(child, depth + 1)
+                    if len(tokens) >= token_limit or char_budget <= 0:
+                        return
+                return
+            if isinstance(node, (list, tuple, set)):
+                for child in node:
+                    _walk(child, depth + 1)
+                    if len(tokens) >= token_limit or char_budget <= 0:
+                        return
+                return
+            _append(node)
+
+        _walk(value, 0)
+        return " ".join(tokens)
+
+    @classmethod
+    def _task_search_document(cls, task: dict[str, Any]) -> tuple[str, str, str]:
+        artifacts_search_text = cls._search_fragment(task.get("artifacts") or {})
+        metadata_search_text = cls._search_fragment(task.get("metadata") or {})
         parts = [
             task.get("task_id"),
             task.get("kind"),
@@ -172,12 +283,19 @@ class TaskStore:
             " ".join(task.get("loser_task_ids") or []),
             " ".join(task.get("approval_dependencies") or []),
             task.get("error"),
+            artifacts_search_text,
+            metadata_search_text,
         ]
-        if task.get("artifacts"):
-            parts.append(json.dumps(task["artifacts"], ensure_ascii=False, sort_keys=True))
-        if task.get("metadata"):
-            parts.append(json.dumps(task["metadata"], ensure_ascii=False, sort_keys=True))
-        return " ".join(str(part).strip() for part in parts if part).lower()
+        search_text = " ".join(str(part).strip() for part in parts if part).lower()
+        return (
+            artifacts_search_text,
+            metadata_search_text,
+            cls._truncate_search_text(search_text),
+        )
+
+    @classmethod
+    def _task_search_text(cls, task: dict[str, Any]) -> str:
+        return cls._task_search_document(task)[2]
 
     def _sync_task_search(
         self,
@@ -260,11 +378,11 @@ class TaskStore:
             "approval_dependencies": json.loads(row[10]) if row[10] else [],
             "artifacts": json.loads(row[11]) if row[11] else {},
             "metadata": json.loads(row[12]) if row[12] else {},
-            "error": row[13],
-            "created_at": row[14],
-            "updated_at": row[15],
-            "started_at": row[16],
-            "ended_at": row[17],
+            "error": row[15],
+            "created_at": row[16],
+            "updated_at": row[17],
+            "started_at": row[18],
+            "ended_at": row[19],
         }
 
     def create(
@@ -309,7 +427,11 @@ class TaskStore:
             metadata=metadata_payload,
             error=error,
         )
-        search_text = self._task_search_text(task_payload)
+        (
+            artifacts_search_text,
+            metadata_search_text,
+            search_text,
+        ) = self._task_search_document(task_payload)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -328,6 +450,8 @@ class TaskStore:
                     approval_dependencies_json,
                     artifacts_json,
                     metadata_json,
+                    artifacts_search_text,
+                    metadata_search_text,
                     search_text,
                     error,
                     created_at,
@@ -335,7 +459,7 @@ class TaskStore:
                     started_at,
                     ended_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     resolved_task_id,
@@ -351,6 +475,8 @@ class TaskStore:
                     json.dumps(approval_items, ensure_ascii=True),
                     json.dumps(artifacts_payload, ensure_ascii=True),
                     json.dumps(metadata_payload, ensure_ascii=True),
+                    artifacts_search_text,
+                    metadata_search_text,
                     search_text,
                     error,
                     now,
@@ -373,9 +499,10 @@ class TaskStore:
             cursor.execute(
                 """
                 SELECT task_id, kind, title, status, owner_session_id, owner_user_id,
-                       parent_task_id, run_id, winner_task_id, loser_task_ids_json,
-                       approval_dependencies_json, artifacts_json, metadata_json, error,
-                       created_at, updated_at, started_at, ended_at
+                   parent_task_id, run_id, winner_task_id, loser_task_ids_json,
+                   approval_dependencies_json, artifacts_json, metadata_json,
+                   artifacts_search_text, metadata_search_text, error, created_at,
+                   updated_at, started_at, ended_at
                 FROM tasks
                 WHERE task_id = ?
                 """,
@@ -392,9 +519,10 @@ class TaskStore:
             cursor.execute(
                 """
                 SELECT task_id, kind, title, status, owner_session_id, owner_user_id,
-                       parent_task_id, run_id, winner_task_id, loser_task_ids_json,
-                       approval_dependencies_json, artifacts_json, metadata_json, error,
-                       created_at, updated_at, started_at, ended_at
+                   parent_task_id, run_id, winner_task_id, loser_task_ids_json,
+                   approval_dependencies_json, artifacts_json, metadata_json,
+                   artifacts_search_text, metadata_search_text, error, created_at,
+                   updated_at, started_at, ended_at
                 FROM tasks
                 WHERE run_id = ?
                 ORDER BY created_at DESC
@@ -460,7 +588,11 @@ class TaskStore:
             "metadata": next_metadata,
             "error": current["error"] if error is _UNSET else error,
         }
-        search_text = self._task_search_text(next_task)
+        (
+            artifacts_search_text,
+            metadata_search_text,
+            search_text,
+        ) = self._task_search_document(next_task)
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -475,6 +607,8 @@ class TaskStore:
                     approval_dependencies_json = ?,
                     artifacts_json = ?,
                     metadata_json = ?,
+                    artifacts_search_text = ?,
+                    metadata_search_text = ?,
                     search_text = ?,
                     error = ?,
                     updated_at = ?,
@@ -499,6 +633,8 @@ class TaskStore:
                     ),
                     json.dumps(next_artifacts, ensure_ascii=True),
                     json.dumps(next_metadata, ensure_ascii=True),
+                    artifacts_search_text,
+                    metadata_search_text,
                     search_text,
                     current["error"] if error is _UNSET else error,
                     time.time(),
@@ -569,8 +705,9 @@ class TaskStore:
         select_query = f"""
             SELECT task_id, kind, title, status, owner_session_id, owner_user_id,
                    parent_task_id, run_id, winner_task_id, loser_task_ids_json,
-                   approval_dependencies_json, artifacts_json, metadata_json, error,
-                   created_at, updated_at, started_at, ended_at
+                   approval_dependencies_json, artifacts_json, metadata_json,
+                   artifacts_search_text, metadata_search_text, error, created_at,
+                   updated_at, started_at, ended_at
             FROM tasks
             {where}
             ORDER BY updated_at DESC, created_at DESC
