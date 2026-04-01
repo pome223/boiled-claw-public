@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from google.adk.events.event import Event
+from google.adk.sessions import InMemorySessionService
 from google.genai import types
 import pytest
 
@@ -50,6 +51,8 @@ def _build_gateway(
     *,
     gateway_api_key=None,
     gateway_auth_user_header=None,
+    redis_url=None,
+    redis_session_namespace="boiled-claw:sessions",
 ):
     transcript_module._store = TranscriptStore(tmp_path / "transcript.db")
     tool_policy_module._engine = None
@@ -62,6 +65,7 @@ def _build_gateway(
 
     monkeypatch.setattr(server_module, "ensure_skills_loaded", _noop_skills)
     monkeypatch.setattr(server_module, "get_scheduler", lambda: scheduler)
+    monkeypatch.setattr(server_module, "create_session_service", lambda _settings: InMemorySessionService())
     monkeypatch.setattr(
         server_module,
         "get_settings",
@@ -71,6 +75,8 @@ def _build_gateway(
             gateway_host="127.0.0.1",
             gateway_port=18789,
             memory_db_path=tmp_path / "memory.db",
+            redis_url=redis_url,
+            redis_session_namespace=redis_session_namespace,
         ),
     )
 
@@ -136,6 +142,26 @@ def test_protocol_exposes_runtime_substrate_metadata(monkeypatch, tmp_path):
     payload = response.json()
     assert "GET /runtime/resources" in payload["http_surfaces"]
     assert payload["runtime_substrate"]["capabilities"]["invoke_route"] == "POST /runtime/capabilities/invoke"
+
+
+def test_root_and_health_expose_session_backend(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(
+        monkeypatch,
+        tmp_path,
+        redis_url="redis://boiled-claw-redis:6379/0",
+        redis_session_namespace="demo:sessions",
+    )
+
+    with TestClient(gateway.app) as client:
+        root_response = client.get("/")
+        health_response = client.get("/health")
+
+    assert root_response.status_code == 200
+    assert root_response.json()["session_backend"] == "redis"
+    assert root_response.json()["session_namespace"] == "demo:sessions"
+    assert health_response.status_code == 200
+    assert health_response.json()["session_backend"] == "redis"
+    assert health_response.json()["session_namespace"] == "demo:sessions"
 
 
 def test_runtime_substrate_http_surfaces(monkeypatch, tmp_path):

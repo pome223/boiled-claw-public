@@ -192,3 +192,30 @@ def test_create_session_service_returns_redis_when_configured(monkeypatch):
 
     assert isinstance(service, session_service_module.RedisSessionService)
     assert service._client is fake_client
+
+
+def test_describe_session_backend_defaults_to_memory():
+    settings = type(
+        "Settings",
+        (),
+        {"redis_url": None, "redis_session_namespace": "boiled-claw:sessions"},
+    )()
+
+    description = session_service_module.describe_session_backend(settings)
+
+    assert description == {"backend": "memory", "namespace": None}
+
+
+def test_describe_session_backend_reports_redis_namespace():
+    settings = type(
+        "Settings",
+        (),
+        {
+            "redis_url": "redis://boiled-claw-redis:6379/0",
+            "redis_session_namespace": "demo:sessions",
+        },
+    )()
+
+    description = session_service_module.describe_session_backend(settings)
+
+    assert description == {"backend": "redis", "namespace": "demo:sessions"}

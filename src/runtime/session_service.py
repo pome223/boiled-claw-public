@@ -34,6 +34,21 @@ class RedisLike(Protocol):
     async def zrem(self, key: str, *values: str) -> Any: ...
 
 
+def describe_session_backend(settings: Optional[Settings] = None) -> dict[str, Any]:
+    resolved_settings = settings or get_settings()
+    redis_url = getattr(resolved_settings, "redis_url", None)
+    if redis_url:
+        return {
+            "backend": "redis",
+            "namespace": getattr(
+                resolved_settings,
+                "redis_session_namespace",
+                "boiled-claw:sessions",
+            ),
+        }
+    return {"backend": "memory", "namespace": None}
+
+
 def _decode_redis_value(value: Any) -> Any:
     if isinstance(value, bytes):
         return value.decode("utf-8")

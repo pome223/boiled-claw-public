@@ -123,7 +123,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
 - 📝 **Persistent Transcript** - Gateway holds SQLite-backed session history
-- 🗃️ **Redis Sessions** - Optional Redis-backed ADK session state for Gateway / CLI / channels
+- 🗃️ **Redis Sessions** - Optional Redis-backed ADK live session state while transcript / task / memory stores remain SQLite-backed
 - ⏰ **Cron Platform** - System event integration, delivery targets, and retry support
 - 🔌 **MCP Support** - Bundled sample MCP server supporting SSE / HTTP / stdio connections
 - 🔒 **Security** - Audit logs, command policies, and stateful tool approvals with scope / expiry / propagation
@@ -203,7 +203,7 @@ cp .env.example .env
 # GATEWAY_API_KEY=change-me
 # GATEWAY_AUTH_USER_HEADER=X-Auth-User
 # Optionally persist live ADK sessions in Redis:
-# REDIS_URL=redis://127.0.0.1:6379/0
+# REDIS_URL=redis://boiled-claw-redis:6379/0
 # REDIS_SESSION_NAMESPACE=boiled-claw:sessions
 ```
 
@@ -211,6 +211,8 @@ You can obtain a Google API Key from [Google AI Studio](https://aistudio.google.
 
 Setting `GATEWAY_API_KEY` enables authentication on the Gateway's HTTP / WebSocket API.
 If `GATEWAY_AUTH_USER_HEADER` is also set, the effective `user_id` is resolved from that trusted header, and cannot be overridden by the `user_id` in the path or body. When `GATEWAY_AUTH_USER_HEADER` is left unset and a shared API key is used, authenticated requests are grouped under a single shared principal.
+
+`REDIS_URL` only changes the live ADK session backend used by Gateway / CLI / channel runners. Transcript history, task objects, computer trajectories, memory, and physical validation state stay in SQLite.
 
 ### 3. Start the Gateway
 
@@ -227,6 +229,18 @@ docker compose logs -f boiled-claw-gateway
 # Stop
 docker compose down
 ```
+
+### 3a. Optional: Start Redis-backed Session State
+
+```bash
+# In .env:
+# REDIS_URL=redis://boiled-claw-redis:6379/0
+# REDIS_SESSION_NAMESPACE=boiled-claw:sessions
+
+docker compose --profile redis up -d --build boiled-claw-redis boiled-claw-gateway
+```
+
+Use this when you want Gateway, CLI, and channel workers to share the same live ADK session state across processes or container restarts. This does not replace SQLite-backed transcript or task persistence.
 
 Endpoints available after Gateway startup:
 
