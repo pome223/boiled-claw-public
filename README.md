@@ -52,7 +52,7 @@ The Web UI is the easiest way to understand the system. The CLI hits the same Ga
 
 ## Control UI
 
-The Gateway ships a browser-based chat, task dashboard, and event stream so you can see routing, approvals, tool results, and recovery in one place.
+The Gateway ships a browser-based chat, task dashboard, detail / intervention panel, and event stream so you can see routing, approvals, tool results, and recovery in one place.
 
 ![boiled-claw Control UI example](assets/control-ui-demo.png)
 
@@ -119,7 +119,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
-- 📊 **Task / Approval Dashboard** - Control UI surfaces pending approvals, recent workflow tasks, and the active session backend
+- 📊 **Task / Approval Dashboard** - Control UI surfaces pending approvals, recent workflow tasks, session backend status, and a clickable detail / intervention panel
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
@@ -428,6 +428,7 @@ The self-improvement slice is intentionally offline and benchmark-gated:
 - `self_improvement_search_from_trajectory` fans one failed computer trajectory out into multiple canaries, compares benchmarked candidates, and keeps the winner
 - `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, and can record approved changes into memory
 - `self_improvement_cleanup_canary` removes the worktree and deletes the canary branch when finished
+- new failed trajectories automatically surface matching `approved_improvement` memories as reuse suggestions so the operator can see what already worked
 
 Optional `.env`:
 
@@ -446,6 +447,7 @@ The high-level demo and search flows now create persistent task objects:
 
 - `self_improvement_demo_from_trajectory` returns one `task_id` for the end-to-end demo run
 - `self_improvement_search_from_trajectory` creates a parent search task plus candidate child tasks, then records `winner_task_id` / `loser_task_ids`
+- both flows attach `reuse_query` and `reuse_suggestions` so the dashboard can show prior approved fixes for similar failures
 
 CLI demo:
 
@@ -509,6 +511,13 @@ Task objects persist:
 - `winner_task_id` / `loser_task_ids`
 - `approval_dependencies`
 - `run_id` for subagent-backed tasks
+
+The Control UI dashboard builds on top of that task layer:
+
+- click a task or approval to open a full detail panel with artifacts, metadata, errors, and links
+- follow `winner_task_id`, `loser_task_ids`, `approval_dependencies`, and child tasks without leaving the UI
+- steer or kill active session-mode subagents directly from the panel
+- inspect approval history, scope, path scope, propagation flags, and resolve pending requests in-place
 
 ## Project Structure
 

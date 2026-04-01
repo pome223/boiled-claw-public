@@ -71,6 +71,7 @@ from src.runtime.session_service import create_session_service, describe_session
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 from src.runtime.task_store import get_task_store
+from src.tools.tasks import create_task_record, update_task_record
 
 _HEARTBEAT_INTERVAL = 30  # seconds
 _AGENT_TIMEOUT = 120       # seconds
@@ -1118,6 +1119,7 @@ class GatewayServer:
             session_id=session_id,
             goal=goal,
             constraints=[],
+            source="cron",
         )
         await self._deliver_background_result(
             session_id=session_id,
@@ -1127,7 +1129,11 @@ class GatewayServer:
             agent_name="control_loop",
             message=result.final_text,
             ok=result.success,
-            metadata={"type": "control_loop", "plan_id": result.plan_id},
+            metadata={
+                "type": "control_loop",
+                "plan_id": result.plan_id,
+                "task_id": result.metadata.get("task_id"),
+            },
         )
 
     async def _deliver_background_result(
@@ -1472,6 +1478,7 @@ class GatewayServer:
                 session_id=session.id,
                 goal=goal,
                 constraints=constraints,
+                source="http",
             )
             self.transcript.append(
                 session.id,
@@ -1483,6 +1490,7 @@ class GatewayServer:
                     "success": result.success,
                     "needs_human": bool(result.metadata.get("needs_human")),
                     "plan_id": result.plan_id,
+                    "task_id": result.metadata.get("task_id"),
                 },
             )
             if result.metadata.get("needs_human"):
@@ -1499,6 +1507,7 @@ class GatewayServer:
                 "plan_id": result.plan_id,
                 "verification_report_id": result.verification_report_id,
                 "repair_count": result.repair_count,
+                "task_id": result.metadata.get("task_id"),
                 "needs_human": bool(result.metadata.get("needs_human")),
                 "approval_request": result.metadata.get("approval_request"),
                 "promoted_memory_ids": result.promoted_memory_ids,
@@ -1555,6 +1564,7 @@ class GatewayServer:
                     constraints=_normalize_constraints(
                         (pending.get("plan") or {}).get("constraints")
                     ),
+                    source="http",
                 )
                 if resumed_result.metadata.get("needs_human"):
                     await self._emit_control_approval_request(
@@ -1715,6 +1725,46 @@ class GatewayServer:
                     limit=max(1, min(limit, 100)) if limit is not None else None,
                 )
             }
+
+        @self.app.get("/tools/approvals/{request_id}")
+        async def tool_approval_get(request_id: str):
+            approval = self.tool_policy.get_approval(request_id)
+            if approval is None:
+                raise HTTPException(status_code=404, detail=f"approval not found: {request_id}")
+            return {"approval": approval}
+
+        @self.app.post("/tools/approvals/{request_id}/resolve")
+        async def tool_approval_resolve(
+            request: Request,
+            request_id: str,
+            payload: Dict[str, Any] | None = Body(default=None),
+        ):
+            body = payload or {}
+            if "approved" not in body:
+                raise HTTPException(status_code=400, detail="approved is required")
+            approved = bool(body.get("approved"))
+            reason = str(body.get("reason") or "").strip()
+            session_id = str(body.get("session_id") or "")
+            user_id = self._resolve_http_user_id(
+                request,
+                str(body.get("user_id") or "api_user"),
+                default_user_id="api_user",
+            )
+            result = await self._resolve_tool_approval_request(
+                request_id=request_id,
+                approved=approved,
+                reason=reason,
+                session_id=session_id,
+                user_id=user_id,
+                scope=body.get("scope"),
+                tool_pattern=body.get("tool_pattern"),
+                path_scope=body.get("path_scope"),
+                expires_at=body.get("expires_at"),
+                propagate_to_subagents=body.get("propagate_to_subagents"),
+            )
+            if not result.get("resolved"):
+                raise HTTPException(status_code=404, detail=result.get("error", "approval not found"))
+            return result
 
         # --- static / chat UI ---
 
@@ -1890,79 +1940,17 @@ class GatewayServer:
                         )
 
                     elif event_name == "tools.approval":
-                        request_id = data.get("request_id", "")
-                        approved = bool(data.get("approved", False))
-                        reason = data.get("reason", "")
-                        scope = data.get("scope")
-                        tool_pattern = data.get("tool_pattern")
-                        path_scope = data.get("path_scope")
-                        expires_at = data.get("expires_at")
-                        propagate_to_subagents = data.get("propagate_to_subagents")
-                        result = self.tool_policy.resolve_approval(
-                            request_id,
-                            approved,
-                            reason,
-                            scope=scope,
-                            tool_pattern=tool_pattern,
-                            path_scope=path_scope,
-                            expires_at=expires_at if isinstance(expires_at, (int, float)) else None,
-                            propagate_to_subagents=(
-                                bool(propagate_to_subagents)
-                                if propagate_to_subagents is not None
-                                else None
-                            ),
-                        )
-                        control_loop_resolved = False
-                        pending_control_request = None
-                        if result is None:
-                            pending_control_request = (
-                                await self.control_loop.get_pending_approval(
-                                    user_id=user_id,
-                                    session_id=session_id,
-                                )
-                            )
-                            control_loop_resolved = (
-                                await self.control_loop.resolve_human_approval(
-                                    user_id=user_id,
-                                    session_id=session_id,
-                                    approved=approved,
-                                    request_id=request_id,
-                                )
-                            )
-                            if (
-                                approved
-                                and control_loop_resolved
-                                and pending_control_request
-                            ):
-                                resume_goal = (
-                                    await self.control_loop.get_task_goal(
-                                        user_id=user_id,
-                                        session_id=session_id,
-                                    )
-                                    or pending_control_request.get("goal", "")
-                                )
-                                await self._start_control_loop_run(
-                                    session_id=session_id,
-                                    user_id=user_id,
-                                    goal=resume_goal,
-                                    constraints=_normalize_constraints(
-                                        (pending_control_request.get("plan") or {}).get(
-                                            "constraints"
-                                        )
-                                    ),
-                                )
-                        target_session_id = result.session_id if result else session_id
-                        status = (
-                            "resolved"
-                            if result or control_loop_resolved
-                            else "not_found"
-                        )
-                        await self._emit_session_event(
-                            target_session_id,
-                            source="tools.approval",
-                            status=status,
-                            message=f"Approval {request_id}: {'approved' if approved else 'denied'}",
+                        await self._resolve_tool_approval_request(
+                            request_id=data.get("request_id", ""),
+                            approved=bool(data.get("approved", False)),
+                            reason=str(data.get("reason") or ""),
+                            session_id=session_id,
                             user_id=user_id,
+                            scope=data.get("scope"),
+                            tool_pattern=data.get("tool_pattern"),
+                            path_scope=data.get("path_scope"),
+                            expires_at=data.get("expires_at"),
+                            propagate_to_subagents=data.get("propagate_to_subagents"),
                         )
 
             except WebSocketDisconnect:
@@ -2353,36 +2341,14 @@ class GatewayServer:
         request_id: Optional[str] = None,
     ) -> None:
         try:
-            current_browser_error = await self._current_browser_runtime_error(goal)
-            if current_browser_error:
-                self.transcript.append(
-                    session_id,
-                    "assistant",
-                    current_browser_error,
-                    user_id=user_id,
-                    request_id=request_id,
-                    metadata={
-                        "type": "control_loop",
-                        "success": False,
-                        "error": "desktop_bridge_unavailable",
-                    },
-                )
-                await self.manager.send_json(
-                    session_id,
-                    ev_chat_done(current_browser_error, request_id, aborted=False),
-                )
-                return
-
-            effective_constraints = self._merge_control_constraints(
+            result = await self._run_control_loop_http(
+                user_id=user_id,
+                session_id=session_id,
                 goal=goal,
                 constraints=constraints,
+                request_id=request_id,
+                source="websocket",
                 preserve_control_ui_tab=True,
-            )
-            result = await self.control_loop.run(
-                goal=goal,
-                user_id=user_id,
-                constraints=effective_constraints,
-                session_id=session_id,
             )
             self.transcript.append(
                 session_id,
@@ -2395,6 +2361,7 @@ class GatewayServer:
                     "success": result.success,
                     "needs_human": bool(result.metadata.get("needs_human")),
                     "plan_id": result.plan_id,
+                    "task_id": result.metadata.get("task_id"),
                 },
             )
             if result.metadata.get("needs_human"):
@@ -2524,6 +2491,7 @@ class GatewayServer:
                 session_id=session_id,
                 goal=message,
                 constraints=[],
+                source="http",
             )
             if result.metadata.get("needs_human"):
                 await self._emit_control_approval_request(
@@ -2534,6 +2502,7 @@ class GatewayServer:
                 "type": "control_loop",
                 "message": result.final_text,
                 "ok": result.success,
+                "task_id": result.metadata.get("task_id"),
             }
 
         if decision.target == "dynamic_agent":
@@ -2724,6 +2693,104 @@ class GatewayServer:
             )
             return {"type": "error", "message": f"Error: {exc}", "ok": False}
 
+    async def _run_control_loop_with_task(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        goal: str,
+        constraints: list[str],
+        request_id: Optional[str],
+        source: str,
+        preserve_control_ui_tab: bool,
+    ) -> tuple[ExecutionResult, str]:
+        effective_constraints = self._merge_control_constraints(
+            goal=goal,
+            constraints=constraints,
+            preserve_control_ui_tab=preserve_control_ui_tab,
+        )
+        task = create_task_record(
+            kind="control_loop",
+            title=goal,
+            status="running",
+            owner_session_id=session_id,
+            owner_user_id=user_id,
+            artifacts={
+                "goal": goal,
+                "constraints": effective_constraints,
+                "resume_context": {
+                    "goal": goal,
+                    "constraints": effective_constraints,
+                },
+            },
+            metadata={
+                "source": source,
+                "request_id": request_id,
+            },
+        )
+        task_id = str(task["task_id"])
+
+        current_browser_error = await self._current_browser_runtime_error(goal)
+        if current_browser_error:
+            update_task_record(
+                task_id,
+                status="failed",
+                artifacts={
+                    "result": {
+                        "success": False,
+                        "error": "desktop_bridge_unavailable",
+                        "final_text": current_browser_error,
+                    }
+                },
+                error="desktop_bridge_unavailable",
+            )
+            result = ExecutionResult(
+                request_id=f"http_{uuid.uuid4().hex[:12]}",
+                session_id=session_id,
+                user_id=user_id,
+                final_text=current_browser_error,
+                success=False,
+                metadata={"error": "desktop_bridge_unavailable", "task_id": task_id},
+            )
+            return result, task_id
+
+        result = await self.control_loop.run(
+            goal=goal,
+            user_id=user_id,
+            constraints=effective_constraints,
+            session_id=session_id,
+        )
+        result.metadata["task_id"] = task_id
+        needs_human = bool(result.metadata.get("needs_human"))
+        update_task_record(
+            task_id,
+            status="pending" if needs_human else ("completed" if result.success else "failed"),
+            artifacts={
+                "result": {
+                    "success": result.success,
+                    "final_text": result.final_text,
+                    "plan_id": result.plan_id,
+                    "verification_report_id": result.verification_report_id,
+                    "repair_count": result.repair_count,
+                    "promoted_memory_ids": result.promoted_memory_ids,
+                    "approval_request": result.metadata.get("approval_request"),
+                },
+                "resume_context": {
+                    "goal": goal,
+                    "constraints": effective_constraints,
+                    "plan_id": result.plan_id,
+                    "approval_request": result.metadata.get("approval_request"),
+                },
+            },
+            metadata={
+                "source": source,
+                "request_id": request_id,
+                "needs_human": needs_human,
+            },
+            error=None if result.success or needs_human else (result.final_text or "control loop failed"),
+        )
+        return result, task_id
+
     async def _run_control_loop_http(
         self,
         *,
@@ -2731,28 +2798,20 @@ class GatewayServer:
         session_id: str,
         goal: str,
         constraints: list[str],
+        request_id: Optional[str] = None,
+        source: str = "http",
+        preserve_control_ui_tab: bool = False,
     ):
-        current_browser_error = await self._current_browser_runtime_error(goal)
-        if current_browser_error:
-            return ExecutionResult(
-                request_id=f"http_{uuid.uuid4().hex[:12]}",
-                session_id=session_id,
-                user_id=user_id,
-                final_text=current_browser_error,
-                success=False,
-                metadata={"error": "desktop_bridge_unavailable"},
-            )
-        effective_constraints = self._merge_control_constraints(
+        result, _task_id = await self._run_control_loop_with_task(
+            user_id=user_id,
+            session_id=session_id,
             goal=goal,
             constraints=constraints,
-            preserve_control_ui_tab=False,
+            request_id=request_id,
+            source=source,
+            preserve_control_ui_tab=preserve_control_ui_tab,
         )
-        return await self.control_loop.run(
-            goal=goal,
-            user_id=user_id,
-            constraints=effective_constraints,
-            session_id=session_id,
-        )
+        return result
 
     async def _emit_control_approval_request(
         self,
@@ -2775,6 +2834,88 @@ class GatewayServer:
                 reason=approval_request.get("reason", ""),
             ),
         )
+
+    async def _resolve_tool_approval_request(
+        self,
+        *,
+        request_id: str,
+        approved: bool,
+        reason: str,
+        session_id: str,
+        user_id: str,
+        scope: Any = None,
+        tool_pattern: Any = None,
+        path_scope: Any = None,
+        expires_at: Any = None,
+        propagate_to_subagents: Any = None,
+    ) -> dict[str, Any]:
+        result = self.tool_policy.resolve_approval(
+            request_id,
+            approved,
+            reason,
+            scope=scope if isinstance(scope, str) else None,
+            tool_pattern=tool_pattern if isinstance(tool_pattern, str) else None,
+            path_scope=path_scope if isinstance(path_scope, str) else None,
+            expires_at=expires_at if isinstance(expires_at, (int, float)) else None,
+            propagate_to_subagents=(
+                bool(propagate_to_subagents)
+                if propagate_to_subagents is not None
+                else None
+            ),
+        )
+        control_loop_resolved = False
+        pending_control_request = None
+        if result is None:
+            pending_control_request = await self.control_loop.get_pending_approval(
+                user_id=user_id,
+                session_id=session_id,
+            )
+            control_loop_resolved = await self.control_loop.resolve_human_approval(
+                user_id=user_id,
+                session_id=session_id,
+                approved=approved,
+                request_id=request_id,
+            )
+            if approved and control_loop_resolved and pending_control_request:
+                resume_goal = (
+                    await self.control_loop.get_task_goal(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    or pending_control_request.get("goal", "")
+                )
+                await self._start_control_loop_run(
+                    session_id=session_id,
+                    user_id=user_id,
+                    goal=resume_goal,
+                    constraints=_normalize_constraints(
+                        (pending_control_request.get("plan") or {}).get("constraints")
+                    ),
+                )
+
+        target_session_id = result.session_id if result else session_id
+        status = "resolved" if result or control_loop_resolved else "not_found"
+        await self._emit_session_event(
+            target_session_id,
+            source="tools.approval",
+            status=status,
+            message=f"Approval {request_id}: {'approved' if approved else 'denied'}",
+            user_id=user_id,
+        )
+        response: dict[str, Any] = {
+            "resolved": bool(result or control_loop_resolved),
+            "request_id": request_id,
+            "approved": approved,
+            "status": status,
+            "session_id": target_session_id,
+        }
+        if result is not None:
+            response["approval"] = result.to_dict()
+        elif control_loop_resolved:
+            response["control_loop"] = {"request_id": request_id, "approved": approved}
+        else:
+            response["error"] = f"approval not found: {request_id}"
+        return response
 
     async def _desktop_emergency_stop(
         self,
