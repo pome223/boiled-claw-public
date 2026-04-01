@@ -260,6 +260,10 @@ body {
   gap: 10px;
 }
 
+.audit-filter-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
 .dashboard-chip-groups {
   display: grid;
   gap: 12px;
@@ -701,6 +705,12 @@ textarea {
   gap: 10px;
 }
 
+.audit-diff-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .detail-card {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -882,7 +892,9 @@ textarea {
     grid-template-columns: 1fr;
   }
 
+  .audit-filter-grid,
   .detail-grid,
+  .audit-diff-grid,
   .detail-form-grid {
     grid-template-columns: 1fr;
   }

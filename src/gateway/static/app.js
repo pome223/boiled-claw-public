@@ -1,6 +1,7 @@
 const NAV_META = {
   chat: { title: "Chat", subtitle: "Gateway WebSocket chat" },
   dashboard: { title: "Dashboard", subtitle: "Task objects, approvals, and runtime status" },
+  audit: { title: "Audit", subtitle: "Audit log explorer for actors, sessions, and approvals" },
   sessions: { title: "Sessions", subtitle: "Current browser sessions" },
   channels: { title: "Channels", subtitle: "Channel status overview" },
   skills: { title: "Skills", subtitle: "OpenClaw-style skill catalog and run" },
@@ -44,6 +45,22 @@ const dashboardTasksPrevBtn = document.getElementById("dashboardTasksPrevBtn");
 const dashboardTasksNextBtn = document.getElementById("dashboardTasksNextBtn");
 const dashboardDetailPanelEl = document.getElementById("dashboardDetailPanel");
 const dashboardDetailBadgeEl = document.getElementById("dashboardDetailBadge");
+const refreshAuditBtn = document.getElementById("refreshAuditBtn");
+const clearAuditFiltersBtn = document.getElementById("clearAuditFiltersBtn");
+const auditSearchInputEl = document.getElementById("auditSearchInput");
+const auditActorInputEl = document.getElementById("auditActorInput");
+const auditSessionInputEl = document.getElementById("auditSessionInput");
+const auditToolInputEl = document.getElementById("auditToolInput");
+const auditSourceInputEl = document.getElementById("auditSourceInput");
+const auditResultInputEl = document.getElementById("auditResultInput");
+const auditCurrentSessionEl = document.getElementById("auditCurrentSession");
+const auditMatchCountEl = document.getElementById("auditMatchCount");
+const auditCaptionEl = document.getElementById("auditCaption");
+const auditPrevBtn = document.getElementById("auditPrevBtn");
+const auditNextBtn = document.getElementById("auditNextBtn");
+const auditListEl = document.getElementById("auditList");
+const auditDetailPanelEl = document.getElementById("auditDetailPanel");
+const auditDetailBadgeEl = document.getElementById("auditDetailBadge");
 const inspectorSessionBackendEl = document.getElementById("inspectorSessionBackend");
 const inspectorCurrentSessionEl = document.getElementById("inspectorCurrentSession");
 const inspectorPendingApprovalsEl = document.getElementById("inspectorPendingApprovals");
@@ -116,6 +133,8 @@ let _messageInputComposing = false;
 let _dashboardPollHandle = null;
 let _dashboardRefreshHandle = null;
 let _dashboardRefreshPromise = null;
+let _auditRefreshHandle = null;
+let _auditRefreshPromise = null;
 const dashboardState = {
   sessionBackend: "-",
   sessionNamespace: "",
@@ -145,6 +164,22 @@ const dashboardState = {
   relatedApprovals: [],
   childTasks: [],
   subagentRun: null
+};
+const auditState = {
+  entries: [],
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  hasMore: false,
+  searchQuery: "",
+  actorFilter: "",
+  sessionFilter: "",
+  toolFilter: "",
+  sourceFilter: "",
+  resultFilter: "",
+  selectedEntryId: null,
+  selectedEntry: null,
+  autoSelectFirst: false,
 };
 const KNOWN_STATUS_TAGS = new Set([
   "accepted",
@@ -214,6 +249,10 @@ function resetSettings() {
   applySettings(DEFAULTS);
   addSystemMessage("reset settings");
   logEvent("settings.reset", DEFAULTS);
+}
+
+function isTabActive(tabKey) {
+  return document.getElementById(`tab-${tabKey}`)?.classList.contains("active");
 }
 
 // -----------------------------------------------------------------------
@@ -587,6 +626,199 @@ function buildDashboardTaskParams() {
   return params;
 }
 
+function auditSearchQuery() {
+  return String(auditState.searchQuery || "").trim();
+}
+
+function syncAuditInputsFromState() {
+  if (auditSearchInputEl) auditSearchInputEl.value = auditState.searchQuery || "";
+  if (auditActorInputEl) auditActorInputEl.value = auditState.actorFilter || "";
+  if (auditSessionInputEl) auditSessionInputEl.value = auditState.sessionFilter || "";
+  if (auditToolInputEl) auditToolInputEl.value = auditState.toolFilter || "";
+  if (auditSourceInputEl) auditSourceInputEl.value = auditState.sourceFilter || "";
+  if (auditResultInputEl) auditResultInputEl.value = auditState.resultFilter || "";
+}
+
+function resetAuditFilters() {
+  auditState.searchQuery = "";
+  auditState.actorFilter = "";
+  auditState.sessionFilter = currentSessionId || "";
+  auditState.toolFilter = "";
+  auditState.sourceFilter = "";
+  auditState.resultFilter = "";
+  auditState.page = 1;
+  auditState.selectedEntryId = null;
+  auditState.selectedEntry = null;
+  auditState.autoSelectFirst = false;
+  syncAuditInputsFromState();
+}
+
+function buildAuditParams() {
+  const params = new URLSearchParams({
+    page: String(auditState.page || 1),
+    page_size: String(auditState.pageSize || 20),
+  });
+  const query = auditSearchQuery();
+  if (query) params.set("q", query);
+  if (auditState.actorFilter) params.set("actor_user_id", auditState.actorFilter);
+  if (auditState.sessionFilter) params.set("session_id", auditState.sessionFilter);
+  if (auditState.toolFilter) params.set("tool", auditState.toolFilter);
+  if (auditState.sourceFilter) params.set("source", auditState.sourceFilter);
+  if (auditState.resultFilter) params.set("result", auditState.resultFilter);
+  return params;
+}
+
+function auditResultTag(entry) {
+  const result = String(entry?.result || entry?.event_type || "unknown");
+  return statusTag(result);
+}
+
+function renderAuditListItem(entry) {
+  const metaBits = [
+    entry.event_type || "-",
+    entry.user_id || entry.metadata?.actor_user_id || "-",
+    formatTimestamp(entry.timestamp),
+  ];
+  if (entry.session_id) metaBits.push(entry.session_id);
+  const detailBits = [];
+  if (entry.action) detailBits.push(`action=${entry.action}`);
+  if (entry.metadata?.tool_name) detailBits.push(`tool=${entry.metadata.tool_name}`);
+  if (entry.metadata?.source) detailBits.push(`source=${entry.metadata.source}`);
+  if (entry.resource) detailBits.push(`resource=${compactText(entry.resource, 90)}`);
+  return [
+    "<li>",
+    `<button class="list-item-button${auditState.selectedEntryId === entry.entry_id ? " active" : ""}" type="button" data-audit-id="${escapeAttr(entry.entry_id || "")}">`,
+    `<div class="item-card">`,
+    `<div class="item-head">`,
+    `<div class="item-title">${escapeHtml(entry.event_type || entry.action || "audit")}</div>`,
+    auditResultTag(entry),
+    `</div>`,
+    `<div class="item-meta mono">${escapeHtml(metaBits.join(" · "))}</div>`,
+    detailBits.length ? `<div class="item-detail mono">${escapeHtml(detailBits.join(" · "))}</div>` : "",
+    entry.metadata?.resolve_reason ? `<div class="item-detail">${escapeHtml(compactText(entry.metadata.resolve_reason, 180))}</div>` : "",
+    `</div>`,
+    `</button>`,
+    "</li>",
+  ].join("");
+}
+
+function renderScopeTransition(entry) {
+  const metadata = entry.metadata && typeof entry.metadata === "object" ? entry.metadata : {};
+  const rows = [
+    ["State", metadata.state_before, metadata.state_after],
+    ["Scope", metadata.scope_before, metadata.scope_after],
+    ["Tool Pattern", metadata.tool_pattern_before, metadata.tool_pattern_after],
+    ["Path Scope", metadata.path_scope_before, metadata.path_scope_after],
+    ["Propagate", metadata.propagate_to_subagents_before, metadata.propagate_to_subagents_after],
+  ].filter((row) => row[1] != null || row[2] != null);
+  if (!rows.length) return "";
+  return [
+    `<div class="detail-section">`,
+    `<div class="k">Before / After</div>`,
+    `<div class="audit-diff-grid">`,
+    ...rows.map(([label, before, after]) => (
+      `<div class="detail-card"><div class="k">${escapeHtml(label)}</div><div class="mono">${escapeHtml(String(before ?? "-"))}</div><div class="item-meta mono">→ ${escapeHtml(String(after ?? "-"))}</div></div>`
+    )),
+    `</div>`,
+    `</div>`,
+  ].join("");
+}
+
+function renderAuditDetail(entry) {
+  const metadata = entry.metadata && typeof entry.metadata === "object" ? entry.metadata : {};
+  return [
+    `<div class="detail-section">`,
+    `<div class="detail-heading">`,
+    `<div>`,
+    `<h5>${escapeHtml(entry.event_type || "audit")}</h5>`,
+    `<div class="detail-meta mono">${escapeHtml([entry.entry_id || "-", formatTimestamp(entry.timestamp), entry.session_id || metadata.target_session_id || "-"].join(" · "))}</div>`,
+    `</div>`,
+    auditResultTag(entry),
+    `</div>`,
+    `</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Actor</div><div class="mono">${escapeHtml(entry.user_id || metadata.actor_user_id || "-")}</div><div class="item-meta">${escapeHtml(metadata.source || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Session</div><div class="mono">${escapeHtml(entry.session_id || metadata.target_session_id || "-")}</div><div class="item-meta">${escapeHtml(entry.action || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Tool</div><div>${escapeHtml(metadata.tool_name || metadata.tool_pattern || "-")}</div><div class="item-meta mono">${escapeHtml(entry.resource || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Result</div><div>${escapeHtml(entry.result || "-")}</div><div class="item-meta">${escapeHtml(metadata.resolve_reason || "-")}</div></div>`,
+    `</div>`,
+    entry.event_type === "tool_approval" ? renderScopeTransition(entry) : "",
+    `<div class="detail-section">`,
+    `<div class="k">Metadata</div>`,
+    `<pre class="detail-pre">${formatJsonBlock(metadata)}</pre>`,
+    `</div>`,
+  ].join("");
+}
+
+function renderAuditDetailPanel() {
+  const badge = auditState.selectedEntry?.entry_id || "none selected";
+  const html = auditState.selectedEntry
+    ? renderAuditDetail(auditState.selectedEntry)
+    : "Select an audit event to inspect actor, source, result, and before/after scope changes.";
+  if (auditDetailBadgeEl) auditDetailBadgeEl.textContent = badge;
+  if (auditDetailPanelEl) {
+    auditDetailPanelEl.classList.toggle("selection-detail-empty", !auditState.selectedEntry);
+    auditDetailPanelEl.innerHTML = html;
+  }
+}
+
+function updateAuditUi() {
+  if (auditCurrentSessionEl) {
+    auditCurrentSessionEl.textContent = currentSessionId || "-";
+  }
+  if (auditMatchCountEl) {
+    auditMatchCountEl.textContent = String(auditState.total || 0);
+  }
+  if (auditCaptionEl) {
+    auditCaptionEl.textContent = paginationLabel(
+      auditState.total,
+      auditState.page,
+      auditState.pageSize,
+      auditState.entries.length,
+    );
+  }
+  updatePagerButtons(auditPrevBtn, auditNextBtn, auditState.page, auditState.hasMore);
+  renderCompactList(
+    auditListEl,
+    auditState.entries,
+    renderAuditListItem,
+    "No audit events matched these filters."
+  );
+  renderAuditDetailPanel();
+}
+
+function selectAuditEntry(entryId) {
+  auditState.selectedEntryId = entryId || null;
+  auditState.selectedEntry = auditState.entries.find((entry) => entry.entry_id === entryId) || null;
+  updateAuditUi();
+}
+
+function openAuditView(filters = {}) {
+  if (Object.prototype.hasOwnProperty.call(filters, "searchQuery")) {
+    auditState.searchQuery = filters.searchQuery || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(filters, "actorFilter")) {
+    auditState.actorFilter = filters.actorFilter || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(filters, "sessionFilter")) {
+    auditState.sessionFilter = filters.sessionFilter || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(filters, "toolFilter")) {
+    auditState.toolFilter = filters.toolFilter || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(filters, "sourceFilter")) {
+    auditState.sourceFilter = filters.sourceFilter || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(filters, "resultFilter")) {
+    auditState.resultFilter = filters.resultFilter || "";
+  }
+  auditState.page = 1;
+  auditState.autoSelectFirst = true;
+  syncAuditInputsFromState();
+  activateTab("audit");
+  scheduleAuditRefresh(0);
+}
+
 function renderApprovalListItem(item) {
   const title = item.tool_name || item.tool_pattern || "approval";
   const sessionScope = item.scope === "session" ? "session" : "single";
@@ -811,6 +1043,7 @@ function renderTaskDetail(task) {
   const subagentArtifacts = artifacts.subagent && typeof artifacts.subagent === "object" ? artifacts.subagent : {};
   const isSessionSubagent = task.kind === "subagent" && String(subagentArtifacts.mode || "").toLowerCase() === "session";
   const canKillSubagent = Boolean(subagentRun && ["accepted", "running", "idle"].includes(String(subagentRun.status || "").toLowerCase()));
+  const auditQuery = task.run_id || task.task_id || task.title || "";
 
   return [
     `<div class="detail-section">`,
@@ -835,6 +1068,12 @@ function renderTaskDetail(task) {
     `<div class="detail-section">`,
     `<div class="k">Approval Dependencies</div>`,
     renderRelationChips("approval", relatedApprovals, "No linked approvals."),
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Audit Trail</div>`,
+    `<div class="detail-actions">`,
+    `<button class="btn" type="button" data-action="open-related-audit" data-audit-session-id="${escapeAttr(task.owner_session_id || "")}" data-audit-query="${escapeAttr(auditQuery)}">Open Related Audit</button>`,
+    `</div>`,
     `</div>`,
     subagentRun ? [
       `<div class="detail-section">`,
@@ -902,6 +1141,12 @@ function renderApprovalDetail(approval) {
     `<div class="detail-section">`,
     `<div class="k">Related Tasks</div>`,
     renderRelationChips("task", relatedTasks, "No related tasks."),
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Audit Trail</div>`,
+    `<div class="detail-actions">`,
+    `<button class="btn" type="button" data-action="open-related-audit" data-audit-session-id="${escapeAttr(approval.session_id || "")}" data-audit-query="${escapeAttr(approval.request_id || approval.source_request_id || "")}">Open Related Audit</button>`,
+    `</div>`,
     `</div>`,
     approval.state === "pending" ? [
       `<div class="detail-section">`,
@@ -1167,6 +1412,11 @@ function handleDashboardListSelectionClick(event) {
   const approvalButton = event.target.closest("[data-approval-id]");
   if (approvalButton?.dataset.approvalId) {
     void loadApprovalDetail(approvalButton.dataset.approvalId);
+    return;
+  }
+  const auditButton = event.target.closest("[data-audit-id]");
+  if (auditButton?.dataset.auditId) {
+    selectAuditEntry(auditButton.dataset.auditId);
   }
 }
 
@@ -1198,6 +1448,16 @@ function handleSelectionPanelClick(event) {
   }
   if (actionButton.dataset.action === "subagent-kill") {
     void killSubagentFromPanel(actionButton.dataset.runId || "");
+    return;
+  }
+  if (actionButton.dataset.action === "open-related-audit") {
+    openAuditView({
+      sessionFilter: actionButton.dataset.auditSessionId || "",
+      searchQuery: actionButton.dataset.auditQuery || "",
+      toolFilter: actionButton.dataset.auditTool || "",
+      sourceFilter: actionButton.dataset.auditSource || "",
+      resultFilter: actionButton.dataset.auditResult || "",
+    });
   }
 }
 
@@ -1441,6 +1701,34 @@ async function fetchDashboardTasks(base) {
   }
 }
 
+async function fetchAuditEntries(base) {
+  const params = buildAuditParams();
+  try {
+    const response = await apiFetch(`${base}/audit?${params}`);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const payload = await response.json();
+    auditState.entries = Array.isArray(payload.entries) ? payload.entries : [];
+    auditState.total = Number(payload.pagination?.total || 0);
+    auditState.hasMore = Boolean(payload.pagination?.has_more);
+    if (auditState.autoSelectFirst) {
+      auditState.selectedEntry = auditState.entries[0] || null;
+      auditState.selectedEntryId = auditState.selectedEntry?.entry_id || null;
+      auditState.autoSelectFirst = false;
+    } else if (auditState.selectedEntryId) {
+      auditState.selectedEntry = auditState.entries.find(
+        (entry) => entry.entry_id === auditState.selectedEntryId,
+      ) || auditState.selectedEntry;
+    }
+  } catch (_) {
+    auditState.entries = [];
+    auditState.total = 0;
+    auditState.hasMore = false;
+    if (!auditState.selectedEntryId) {
+      auditState.selectedEntry = null;
+    }
+  }
+}
+
 async function refreshDashboard() {
   if (_dashboardRefreshPromise) {
     return _dashboardRefreshPromise;
@@ -1464,6 +1752,32 @@ async function refreshDashboard() {
   }
 }
 
+async function refreshAudit() {
+  if (_auditRefreshPromise) {
+    return _auditRefreshPromise;
+  }
+  const base = toHttpBaseUrl(currentSettings());
+  _auditRefreshPromise = (async () => {
+    await fetchAuditEntries(base);
+    updateAuditUi();
+  })();
+  try {
+    await _auditRefreshPromise;
+  } finally {
+    _auditRefreshPromise = null;
+  }
+}
+
+function scheduleAuditRefresh(delay = 250) {
+  if (_auditRefreshHandle) {
+    window.clearTimeout(_auditRefreshHandle);
+  }
+  _auditRefreshHandle = window.setTimeout(() => {
+    _auditRefreshHandle = null;
+    void refreshAudit();
+  }, delay);
+}
+
 function ensureDashboardPolling() {
   if (_dashboardPollHandle) return;
   _dashboardPollHandle = window.setInterval(() => {
@@ -1480,11 +1794,16 @@ function handleConnected(payload) {
   sessionBadgeEl.textContent = currentSessionId || "-";
   const pv = payload.protocol_version || "?";
   addSession(currentSessionId || "unknown", payload.user_id || currentSettings().userId);
+  if (!auditState.sessionFilter) {
+    auditState.sessionFilter = currentSessionId || "";
+    syncAuditInputsFromState();
+  }
   logEvent("protocol", { version: pv });
   // Request history from Gateway (source of truth)
   requestGatewayHistory();
   void syncServerSessions();
   scheduleDashboardRefresh(50);
+  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleChatDone(payload) {
@@ -1505,6 +1824,7 @@ function handleChatDone(payload) {
   logEvent("chat.done", { aborted: payload.aborted, len: (payload.text || "").length });
   void syncServerSessions();
   scheduleDashboardRefresh(50);
+  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleChatToken(payload) {
@@ -1533,6 +1853,7 @@ function handleSystemEvent(payload) {
   }
   addSystemMessage(msg);
   scheduleDashboardRefresh(50);
+  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleHealthTick(payload) {
@@ -1542,6 +1863,7 @@ function handleHealthTick(payload) {
   }
   logEvent("health.tick", { active_sessions: payload.active_sessions });
   scheduleDashboardRefresh(50);
+  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleCronUpdate(payload) {
@@ -1565,6 +1887,7 @@ function handleToolsApprovalRequest(payload) {
     note: "Respond inline to continue this run."
   });
   scheduleDashboardRefresh(50);
+  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleControlApprovalRequest(payload) {
@@ -1587,6 +1910,7 @@ function handleControlApprovalRequest(payload) {
     note: "Respond inline to continue the control loop."
   });
   scheduleDashboardRefresh(50);
+  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function sendApproval(requestId, approved) {
@@ -1917,6 +2241,7 @@ function activateTab(tabKey) {
   tabSubtitle.textContent = meta.subtitle;
   if (tabKey === "chat") restoreMessages();
   if (tabKey === "dashboard") scheduleDashboardRefresh(0);
+  if (tabKey === "audit") scheduleAuditRefresh(0);
   if (tabKey === "sessions") void syncServerSessions();
   if (tabKey === "skills") void fetchSkills();
   if (tabKey === "memory") void fetchMemory();
@@ -1972,6 +2297,7 @@ function connect(targetSessionId = null) {
     addSystemMessage(`disconnected (code=${event.code})`);
     logEvent("socket.close", { code: event.code, reason: event.reason || "" });
     scheduleDashboardRefresh(50);
+    if (isTabActive("audit")) scheduleAuditRefresh(50);
   };
 
   socket.onerror = () => {
@@ -2097,10 +2423,35 @@ clearDashboardFiltersBtn?.addEventListener("click", () => {
   updateDashboardFilterButtons();
   scheduleDashboardRefresh(0);
 });
+refreshAuditBtn?.addEventListener("click", () => scheduleAuditRefresh(0));
+clearAuditFiltersBtn?.addEventListener("click", () => {
+  resetAuditFilters();
+  scheduleAuditRefresh(0);
+});
 dashboardSearchInputEl?.addEventListener("input", () => {
   dashboardState.searchQuery = dashboardSearchInputEl.value || "";
   resetDashboardPages();
   scheduleDashboardRefresh(250);
+});
+auditSearchInputEl?.addEventListener("input", () => {
+  auditState.searchQuery = auditSearchInputEl.value || "";
+  auditState.page = 1;
+  auditState.selectedEntryId = null;
+  auditState.selectedEntry = null;
+  scheduleAuditRefresh(250);
+});
+[auditActorInputEl, auditSessionInputEl, auditToolInputEl, auditSourceInputEl, auditResultInputEl].forEach((element) => {
+  element?.addEventListener("input", () => {
+    auditState.actorFilter = auditActorInputEl?.value || "";
+    auditState.sessionFilter = auditSessionInputEl?.value || "";
+    auditState.toolFilter = auditToolInputEl?.value || "";
+    auditState.sourceFilter = auditSourceInputEl?.value || "";
+    auditState.resultFilter = auditResultInputEl?.value || "";
+    auditState.page = 1;
+    auditState.selectedEntryId = null;
+    auditState.selectedEntry = null;
+    scheduleAuditRefresh(250);
+  });
 });
 dashboardFilterChips.forEach((chip) => {
   chip.addEventListener("click", () => {
@@ -2137,11 +2488,26 @@ dashboardTasksNextBtn?.addEventListener("click", () => {
   dashboardState.taskPage += 1;
   scheduleDashboardRefresh(0);
 });
+auditPrevBtn?.addEventListener("click", () => {
+  if (auditState.page <= 1) return;
+  auditState.page -= 1;
+  auditState.selectedEntryId = null;
+  auditState.selectedEntry = null;
+  scheduleAuditRefresh(0);
+});
+auditNextBtn?.addEventListener("click", () => {
+  if (!auditState.hasMore) return;
+  auditState.page += 1;
+  auditState.selectedEntryId = null;
+  auditState.selectedEntry = null;
+  scheduleAuditRefresh(0);
+});
 [
   dashboardApprovalsListEl,
   dashboardTasksListEl,
   inspectorApprovalsListEl,
   inspectorTasksListEl,
+  auditListEl,
 ].forEach((element) => {
   element?.addEventListener("click", handleDashboardListSelectionClick);
 });
@@ -2191,9 +2557,11 @@ document.addEventListener("keydown", (e) => {
 
 const initialSettings = { ...parseStoredSettings(), ...parseUrlSettings() };
 applySettings(initialSettings);
+resetAuditFilters();
 renderSessions();
 updateDashboardFilterButtons();
 updateDashboardUi();
+updateAuditUi();
 activateTab("chat");
 setStatus(false, "offline");
 setRunInProgress(false);

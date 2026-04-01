@@ -311,9 +311,12 @@ async def test_demo_from_failed_trajectory_includes_reuse_suggestions(
     assert result["success"] is True
     assert result["reuse_query"]
     assert result["reuse_suggestions"][0]["memory_id"] == 7
+    assert "Approved improvement reuse hints" in result["repair_prompt"]
+    assert "Prefer a more stable selector for the save button." in result["package"]["improvement_summary"]
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["artifacts"]["reuse_suggestions"][0]["memory_id"] == 7
+    assert "Approved improvement reuse hints" in task["artifacts"]["repair_prompt"]
 
 
 @pytest.mark.asyncio
@@ -577,9 +580,13 @@ async def test_search_from_failed_trajectory_includes_reuse_suggestions(
 
     assert result["success"] is True
     assert result["reuse_suggestions"][0]["memory_id"] == 11
+    assert "Approved improvement reuse hints" in result["repair_prompt"]
+    assert "Reuse the browser selector normalization fix." in result["winner"]["package"]["improvement_summary"]
+    assert "Approved improvement reuse hints" in result["winner"]["candidate_generation_prompt"]
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["artifacts"]["reuse_suggestions"][0]["memory_id"] == 11
+    assert "Approved improvement reuse hints" in task["artifacts"]["repair_prompt"]
 
 
 @pytest.mark.asyncio

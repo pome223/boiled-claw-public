@@ -52,11 +52,11 @@ The Web UI is the easiest way to understand the system. The CLI hits the same Ga
 
 ## Control UI
 
-The Gateway ships a browser-based chat, task dashboard, detail / intervention panel, and event stream so you can see routing, approvals, tool results, and recovery in one place.
+The Gateway ships a browser-based chat, task dashboard, audit explorer, detail / intervention panel, and event stream so you can see routing, approvals, tool results, recovery, and operator actions in one place.
 
 ![boiled-claw Control UI example](assets/control-ui-demo.png)
 
-The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened.
+The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened. The Dashboard and Audit tabs then let you drill into task artifacts, approval scope changes, and audit records without leaving the Control UI.
 
 ## Thesis
 
@@ -110,7 +110,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🌐 **Browser Automation** - Scraping and screenshots with Playwright
 - 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
 - 🖥️ **Reliable Computer Use** - Browser-first observe / evaluate / act / recover flows with SQLite trajectory capture
-- 🧪 **Offline Self-Improvement** - Canary worktrees, benchmark gating, candidate packaging, and cleanup
+- 🧪 **Offline Self-Improvement** - Canary worktrees, benchmark gating, candidate packaging, cleanup, and approved-improvement reuse injected into repair prompts
 - 🤖 **Simulation-First Physical AI** - Isaac Sim / OSMO submission, persisted validation, and ROS2-friendly dispatch envelopes
 - 💻 **Shell Execution** - Guarded execution with shell AST parsing, intent classification, and approvals
 - 📁 **File Operations** - Read and write support
@@ -120,6 +120,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
 - 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state and exposes a clickable detail / intervention panel
+- 🕵️ **Audit Log Explorer** - Filter audit events by actor / session / tool / source / result and inspect approval resolve before / after state in the browser
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
@@ -519,6 +520,12 @@ The Control UI dashboard builds on top of that task layer:
 - steer or kill active session-mode subagents directly from the panel
 - inspect approval history, scope, path scope, propagation flags, and resolve pending requests in-place
 - dashboard task / approval lists use server-side search and paging so large artifacts stay inspectable without pushing full-text filtering into the browser
+
+The Audit Explorer complements that operator view:
+
+- filter audit events by actor, session, tool, source, result, and free-text query
+- inspect approval resolve events with explicit before / after scope, tool pattern, path scope, and propagation changes
+- jump into the audit trail directly from task and approval detail panels when you need to trace who approved what and why
 
 ## Project Structure
 
