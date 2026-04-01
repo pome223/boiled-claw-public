@@ -24,6 +24,40 @@ Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstrea
 
 > **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
+## Quickstart
+
+If you want the shortest path from clone to a working session, start here:
+
+1. Create your local config and set `GOOGLE_API_KEY`:
+
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Start the Gateway:
+
+   ```bash
+   docker compose up -d --build boiled-claw-gateway
+   ```
+
+3. Open the Control UI or use the CLI:
+
+   ```bash
+   docker compose --profile cli run --rm boiled-claw-cli chat
+   ```
+
+   Then visit `http://127.0.0.1:18789/chat` in your browser.
+
+The Web UI is the easiest way to understand the system. The CLI hits the same Gateway and is useful for quick smoke tests or scripted runs.
+
+## Control UI
+
+The Gateway ships a browser-based chat and event stream so you can see routing, approvals, tool results, and recovery in one place.
+
+![boiled-claw Control UI example](assets/control-ui-demo.png)
+
+The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, an agent response, and the live event stream that explains what happened.
+
 ## Thesis
 
 boiled-claw keeps the OpenClaw spirit of local-first, composable, inspectable tooling, but reframes it around the agent stack that matters in 2026: browser-first computer use, verification-driven recovery, measured improvement, and a clear adapter path toward physical AI environments.
