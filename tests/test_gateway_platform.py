@@ -1903,3 +1903,324 @@ def test_websocket_auth_ignores_path_user_id_when_identity_header_is_present(mon
             connected = ws.receive_json()
             assert connected["event"] == "connected"
             assert connected["user_id"] == "alice"
+
+
+# ---------------------------------------------------------------------------
+# E2E integration: chat → task → approval → audit → timeline → WS deltas
+# ---------------------------------------------------------------------------
+
+
+_E2E_WS_RECEIVE_TIMEOUT = 10  # seconds — bounded receive to avoid hanging
+
+
+def _ws_receive_json_bounded(ws, timeout=_E2E_WS_RECEIVE_TIMEOUT):
+    """``ws.receive_json()`` with a wall-clock timeout.
+
+    Starlette's ``WebSocketTestSession.receive_json`` blocks indefinitely on
+    the internal queue.  This wrapper runs the blocking call on a daemon thread
+    and waits on a ``queue.Queue`` with a timeout, so control always returns to
+    the caller — even when the worker thread is still stuck in receive.
+    """
+    import queue, threading
+
+    q: queue.Queue = queue.Queue()
+
+    def _recv():
+        try:
+            q.put(ws.receive_json())
+        except Exception as exc:
+            q.put(exc)
+
+    t = threading.Thread(target=_recv, daemon=True)
+    t.start()
+    try:
+        result = q.get(timeout=timeout)
+    except queue.Empty:
+        raise AssertionError(
+            f"ws.receive_json() did not return within {timeout}s"
+        )
+    if isinstance(result, Exception):
+        raise result
+    return result
+
+
+def _collect_ws_events_until(ws, *, stop_event, timeout_events=200):
+    """Collect ALL WS events (foreground + background) until *stop_event*.
+
+    Each receive uses a bounded timeout so the test fails fast instead of
+    hanging when the expected event never arrives.
+    """
+    collected = []
+    for _ in range(timeout_events):
+        evt = _ws_receive_json_bounded(ws)
+        collected.append(evt)
+        if evt.get("event") == stop_event:
+            return collected
+    raise AssertionError(f"never received {stop_event} within {timeout_events} events")
+
+
+def test_e2e_chat_task_approval_audit_timeline_ws_flow(monkeypatch, tmp_path):
+    """
+    E2E: chat.send → routing → task creation → approval request → WS resolution
+         → task completion → audit trail → timeline merge → WS deltas
+
+    Verifies the full lifecycle:
+      1. Chat triggers agent run that creates a task + awaits approval
+      2. WS receives task.update, tools.approval_update, tools.approval_request
+      3. Client resolves approval via WS tools.approval
+      4. Resolution triggers approval_update, audit.append, system.event
+      5. Agent run completes, task goes to "completed"
+      6. GET /tasks/{id}/timeline returns merged task_event + approval + audit
+      7. GET /audit returns related entries for the session
+    """
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    store = server_module.get_task_store()
+    created_state: dict[str, str] = {}
+
+    # -- Mock routing: always pick root_agent ---------------------------------
+    async def _fake_routing(*, user_id, session_id, new_message):
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text=(
+                    '{"target": "root_agent", "confidence": 0.95, "reason": "E2E test"}'
+                ))],
+            ),
+        )
+
+    # -- Mock root runner: create task, request approval, complete task --------
+    async def _fake_root_run(*, user_id, session_id, new_message):
+        # Step 1: create task
+        task = store.create(
+            kind="subagent",
+            title="E2E integration task",
+            status="running",
+            owner_session_id=session_id,
+            owner_user_id=user_id,
+            run_id="run-e2e-001",
+            approval_dependencies=["placeholder"],
+            artifacts={"goal": "verify full lifecycle"},
+            metadata={"source": "websocket", "e2e": True},
+        )
+        created_state["task_id"] = task["task_id"]
+
+        # Step 2: log audit for task spawn
+        gateway.audit_logger.log(
+            event_type=server_module.AuditEventType.AGENT_MESSAGE,
+            user_id=user_id,
+            session_id=session_id,
+            action="task_spawn",
+            resource=task["task_id"],
+            result="accepted",
+            metadata={
+                "task_id": task["task_id"],
+                "run_id": "run-e2e-001",
+            },
+        )
+
+        # Step 3: request approval (blocks until resolved by WS client)
+        approved, reason, request_id = (
+            await gateway.tool_policy.request_approval_with_id(
+                tool_name="run_shell",
+                agent_name="root_agent",
+                args={"command": "echo e2e"},
+                session_id=session_id,
+                reason="E2E test: shell access needed",
+            )
+        )
+        created_state["request_id"] = request_id
+
+        # Step 4: update approval_dependencies with actual request_id
+        store.update(
+            task["task_id"],
+            approval_dependencies=[request_id],
+        )
+
+        # Step 5: complete task
+        store.update(
+            task["task_id"],
+            status="completed" if approved else "failed",
+            artifacts={"result": reason, "approved": approved},
+        )
+
+        # Step 6: log audit for tool execution
+        gateway.audit_logger.log(
+            event_type=server_module.AuditEventType.SHELL_COMMAND,
+            user_id=user_id,
+            session_id=session_id,
+            action="execute",
+            resource="echo e2e",
+            result="success" if approved else "denied",
+            metadata={
+                "task_id": task["task_id"],
+                "run_id": "run-e2e-001",
+                "request_id": request_id,
+                "tool_name": "run_shell",
+                "source": "websocket",
+            },
+        )
+
+        # Step 7: yield final agent response
+        yield Event(
+            author="boiled_claw",
+            content=types.Content(
+                role="model",
+                parts=[types.Part(text=f"E2E completed: {reason}")],
+            ),
+        )
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing)
+    monkeypatch.setattr(gateway.runner, "run_async", _fake_root_run)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/e2e-session?user_id=alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+            session_id = connected["session_id"]
+
+            # ── Phase 1: send chat, collect events until approval_request ──
+            # Background deltas (task.update, audit.append, tools.approval_update)
+            # are fire-and-forget and may arrive before OR after the awaited
+            # tools.approval_request.  We only gate on approval_request here;
+            # background deltas are verified across all_events in Phase 2.
+            ws.send_json({"event": "chat.send", "text": "run the E2E lifecycle"})
+
+            pre_resolve = []
+            approval_request = None
+            for _ in range(50):
+                evt = _ws_receive_json_bounded(ws)
+                pre_resolve.append(evt)
+                if evt.get("event") == "tools.approval_request":
+                    approval_request = evt
+                    break
+
+            assert approval_request is not None, (
+                "Expected tools.approval_request; got: "
+                + str([e.get("event") for e in pre_resolve])
+            )
+            assert approval_request["tool_name"] == "run_shell"
+
+            # ── Phase 2: resolve approval via WS ──
+            ws.send_json({
+                "event": "tools.approval",
+                "request_id": approval_request["request_id"],
+                "approved": True,
+                "reason": "Approved by E2E test operator",
+            })
+
+            # Collect all events until chat.done
+            post_resolve = _collect_ws_events_until(ws, stop_event="chat.done")
+
+            # Combine all WS events from both phases for comprehensive checks.
+            # Background deltas (task.update, audit.append, tools.approval_update)
+            # are fire-and-forget and may arrive in any order relative to
+            # foreground events (system.event, chat.done).
+            all_events = pre_resolve + post_resolve
+
+            all_task_updates = [
+                e for e in all_events if e.get("event") == "task.update"
+            ]
+            all_audit_appends = [
+                e for e in all_events if e.get("event") == "audit.append"
+            ]
+            all_approval_updates = [
+                e for e in all_events
+                if e.get("event") == "tools.approval_update"
+            ]
+            all_system_events = [
+                e for e in all_events if e.get("event") == "system.event"
+            ]
+
+            # system.event with source=tools.approval (awaited, reliable)
+            approval_system = [
+                e for e in all_system_events
+                if e.get("source") == "tools.approval"
+            ]
+            assert len(approval_system) >= 1
+            assert approval_system[0]["status"] == "resolved"
+
+            # Task updates: at least task creation (delivered before the
+            # approval await yields).  Completion updates are fire-and-forget
+            # and may arrive after chat.done, so we verify final state via
+            # HTTP in Phase 3.
+            assert len(all_task_updates) >= 1
+
+            # Approval updates: at least creation (pending)
+            assert len(all_approval_updates) >= 1
+
+            # Audit appends: at least task_spawn (before approval await).
+            # Resolution + shell_command appends are verified via HTTP.
+            assert len(all_audit_appends) >= 1
+
+            # chat.done
+            done_event = post_resolve[-1]
+            assert done_event["event"] == "chat.done"
+            assert "E2E completed" in done_event["text"]
+
+        # ── Phase 3: verify state via HTTP ──
+        task_id = created_state["task_id"]
+        request_id = created_state["request_id"]
+
+        # 3a. Task is completed
+        task_resp = client.get(f"/tasks/{task_id}")
+        assert task_resp.status_code == 200
+        task_data = task_resp.json()["task"]
+        assert task_data["status"] == "completed"
+        assert task_data["artifacts"]["approved"] is True
+        assert request_id in task_data["approval_dependencies"]
+
+        # 3b. Timeline merges task_event + approval + audit
+        timeline_resp = client.get(
+            f"/tasks/{task_id}/timeline",
+            params={"page": 1, "page_size": 50},
+        )
+        assert timeline_resp.status_code == 200
+        timeline = timeline_resp.json()
+        timeline_kinds = {e["kind"] for e in timeline["entries"]}
+        assert "task_event" in timeline_kinds, (
+            f"Expected task_event in timeline; got {timeline_kinds}"
+        )
+        assert "approval" in timeline_kinds, (
+            f"Expected approval in timeline; got {timeline_kinds}"
+        )
+        assert "audit" in timeline_kinds, (
+            f"Expected audit in timeline; got {timeline_kinds}"
+        )
+
+        # Verify task events include created + status_changed
+        task_events = [
+            e for e in timeline["entries"] if e["kind"] == "task_event"
+        ]
+        task_event_types = {e["event_type"] for e in task_events}
+        assert "created" in task_event_types
+        assert "status_changed" in task_event_types
+
+        # Verify approval entries reference our request_id
+        approval_entries = [
+            e for e in timeline["entries"] if e["kind"] == "approval"
+        ]
+        assert any(
+            e.get("request_id") == request_id for e in approval_entries
+        )
+
+        # Verify audit entries are present
+        audit_entries = [
+            e for e in timeline["entries"] if e["kind"] == "audit"
+        ]
+        assert len(audit_entries) >= 1
+
+        # 3c. Audit log has entries for this session
+        audit_resp = client.get(
+            "/audit",
+            params={"session_id": session_id, "page_size": 50},
+        )
+        assert audit_resp.status_code == 200
+        audit_data = audit_resp.json()
+        assert audit_data["pagination"]["total"] >= 2, (
+            "Expected at least task_spawn + shell_command audit entries"
+        )
+        audit_event_types = {
+            e["event_type"] for e in audit_data["entries"]
+        }
+        assert "agent_message" in audit_event_types or "shell_command" in audit_event_types
