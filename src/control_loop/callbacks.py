@@ -69,6 +69,71 @@ _TEXT_ENTRY_KEYWORDS: set[str] = {
     "write",
 }
 
+_HOTKEY_HINT_KEYWORDS: set[str] = {
+    "hotkey",
+    "shortcut",
+    "space key",
+    "spacebar",
+    "enter key",
+    "return key",
+    "keyboard shortcut",
+    "スペースキー",
+    "スペース",
+    "ショートカット",
+    "ホットキー",
+    "enter",
+    "return",
+}
+
+_PLAYBACK_HINT_KEYWORDS: set[str] = {
+    "play music",
+    "playback",
+    "play song",
+    "play track",
+    "music",
+    "song",
+    "track",
+    "audio",
+    "media",
+    "dj",
+    "djay",
+    "再生",
+    "楽曲",
+    "曲をかけて",
+    "曲を再生",
+    "音楽",
+}
+
+_PLAYBACK_ACTION_STEP_KEYWORDS: set[str] = {
+    "play",
+    "playback",
+    "start",
+    "resume",
+    "再生",
+    "開始",
+    "スタート",
+}
+
+_VISUAL_EVIDENCE_KEYWORDS: set[str] = {
+    "waveform",
+    "indicator",
+    "visual",
+    "visually",
+    "visible",
+    "screen",
+    "screenshot",
+    "playing",
+    "playback",
+    "wave form",
+    "波形",
+    "インジケーター",
+    "視覚",
+    "画面",
+    "スクリーンショット",
+    "再生中",
+    "動いている",
+}
+
 _DESKTOP_MODE_BY_CAPABILITY: dict[str, str] = {
     "desktop.view.windows": "read",
     "desktop.view.frontmost_app": "read",
@@ -113,11 +178,301 @@ def _ensure_capability(
     )
 
 
+def _step_has_capability(step: dict[str, object], capability_name: str) -> bool:
+    for capability in step.get("capabilities", []):
+        if isinstance(capability, dict) and str(capability.get("name", "")).strip() == capability_name:
+            return True
+    return False
+
+
+def _step_has_any_capability(step: dict[str, object], capability_names: AbstractSet[str]) -> bool:
+    return any(_step_has_capability(step, name) for name in capability_names)
+
+
+def _ensure_step_capability(step: dict[str, object], capability_name: str) -> None:
+    capabilities = step.get("capabilities")
+    if not isinstance(capabilities, list):
+        capabilities = []
+        step["capabilities"] = capabilities
+    if any(
+        isinstance(capability, dict)
+        and str(capability.get("name", "")).strip() == capability_name
+        for capability in capabilities
+    ):
+        return
+    capabilities.append(
+        {
+            "name": capability_name,
+            "mode": _DESKTOP_MODE_BY_CAPABILITY.get(capability_name, "execute"),
+        }
+    )
+
+
+def _step_capability_names(plan: dict) -> set[str]:
+    names: set[str] = set()
+    for step in plan.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        for capability in step.get("capabilities", []):
+            if not isinstance(capability, dict):
+                continue
+            name = str(capability.get("name", "")).strip()
+            if name:
+                names.add(name)
+    return names
+
+
+def _next_step_id(existing_ids: set[str], base: str) -> str:
+    if base not in existing_ids:
+        return base
+    index = 2
+    while f"{base}_{index}" in existing_ids:
+        index += 1
+    return f"{base}_{index}"
+
+
+def _normalize_desktop_plan_steps(plan: dict, goal: str) -> None:
+    raw_steps = plan.get("steps", [])
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return
+    steps = [step for step in raw_steps if isinstance(step, dict)]
+    if not steps:
+        return
+
+    top_level_cap_names = {
+        str(cap.get("name", "")).strip()
+        for cap in plan.get("required_capabilities", [])
+        if isinstance(cap, dict)
+    }
+    step_cap_names = _step_capability_names(plan)
+    cap_names = top_level_cap_names | step_cap_names
+    ui_capability_names = {
+        "desktop.ax.find",
+        "desktop.wait.element",
+        "desktop.control.click",
+        "desktop.control.type",
+        "desktop.control.drag",
+        "desktop.control.hotkey",
+        "desktop.control.scroll",
+    }
+
+    existing_ids = {
+        str(step.get("step_id", "")).strip()
+        for step in steps
+        if str(step.get("step_id", "")).strip()
+    }
+    launch_index = next(
+        (index for index, step in enumerate(steps) if _step_has_capability(step, "desktop.control.launch_app")),
+        None,
+    )
+
+    has_desktop_ui_plan = bool(cap_names & ui_capability_names)
+    if launch_index is not None and has_desktop_ui_plan and not any(
+        _step_has_capability(step, "desktop.control.focus_window") for step in steps
+    ):
+        launch_step_id = str(steps[launch_index].get("step_id") or "").strip()
+        if launch_step_id:
+            focus_step_id = _next_step_id(existing_ids, f"{launch_step_id}_focus")
+            focus_step = {
+                "step_id": focus_step_id,
+                "title": "アプリを前面にする",
+                "description": "起動したアプリのウィンドウを前面にして操作対象を確定する。",
+                "depends_on": [launch_step_id],
+                "capabilities": [
+                    {"name": "desktop.control.focus_window", "mode": "execute"},
+                    {"name": "desktop.wait.window", "mode": "read"},
+                ],
+                "expected_outputs": ["対象アプリのウィンドウが前面で操作可能になっていること"],
+                "retryable": True,
+            }
+            steps.insert(launch_index + 1, focus_step)
+            existing_ids.add(focus_step_id)
+            for step in steps[launch_index + 2 :]:
+                depends_on = step.get("depends_on", [])
+                if not isinstance(depends_on, list):
+                    continue
+                normalized_deps = [str(dep) for dep in depends_on]
+                if launch_step_id in normalized_deps and focus_step_id not in normalized_deps:
+                    step["depends_on"] = [
+                        focus_step_id if dep == launch_step_id else dep
+                        for dep in normalized_deps
+                    ]
+
+    playback_index = next(
+        (
+            index
+            for index, step in enumerate(steps)
+            if _step_is_playback_action_step(step)
+            and _step_has_any_capability(
+                step,
+                {"desktop.control.click", "desktop.control.hotkey"},
+            )
+        ),
+        None,
+    )
+    if playback_index is not None:
+        has_pre_playback_capture = any(
+            _step_has_capability(step, "desktop.view.screenshot")
+            for step in steps[:playback_index]
+        )
+        if not has_pre_playback_capture:
+            playback_step = steps[playback_index]
+            depends_on = playback_step.get("depends_on", [])
+            dependency_step_id = ""
+            if isinstance(depends_on, list) and depends_on:
+                dependency_step_id = str(depends_on[-1] or "").strip()
+            if not dependency_step_id and playback_index > 0:
+                dependency_step_id = str(
+                    steps[playback_index - 1].get("step_id") or ""
+                ).strip()
+            capture_step_id = _next_step_id(
+                existing_ids,
+                "capture_pre_playback_state",
+            )
+            capture_step = {
+                "step_id": capture_step_id,
+                "title": "再生前の状態を記録",
+                "description": "再生操作の前にUIの状態をスクリーンショットで記録する。",
+                "depends_on": [dependency_step_id] if dependency_step_id else [],
+                "capabilities": [
+                    {"name": "desktop.view.screenshot", "mode": "read"},
+                ],
+                "expected_outputs": [
+                    "再生前のUI状態のスクリーンショットが取得できていること",
+                ],
+                "retryable": True,
+            }
+            steps.insert(playback_index, capture_step)
+            existing_ids.add(capture_step_id)
+            if isinstance(depends_on, list) and depends_on:
+                playback_step["depends_on"] = [
+                    capture_step_id if str(dep or "").strip() == dependency_step_id else dep
+                    for dep in depends_on
+                ]
+            else:
+                playback_step["depends_on"] = [capture_step_id]
+
+    playback_index = next(
+        (
+            index
+            for index, step in enumerate(steps)
+            if _step_is_playback_action_step(step)
+            and _step_has_any_capability(
+                step,
+                {"desktop.control.click", "desktop.control.hotkey"},
+            )
+        ),
+        None,
+    )
+    if _plan_needs_visual_evidence_capture(plan, goal) and not any(
+        _step_has_any_capability(step, {"desktop.ax.snapshot", "desktop.view.screenshot"})
+        for index, step in enumerate(steps)
+        if playback_index is None or index > playback_index
+    ):
+        dependency_step_id = str(steps[-1].get("step_id") or "").strip()
+        verify_step_id = _next_step_id(existing_ids, "verify_visual_state")
+        verify_step = {
+            "step_id": verify_step_id,
+            "title": "再生状態を確認",
+            "description": "UIの再生インジケーターや波形を読み取り、必要ならスクリーンショットも残して再生状態を確認する。",
+            "depends_on": [dependency_step_id] if dependency_step_id else [],
+            "capabilities": [
+                {"name": "desktop.ax.find", "mode": "read"},
+                {"name": "desktop.wait.element", "mode": "read"},
+                {"name": "desktop.ax.snapshot", "mode": "read"},
+                {"name": "desktop.view.screenshot", "mode": "read"},
+            ],
+            "expected_outputs": ["再生中であることの視覚的証拠が取得できていること"],
+            "retryable": True,
+        }
+        steps.append(verify_step)
+
+    if _plan_text_has_playback_hint(plan, goal):
+        for step in reversed(steps):
+            if not _step_has_playback_hint(step):
+                continue
+            if not _step_has_capability(step, "desktop.control.click"):
+                continue
+            _ensure_step_capability(step, "desktop.control.hotkey")
+            description = str(step.get("description") or "")
+            lowered = description.lower()
+            if "スペースキー" not in description and "space" not in lowered:
+                step["description"] = (
+                    f"{description} 必要ならスペースキーなどのホットキーで再生開始も試みる。".strip()
+                )
+            break
+
+    plan["steps"] = steps
+
+
+def _plan_text_chunks(plan: dict, goal: str) -> list[str]:
+    chunks: list[str] = [str(goal or plan.get("goal") or "")]
+    for step in plan.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        chunks.append(str(step.get("title") or ""))
+        chunks.append(str(step.get("description") or ""))
+        expected = step.get("expected_outputs", [])
+        if isinstance(expected, list):
+            chunks.extend(str(item) for item in expected)
+    for criterion in plan.get("success_criteria", []):
+        if not isinstance(criterion, dict):
+            continue
+        chunks.append(str(criterion.get("description") or ""))
+    return chunks
+
+
+def _plan_text_has_hotkey_hint(plan: dict, goal: str) -> bool:
+    chunks = _plan_text_chunks(plan, goal)
+    haystack = " ".join(chunks).lower()
+    return _contains_any(haystack, _HOTKEY_HINT_KEYWORDS)
+
+
+def _plan_text_has_playback_hint(plan: dict, goal: str) -> bool:
+    chunks = _plan_text_chunks(plan, goal)
+    haystack = " ".join(chunks).lower()
+    return _contains_any(haystack, _PLAYBACK_HINT_KEYWORDS)
+
+
+def _plan_needs_visual_evidence_capture(plan: dict, goal: str) -> bool:
+    chunks = _plan_text_chunks(plan, goal)
+    haystack = " ".join(chunks).lower()
+    if _contains_any(haystack, _VISUAL_EVIDENCE_KEYWORDS | _PLAYBACK_HINT_KEYWORDS):
+        return True
+    for criterion in plan.get("success_criteria", []):
+        if not isinstance(criterion, dict):
+            continue
+        if str(criterion.get("criterion_type") or "") in {"evidence", "custom"}:
+            return True
+    return False
+
+
+def _step_has_playback_hint(step: dict[str, object]) -> bool:
+    chunks = [str(step.get("title") or ""), str(step.get("description") or "")]
+    expected = step.get("expected_outputs", [])
+    if isinstance(expected, list):
+        chunks.extend(str(item) for item in expected)
+    haystack = " ".join(chunks).lower()
+    return _contains_any(haystack, _PLAYBACK_HINT_KEYWORDS)
+
+
+def _step_is_playback_action_step(step: dict[str, object]) -> bool:
+    chunks = [str(step.get("title") or ""), str(step.get("description") or "")]
+    expected = step.get("expected_outputs", [])
+    if isinstance(expected, list):
+        chunks.extend(str(item) for item in expected)
+    haystack = " ".join(chunks).lower()
+    return _contains_any(haystack, _PLAYBACK_ACTION_STEP_KEYWORDS)
+
+
 def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
+    _normalize_desktop_plan_steps(plan, goal)
     required_caps = [
         cap if isinstance(cap, dict) else {"name": str(cap)}
         for cap in plan.get("required_capabilities", [])
     ]
+    for step_capability_name in _step_capability_names(plan):
+        _ensure_capability(required_caps, step_capability_name)
     normalized_goal = (goal or plan.get("goal") or "").strip().lower()
     is_current_browser_goal = _targets_current_browser(normalized_goal)
 
@@ -160,6 +515,44 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
 
             if _needs_text_entry(normalized_goal):
                 _ensure_capability(required_caps, "desktop.control.type")
+    else:
+        has_desktop_ui_plan = bool(
+            cap_names
+            & {
+                "desktop.ax.find",
+                "desktop.wait.element",
+                "desktop.control.click",
+                "desktop.control.type",
+                "desktop.control.drag",
+                "desktop.control.hotkey",
+                "desktop.control.scroll",
+            }
+        )
+        if cap_names & {"desktop.control.launch_app", "desktop.control.focus_window"}:
+            _ensure_capability(required_caps, "desktop.view.windows")
+            _ensure_capability(required_caps, "desktop.wait.window")
+        if "desktop.control.launch_app" in cap_names and has_desktop_ui_plan:
+            _ensure_capability(required_caps, "desktop.control.focus_window")
+        if has_desktop_ui_plan:
+            _ensure_capability(required_caps, "desktop.ax.find")
+            _ensure_capability(required_caps, "desktop.wait.element")
+            _ensure_capability(required_caps, "desktop.ax.snapshot")
+        if _plan_needs_visual_evidence_capture(plan, normalized_goal):
+            _ensure_capability(required_caps, "desktop.view.screenshot")
+        if _plan_text_has_hotkey_hint(plan, normalized_goal) or _plan_text_has_playback_hint(
+            plan, normalized_goal
+        ):
+            _ensure_capability(required_caps, "desktop.control.hotkey")
+        if _plan_text_has_playback_hint(plan, normalized_goal) and (
+            "desktop.control.focus_window" in cap_names
+            or "desktop.wait.window" in cap_names
+            or "desktop.view.windows" in cap_names
+        ):
+            # Media-app transport tasks often begin with a focus step, but the
+            # executor may still need to reopen the app when the window is gone
+            # or hidden. Surface launch_app in approval so that fallback is
+            # explicit instead of failing mid-run on an unapproved capability.
+            _ensure_capability(required_caps, "desktop.control.launch_app")
 
     plan["required_capabilities"] = required_caps
     return plan

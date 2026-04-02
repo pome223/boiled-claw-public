@@ -44,8 +44,8 @@ Special cases:
 - browser form input / click / submit tasks that stay within the browser should still prefer specialist=browser_automator rather than control_loop.
 - requests targeting the boiled-claw Control UI chat page (for example localhost:18789/chat) should prefer specialist=control_ui_chat_operator with handoff_mode="direct".
 - desktop state inspection should prefer specialist=desktop_operator with handoff_mode="preflight_then_root".
-- desktop control requests (launch app / focus window / click / type / frontmost app / windows / screenshot / accessibility targeting) should prefer specialist=desktop_operator.
-- multi-step desktop automation, verification-heavy GUI flows, or requests that say "その後 / 次に / 手順 / verify" should prefer control_loop instead of direct desktop specialist execution.
+- single-step desktop control requests (launch app / focus window / click / type / frontmost app / windows / screenshot / accessibility targeting) should prefer specialist=desktop_operator.
+- multi-step desktop automation, app-launch-plus-interaction requests, playback/media app tasks (for example "open Djay and play music"), verification-heavy GUI flows, or requests that say "その後 / 次に / 手順 / verify" should prefer control_loop instead of direct desktop specialist execution.
 - skill requests should usually stay on root_agent unless the user explicitly wants a dedicated agent or MCP setup.
 - cron jobs with explicit targets should not be re-routed away from that explicit target.
 

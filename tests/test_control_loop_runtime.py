@@ -17,7 +17,14 @@ from src.control_loop.instructions import (
     build_planner_instruction,
     build_verifier_instruction,
 )
-from src.control_loop.root_workflow import ControlLoop, planner_with_policy, verifier_with_hooks
+from src.control_loop.root_workflow import (
+    ControlLoop,
+    _extract_latest_agent_json_output,
+    _promote_visual_playback_report,
+    _should_promote_visual_playback_report,
+    planner_with_policy,
+    verifier_with_hooks,
+)
 import src.memory_lifecycle.candidate_store as candidate_store_module
 from src.memory_lifecycle.adk_memory_service import PromotedMemoryService
 from src.memory_lifecycle.candidate_store import CandidateStore
@@ -664,6 +671,381 @@ def test_policy_judge_expands_type_for_current_browser_spreadsheet_goal():
     assert "desktop.control.launch_app" not in required
 
 
+def test_policy_judge_adds_ax_snapshot_for_generic_desktop_ui_plan():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "Djayを開いて、曲をかけて",
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "djay-launch-and-play-001",
+                "goal": "Djayを開いて、曲をかけて",
+                "risk_level": "medium",
+                "required_capabilities": [
+                    {"name": "desktop.ax.find", "mode": "read"},
+                    {"name": "desktop.control.click", "mode": "execute"},
+                    {"name": "desktop.control.launch_app", "mode": "execute"},
+                    {"name": "desktop.view.windows", "mode": "read"},
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+    approval_required = set(
+        callback_context.state[StateKeys.APPROVAL_REQUEST]["required_capabilities"]
+    )
+
+    assert callback_context.state[StateKeys.APPROVAL_STATUS] == "needs_human"
+    assert "desktop.ax.snapshot" in required
+    assert "desktop.ax.snapshot" in approval_required
+
+
+def test_policy_judge_promotes_step_capabilities_and_hotkey_hints():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "もう一度 Djayを開いて、曲をかけて",
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "djay-reopen-and-play-001",
+                "goal": "もう一度 Djayを開いて、曲をかけて",
+                "risk_level": "medium",
+                "required_capabilities": [
+                    {"name": "desktop.view.windows", "mode": "read"},
+                    {"name": "desktop.control.launch_app", "mode": "execute"},
+                    {"name": "desktop.ax.find", "mode": "read"},
+                    {"name": "desktop.control.click", "mode": "execute"},
+                ],
+                "steps": [
+                    {
+                        "step_id": "focus_djay",
+                        "title": "Djayウィンドウを前面にする",
+                        "description": "desktop.control.focus_windowを使用してDjayのウィンドウを最前面にする。",
+                        "capabilities": [
+                            {"name": "desktop.control.focus_window", "mode": "execute"},
+                            {"name": "desktop.wait.window", "mode": "read"},
+                        ],
+                        "depends_on": [],
+                        "expected_outputs": ["Djayウィンドウがフォーカスされている状態"],
+                        "retryable": True,
+                    },
+                    {
+                        "step_id": "play_music",
+                        "title": "曲を再生",
+                        "description": "DjayのUIから再生ボタンを探してクリックするか、スペースキーで再生を試みる。",
+                        "capabilities": [
+                            {"name": "desktop.ax.find", "mode": "read"},
+                            {"name": "desktop.control.click", "mode": "execute"},
+                            {"name": "desktop.view.screenshot", "mode": "read"},
+                        ],
+                        "depends_on": ["focus_djay"],
+                        "expected_outputs": ["曲が再生状態になっていること"],
+                        "retryable": True,
+                    },
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+    approval_required = set(
+        callback_context.state[StateKeys.APPROVAL_REQUEST]["required_capabilities"]
+    )
+
+    assert "desktop.control.focus_window" in required
+    assert "desktop.wait.window" in required
+    assert "desktop.view.screenshot" in required
+    assert "desktop.control.hotkey" in required
+    assert "desktop.control.focus_window" in approval_required
+    assert "desktop.wait.window" in approval_required
+    assert "desktop.view.screenshot" in approval_required
+    assert "desktop.control.hotkey" in approval_required
+
+
+def test_policy_judge_adds_visual_evidence_capabilities_for_playback_plan():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "Djayを開いて、曲をかけて",
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "djay-open-and-play-001",
+                "goal": "Djayを開いて、曲をかけて",
+                "risk_level": "high",
+                "required_capabilities": [
+                    {"name": "desktop.control.launch_app", "mode": "execute"},
+                    {"name": "desktop.ax.find", "mode": "read"},
+                    {"name": "desktop.control.click", "mode": "execute"},
+                    {"name": "desktop.view.windows", "mode": "read"},
+                ],
+                "steps": [
+                    {
+                        "step_id": "launch_djay",
+                        "title": "Djayの起動",
+                        "description": "desktop.control.launch_appを使用してDjayを起動する",
+                        "capabilities": [
+                            {"name": "desktop.control.launch_app", "mode": "execute"},
+                            {"name": "desktop.view.windows", "mode": "read"},
+                        ],
+                        "depends_on": [],
+                        "expected_outputs": ["Djayアプリケーションが前面に表示される"],
+                        "retryable": True,
+                    },
+                    {
+                        "step_id": "select_track",
+                        "title": "楽曲の選択",
+                        "description": "Djayのインターフェース内で任意の楽曲を選択する",
+                        "capabilities": [
+                            {"name": "desktop.ax.find", "mode": "read"},
+                            {"name": "desktop.control.click", "mode": "execute"},
+                        ],
+                        "depends_on": ["launch_djay"],
+                        "expected_outputs": ["楽曲が選択状態になる"],
+                        "retryable": True,
+                    },
+                    {
+                        "step_id": "play_track",
+                        "title": "再生の開始",
+                        "description": "再生ボタンをクリックして楽曲を開始する",
+                        "capabilities": [
+                            {"name": "desktop.control.click", "mode": "execute"},
+                        ],
+                        "depends_on": ["select_track"],
+                        "expected_outputs": ["楽曲が再生中であることの確認"],
+                        "retryable": True,
+                    },
+                ],
+                "success_criteria": [
+                    {
+                        "name": "playback_started",
+                        "criterion_type": "evidence",
+                        "description": "Djayが起動しており、楽曲の波形や再生インジケーターが動いていること",
+                        "required": True,
+                    }
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+    approval_required = set(
+        callback_context.state[StateKeys.APPROVAL_REQUEST]["required_capabilities"]
+    )
+
+    assert "desktop.wait.window" in required
+    assert "desktop.wait.element" in required
+    assert "desktop.ax.snapshot" in required
+    assert "desktop.view.screenshot" in required
+    assert "desktop.control.focus_window" in required
+    assert "desktop.control.hotkey" in required
+    assert "desktop.wait.window" in approval_required
+    assert "desktop.wait.element" in approval_required
+    assert "desktop.view.screenshot" in approval_required
+    assert "desktop.control.focus_window" in approval_required
+    assert "desktop.control.hotkey" in approval_required
+    step_ids = [step["step_id"] for step in approved["steps"]]
+    assert "capture_pre_playback_state" in step_ids
+    assert "launch_djay_focus" in step_ids
+    assert "verify_visual_state" in step_ids
+    capture_step = next(
+        step for step in approved["steps"] if step["step_id"] == "capture_pre_playback_state"
+    )
+    focus_step = next(step for step in approved["steps"] if step["step_id"] == "launch_djay_focus")
+    verify_step = next(step for step in approved["steps"] if step["step_id"] == "verify_visual_state")
+    play_step = next(step for step in approved["steps"] if step["step_id"] == "play_track")
+    assert focus_step["depends_on"] == ["launch_djay"]
+    assert capture_step["depends_on"] == ["select_track"]
+    assert {cap["name"] for cap in capture_step["capabilities"]} == {
+        "desktop.view.screenshot",
+    }
+    assert play_step["depends_on"] == ["capture_pre_playback_state"]
+    assert verify_step["depends_on"] == ["play_track"]
+    assert "スペースキー" in play_step["description"]
+    assert {cap["name"] for cap in play_step["capabilities"]} == {
+        "desktop.control.click",
+        "desktop.control.hotkey",
+    }
+    assert {cap["name"] for cap in verify_step["capabilities"]} == {
+        "desktop.ax.find",
+        "desktop.wait.element",
+        "desktop.ax.snapshot",
+        "desktop.view.screenshot",
+    }
+
+
+def test_policy_judge_adds_launch_app_fallback_for_playback_stop_plan():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "曲を止めて",
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "djay-stop-playback-001",
+                "goal": "曲を止めて",
+                "risk_level": "medium",
+                "required_capabilities": [
+                    {"name": "desktop.control.focus_window", "mode": "execute"},
+                    {"name": "desktop.control.hotkey", "mode": "execute"},
+                    {"name": "desktop.ax.snapshot", "mode": "read"},
+                    {"name": "desktop.view.screenshot", "mode": "read"},
+                    {"name": "desktop.view.windows", "mode": "read"},
+                    {"name": "desktop.wait.element", "mode": "read"},
+                    {"name": "desktop.wait.window", "mode": "read"},
+                ],
+                "steps": [
+                    {
+                        "step_id": "focus_djay",
+                        "title": "Djayを前面にする",
+                        "description": "Djayウィンドウを前面にして停止操作できる状態にする。",
+                        "capabilities": [
+                            {"name": "desktop.control.focus_window", "mode": "execute"},
+                            {"name": "desktop.wait.window", "mode": "read"},
+                        ],
+                        "depends_on": [],
+                        "expected_outputs": ["Djayウィンドウが前面で操作可能になっていること"],
+                        "retryable": True,
+                    },
+                    {
+                        "step_id": "stop_playback",
+                        "title": "再生を止める",
+                        "description": "スペースキーなどのホットキーで再生停止または一時停止を試みる。",
+                        "capabilities": [
+                            {"name": "desktop.control.hotkey", "mode": "execute"},
+                            {"name": "desktop.wait.element", "mode": "read"},
+                        ],
+                        "depends_on": ["focus_djay"],
+                        "expected_outputs": ["楽曲が停止または一時停止状態になっていること"],
+                        "retryable": True,
+                    },
+                ],
+                "success_criteria": [
+                    {
+                        "name": "playback_stopped",
+                        "criterion_type": "evidence",
+                        "description": "Djayの再生状態が停止または一時停止であること",
+                        "required": True,
+                    }
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+    approval_required = set(
+        callback_context.state[StateKeys.APPROVAL_REQUEST]["required_capabilities"]
+    )
+
+    assert "desktop.control.launch_app" in required
+    assert "desktop.control.launch_app" in approval_required
+
+
+def test_extract_latest_agent_json_output_reads_executor_event_text():
+    events = [
+        SimpleNamespace(
+            author="executor",
+            invocation_id="inv-123",
+            content=SimpleNamespace(
+                parts=[
+                    SimpleNamespace(
+                        text=json.dumps(
+                            {
+                                "plan_id": "plan-1",
+                                "steps_executed": [
+                                    {"step_id": "launch", "status": "succeeded"}
+                                ],
+                            },
+                            ensure_ascii=False,
+                        )
+                    )
+                ]
+            ),
+        )
+    ]
+
+    parsed, invocation_id = _extract_latest_agent_json_output(events, "executor")
+
+    assert invocation_id == "inv-123"
+    assert parsed is not None
+    assert parsed["plan_id"] == "plan-1"
+    assert parsed["steps_executed"][0]["step_id"] == "launch"
+
+
+def test_visual_playback_report_can_be_promoted_from_screenshot_change():
+    plan = {
+        "goal": "Djayを開いて、曲をかけて",
+        "steps": [
+            {"step_id": "select_and_play_track", "title": "曲の選択と再生", "description": "スペースキーで再生する"}
+        ],
+        "success_criteria": [
+            {
+                "name": "djay_is_running",
+                "criterion_type": "evidence",
+                "description": "Djayアプリが画面上に表示され、曲が再生されている",
+                "required": True,
+            }
+        ],
+    }
+    report = {
+        "report_id": "rep-1",
+        "plan_id": "plan-1",
+        "status": "fail",
+        "overall_score": 0.3,
+        "confidence": 0.8,
+        "criterion_results": [
+            {
+                "name": "djay_is_running",
+                "passed": False,
+                "score": 0.3,
+                "explanation": "evidence missing",
+                "evidence_refs": ["verify_visual_state"],
+            }
+        ],
+        "failure_type": "insufficient_evidence",
+        "summary": "not enough evidence",
+        "repair_actions": [{"action_id": "a1", "action_type": "gather_more_evidence", "description": "retry", "target_step_ids": ["verify_visual_state"], "priority": 1}],
+    }
+    verification_inputs = {
+        "goal": "Djayを開いて、曲をかけて",
+        "playback_goal": True,
+        "desktop": {
+            "launch_succeeded": True,
+            "focus_succeeded": True,
+            "playback_interaction_attempted": True,
+            "visual_change": {
+                "before_path": "before.png",
+                "after_path": "after.png",
+                "changed_ratio": 0.01,
+                "normalized_rgb_delta": 0.001,
+                "playback_ui_changed": True,
+            },
+        },
+    }
+
+    assert _should_promote_visual_playback_report(
+        plan=plan,
+        goal=plan["goal"],
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+    promoted = _promote_visual_playback_report(
+        report=report,
+        verification_inputs=verification_inputs,
+    )
+
+    assert promoted["status"] == "pass"
+    assert promoted["failure_type"] is None
+    assert promoted["repair_actions"] == []
+    assert promoted["criterion_results"][0]["passed"] is True
+    assert "before.png" in promoted["criterion_results"][0]["evidence_refs"]
+    assert "after.png" in promoted["criterion_results"][0]["evidence_refs"]
+
+
 def test_planner_after_agent_callback_accepts_callback_context_only():
     callback_context = SimpleNamespace(
         state={
@@ -776,6 +1158,59 @@ async def test_guarded_desktop_control_launch_app_redirects_to_focus_for_current
 
     assert result["success"] is True
     assert result["target"]["app_name"] == "Google Chrome"
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_control_launch_app_redirects_to_focus_for_playback_task(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "曲を止めて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "plan_id": "djay-stop-playback-001",
+                "goal": "曲を止めて",
+                "required_capabilities": [
+                    {"name": "desktop.control.focus_window"},
+                    {"name": "desktop.wait.window"},
+                    {"name": "desktop.control.hotkey"},
+                ],
+                "steps": [
+                    {
+                        "step_id": "focus_djay",
+                        "title": "Djayを前面にする",
+                        "description": "Djayウィンドウを前面にして停止操作できる状態にする。",
+                        "capabilities": [
+                            {"name": "desktop.control.focus_window"},
+                            {"name": "desktop.wait.window"},
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    async def fake_focus_window(
+        app_name: str | None = None,
+        window_id: str | None = None,
+        title: str | None = None,
+        tool_context=None,
+    ) -> dict:
+        return {"success": True, "target": {"app_name": app_name, "window_id": window_id, "title": title}}
+
+    monkeypatch.setattr(
+        "src.tools.desktop.desktop_control_focus_window",
+        fake_focus_window,
+    )
+
+    result = await guarded_tools_module.guarded_desktop_control_launch_app(
+        app_name="djay Pro",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert result["target"]["app_name"] == "djay Pro"
 
 
 @pytest.mark.asyncio

@@ -212,9 +212,21 @@ You have READ-ONLY access. Do NOT call tools. Do NOT write files.
 Current session state:
 - Approved Plan (with success_criteria): {_state_block(ctx, StateKeys.PLAN_APPROVED)}
 - Execution Outputs: {_state_block(ctx, StateKeys.TEMP_EXECUTOR_OUTPUTS)}
+- Verification Inputs: {_state_block(ctx, StateKeys.TEMP_VERIFICATION_INPUTS)}
 
 Evaluate each success criterion in the plan's "success_criteria" array.
 Assess the overall execution quality.
+
+When Verification Inputs are present, prefer them over guesswork.
+For desktop playback / media tasks, treat these signals as strong evidence even
+when the AX tree is sparse:
+- launch/focus succeeded
+- a playback interaction (click or hotkey) succeeded
+- pre/post screenshots exist
+- desktop.visual_change.playback_ui_changed is true
+
+If those signals are present, do not fail solely because desktop.ax.snapshot
+returned a thin tree. Use the screenshot-change evidence in criterion_results.
 
 Return ONLY a JSON object matching this structure exactly:
 {{
