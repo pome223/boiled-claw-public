@@ -764,6 +764,36 @@ textarea {
   word-break: break-word;
 }
 
+.timeline-list {
+  display: grid;
+  gap: 8px;
+}
+
+.timeline-entry-button,
+.timeline-entry-static {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  text-align: left;
+}
+
+.timeline-entry-button {
+  cursor: pointer;
+}
+
+.timeline-entry-button:hover .timeline-entry-card {
+  border-color: rgba(190, 211, 255, 0.36);
+}
+
+.timeline-entry-card .item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+}
+
 .relation-list {
   display: flex;
   flex-wrap: wrap;

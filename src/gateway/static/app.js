@@ -123,14 +123,12 @@ const messageHistory = [];
 let currentSessionId = null;
 const inlineApprovals = new Map();
 const MAX_EVENT_ROWS = 200;
-const DASHBOARD_POLL_INTERVAL_MS = 5000;
 
 // --- streaming state ---
 let _streamingBubble = null;
 let _streamingText = "";
 let _runInProgress = false;
 let _messageInputComposing = false;
-let _dashboardPollHandle = null;
 let _dashboardRefreshHandle = null;
 let _dashboardRefreshPromise = null;
 let _auditRefreshHandle = null;
@@ -163,7 +161,9 @@ const dashboardState = {
   relatedTasks: [],
   relatedApprovals: [],
   childTasks: [],
-  subagentRun: null
+  subagentRun: null,
+  taskTimeline: [],
+  taskTimelinePagination: null,
 };
 const auditState = {
   entries: [],
@@ -1200,6 +1200,66 @@ function renderReuseSuggestions(reuseSuggestions) {
   ].join("");
 }
 
+function renderTaskTimeline(entries, pagination) {
+  const items = Array.isArray(entries) ? entries : [];
+  if (!items.length) {
+    return `<div class="muted">No timeline events yet.</div>`;
+  }
+  const caption = pagination && pagination.total
+    ? `<div class="item-meta mono">${escapeHtml(paginationLabel(pagination.total, pagination.page || 1, pagination.page_size || items.length, items.length))}</div>`
+    : "";
+  const rows = items.map((entry) => {
+    const kind = String(entry.kind || "timeline");
+    const title = String(entry.title || entry.event_type || kind);
+    const summary = compactText(entry.summary || "", 220);
+    const metaBits = [formatTimestamp(entry.timestamp)];
+    if (entry.event_type) metaBits.push(String(entry.event_type));
+    if (entry.request_id) metaBits.push(String(entry.request_id));
+    if (entry.audit_entry_id) metaBits.push(String(entry.audit_entry_id));
+    const body = [
+      `<div class="timeline-entry-card detail-card">`,
+      `<div class="item-head">`,
+      `<div class="item-title">${escapeHtml(title)}</div>`,
+      statusTag(entry.status || kind),
+      `</div>`,
+      `<div class="item-meta mono">${escapeHtml(metaBits.join(" · "))}</div>`,
+      summary ? `<div class="item-detail">${escapeHtml(summary)}</div>` : "",
+      `</div>`,
+    ].join("");
+    if (kind === "approval" && entry.request_id) {
+      return `<button class="timeline-entry-button" type="button" data-approval-ref="${escapeAttr(entry.request_id)}">${body}</button>`;
+    }
+    if (kind === "audit" && entry.audit_entry_id) {
+      const focus = entry.audit_focus || {};
+      return [
+        `<button class="timeline-entry-button" type="button"`,
+        ` data-action="open-related-audit"`,
+        ` data-audit-session-id="${escapeAttr(focus.sessionId || "")}"`,
+        ` data-audit-query="${escapeAttr(focus.searchQuery || "")}"`,
+        ` data-audit-request-id="${escapeAttr(focus.requestId || "")}"`,
+        ` data-audit-task-id="${escapeAttr(focus.taskId || "")}"`,
+        ` data-audit-run-id="${escapeAttr(focus.runId || "")}"`,
+        ` data-audit-tool="${escapeAttr(focus.toolName || "")}"`,
+        ` data-audit-source="${escapeAttr(focus.source || "")}"`,
+        ` data-audit-result="${escapeAttr(focus.result || "")}"`,
+        ` data-audit-entry-id="${escapeAttr(entry.audit_entry_id)}">`,
+        body,
+        `</button>`,
+      ].join("");
+    }
+    return `<div class="timeline-entry-static">${body}</div>`;
+  });
+  return [
+    `<div class="detail-section">`,
+    `<div class="k">Task Timeline</div>`,
+    caption,
+    `<div class="timeline-list">`,
+    ...rows,
+    `</div>`,
+    `</div>`,
+  ].join("");
+}
+
 function renderTaskDetail(task) {
   const relatedTasks = dashboardState.relatedTasks || [];
   const childTasks = dashboardState.childTasks || [];
@@ -1208,6 +1268,8 @@ function renderTaskDetail(task) {
   const artifacts = task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
   const metadata = task.metadata && typeof task.metadata === "object" ? task.metadata : {};
   const reuseSuggestions = Array.isArray(artifacts.reuse_suggestions) ? artifacts.reuse_suggestions : [];
+  const taskTimeline = Array.isArray(dashboardState.taskTimeline) ? dashboardState.taskTimeline : [];
+  const taskTimelinePagination = dashboardState.taskTimelinePagination;
   const detailMeta = [
     task.task_id,
     task.kind || "-",
@@ -1242,6 +1304,7 @@ function renderTaskDetail(task) {
     `<div class="k">Approval Dependencies</div>`,
     renderRelationChips("approval", relatedApprovals, "No linked approvals."),
     `</div>`,
+    renderTaskTimeline(taskTimeline, taskTimelinePagination),
     `<div class="detail-section">`,
     `<div class="k">Audit Trail</div>`,
     `<div class="detail-actions">`,
@@ -1392,7 +1455,7 @@ async function loadTaskDetail(taskId) {
       task.winner_task_id,
       ...(Array.isArray(task.loser_task_ids) ? task.loser_task_ids : []),
     ].filter(Boolean);
-    const [relatedTasksPayload, relatedApprovals, subagentRunsPayload, childTasksPayload] = await Promise.all([
+    const [relatedTasksPayload, relatedApprovals, subagentRunsPayload, childTasksPayload, timelinePayload] = await Promise.all([
       Promise.all(
         Array.from(new Set(relatedTaskIds)).map(async (relatedTaskId) => {
           try {
@@ -1419,6 +1482,9 @@ async function loadTaskDetail(taskId) {
       fetchJsonOrThrow(
         `${base}/tasks?${new URLSearchParams({ session_id: task.owner_session_id || "", parent_task_id: task.task_id || "", limit: "50" })}`
       ).catch(() => ({ tasks: [] })),
+      fetchJsonOrThrow(
+        `${base}/tasks/${encodeURIComponent(task.task_id || taskId)}/timeline?${new URLSearchParams({ limit: "80" })}`
+      ).catch(() => ({ entries: [], pagination: null })),
     ]);
     const runs = Array.isArray(subagentRunsPayload.runs) ? subagentRunsPayload.runs : [];
     dashboardState.selectedKind = "task";
@@ -1429,6 +1495,8 @@ async function loadTaskDetail(taskId) {
     dashboardState.relatedApprovals = relatedApprovals.filter(Boolean);
     dashboardState.childTasks = Array.isArray(childTasksPayload.tasks) ? childTasksPayload.tasks : [];
     dashboardState.subagentRun = runs.find((run) => run.run_id === task.run_id) || null;
+    dashboardState.taskTimeline = Array.isArray(timelinePayload.entries) ? timelinePayload.entries : [];
+    dashboardState.taskTimelinePagination = timelinePayload.pagination || null;
   } catch (err) {
     dashboardState.selectedKind = "task";
     dashboardState.selectedId = taskId;
@@ -1445,6 +1513,8 @@ async function loadTaskDetail(taskId) {
     dashboardState.relatedApprovals = [];
     dashboardState.childTasks = [];
     dashboardState.subagentRun = null;
+    dashboardState.taskTimeline = [];
+    dashboardState.taskTimelinePagination = null;
   }
   renderSelectionDetail();
   updateDashboardUi();
@@ -1474,6 +1544,8 @@ async function loadApprovalDetail(requestId) {
     dashboardState.relatedApprovals = [];
     dashboardState.childTasks = [];
     dashboardState.subagentRun = null;
+    dashboardState.taskTimeline = [];
+    dashboardState.taskTimelinePagination = null;
   } catch (err) {
     dashboardState.selectedKind = "approval";
     dashboardState.selectedId = requestId;
@@ -1490,6 +1562,8 @@ async function loadApprovalDetail(requestId) {
     dashboardState.relatedApprovals = [];
     dashboardState.childTasks = [];
     dashboardState.subagentRun = null;
+    dashboardState.taskTimeline = [];
+    dashboardState.taskTimelinePagination = null;
   }
   renderSelectionDetail();
   updateDashboardUi();
@@ -1631,6 +1705,7 @@ function handleSelectionPanelClick(event) {
       sourceFilter: actionButton.dataset.auditSource || "",
       resultFilter: actionButton.dataset.auditResult || "",
       focus: {
+        entryId: actionButton.dataset.auditEntryId || "",
         sessionId: actionButton.dataset.auditSessionId || "",
         searchQuery: actionButton.dataset.auditQuery || "",
         requestId: actionButton.dataset.auditRequestId || "",
@@ -1961,13 +2036,6 @@ function scheduleAuditRefresh(delay = 250) {
   }, delay);
 }
 
-function ensureDashboardPolling() {
-  if (_dashboardPollHandle) return;
-  _dashboardPollHandle = window.setInterval(() => {
-    void refreshDashboard();
-  }, DASHBOARD_POLL_INTERVAL_MS);
-}
-
 // -----------------------------------------------------------------------
 // WS event handlers
 // -----------------------------------------------------------------------
@@ -2006,8 +2074,6 @@ function handleChatDone(payload) {
   setRunInProgress(false);
   logEvent("chat.done", { aborted: payload.aborted, len: (payload.text || "").length });
   void syncServerSessions();
-  scheduleDashboardRefresh(50);
-  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleChatToken(payload) {
@@ -2035,8 +2101,6 @@ function handleSystemEvent(payload) {
     }
   }
   addSystemMessage(msg);
-  scheduleDashboardRefresh(50);
-  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleHealthTick(payload) {
@@ -2045,8 +2109,6 @@ function handleHealthTick(payload) {
     setTimeout(() => heartbeatDotEl.classList.remove("pulse"), 400);
   }
   logEvent("health.tick", { active_sessions: payload.active_sessions });
-  scheduleDashboardRefresh(50);
-  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleCronUpdate(payload) {
@@ -2069,8 +2131,6 @@ function handleToolsApprovalRequest(payload) {
     status: "pending",
     note: "Respond inline to continue this run."
   });
-  scheduleDashboardRefresh(50);
-  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function handleControlApprovalRequest(payload) {
@@ -2092,8 +2152,6 @@ function handleControlApprovalRequest(payload) {
     status: "pending",
     note: "Respond inline to continue the control loop."
   });
-  scheduleDashboardRefresh(50);
-  if (isTabActive("audit")) scheduleAuditRefresh(50);
 }
 
 function sendApproval(requestId, approved) {
@@ -2112,6 +2170,72 @@ function sendApproval(requestId, approved) {
     approved ? "Approval sent. Waiting for gateway confirmation..." : "Denial sent. Waiting for gateway confirmation..."
   );
   scheduleDashboardRefresh(50);
+}
+
+function handleTaskUpdate(payload) {
+  const task = payload.task && typeof payload.task === "object" ? payload.task : {};
+  logEvent("task.update", {
+    task_id: payload.task_id || task.task_id,
+    status: task.status || payload.timeline_event?.status,
+    event_type: payload.timeline_event?.event_type || "",
+  });
+  if (
+    dashboardState.selectedKind === "task"
+    && dashboardState.selectedId
+    && String(dashboardState.selectedId) === String(payload.task_id || task.task_id || "")
+  ) {
+    scheduleDashboardRefresh(25);
+    return;
+  }
+  scheduleDashboardRefresh(40);
+}
+
+function handleApprovalUpdate(payload) {
+  const approval = payload.approval && typeof payload.approval === "object" ? payload.approval : {};
+  const requestId = approval.request_id || payload.request_id || "";
+  logEvent("tools.approval_update", {
+    request_id: requestId,
+    state: approval.state || "",
+    approval_event: payload.approval_event || "",
+  });
+  if (!requestId) {
+    scheduleDashboardRefresh(40);
+    return;
+  }
+  if (approval.state === "pending") {
+    upsertInlineApproval({
+      requestId,
+      title: `${approval.tool_name || approval.tool_pattern || "approval"} by ${approval.agent_name || "agent"}`,
+      subtitle: "tool approval request",
+      reason: approval.reason || "approval required",
+      argsPreview: JSON.stringify(approval.args || {}).slice(0, 220),
+      status: "pending",
+      note: approval.propagate_to_subagents ? "Session-scoped approval can propagate to subagents." : "",
+    });
+  } else {
+    let note = approval.resolve_reason || "";
+    if (!note && approval.state === "approved") note = "Approved";
+    if (!note && approval.state === "denied") note = "Denied";
+    if (!note && approval.state === "expired") note = "Expired";
+    updateInlineApprovalStatus(requestId, approval.state || "pending", note);
+  }
+  scheduleDashboardRefresh(30);
+}
+
+function handleAuditAppend(payload) {
+  const entry = payload.entry && typeof payload.entry === "object" ? payload.entry : null;
+  if (!entry) return;
+  logEvent("audit.append", {
+    entry_id: entry.entry_id,
+    event_type: entry.event_type,
+    session_id: entry.session_id,
+  });
+  if (dashboardState.selectedKind === "task" || dashboardState.selectedKind === "approval") {
+    scheduleDashboardRefresh(35);
+  }
+  if (isTabActive("audit")) {
+    scheduleAuditRefresh(30);
+  }
 }
 
 // -----------------------------------------------------------------------
@@ -2503,6 +2627,9 @@ function connect(targetSessionId = null) {
       if (evName === "chat.history") { handleChatHistory(payload); return; }
       if (evName === "tool.start") { return; }
       if (evName === "tool.result") { return; }
+      if (evName === "task.update") { handleTaskUpdate(payload); return; }
+      if (evName === "tools.approval_update") { handleApprovalUpdate(payload); return; }
+      if (evName === "audit.append") { handleAuditAppend(payload); return; }
       if (evName === "system.event") { handleSystemEvent(payload); return; }
       if (evName === "health.tick") { handleHealthTick(payload); return; }
       if (evName === "cron.update") { handleCronUpdate(payload); return; }
@@ -2750,7 +2877,6 @@ updateAuditUi();
 activateTab("chat");
 setStatus(false, "offline");
 setRunInProgress(false);
-ensureDashboardPolling();
 scheduleDashboardRefresh(0);
 addSystemMessage("ready: Configure settings then press Connect");
 logEvent("ui.ready", currentSettings());

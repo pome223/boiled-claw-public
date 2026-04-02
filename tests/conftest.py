@@ -21,3 +21,17 @@ def _isolated_task_store(tmp_path, monkeypatch):
     task_store_module.reset_task_store()
     yield
     task_store_module.reset_task_store()
+
+
+@pytest.fixture(autouse=True)
+def _isolated_audit_logger(tmp_path, monkeypatch):
+    from src.security import audit as audit_module
+
+    monkeypatch.setattr(
+        audit_module,
+        "get_settings",
+        lambda: type("Settings", (), {"audit_log_path": tmp_path / "audit.log"})(),
+    )
+    audit_module._audit_logger = None
+    yield
+    audit_module._audit_logger = None

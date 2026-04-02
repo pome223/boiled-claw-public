@@ -57,6 +57,7 @@ from src.gateway.protocol import (
     ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
     ev_health_tick, ev_cron_update, ev_tools_approval_request,
     ev_control_approval_request,
+    ev_tools_approval_update, ev_task_update, ev_audit_append,
     ev_tool_start, ev_tool_result,
     normalize_client_event, validate_client_event,
 )
@@ -290,6 +291,7 @@ class GatewayServer:
             memory_service=self.memory_service,
         )
         self.audit_logger = get_audit_logger()
+        self.task_store = get_task_store()
         self.transcript = get_transcript_store()
         self.tool_policy = get_tool_policy_engine()
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -380,25 +382,63 @@ class GatewayServer:
             session_id = payload.get("session_id", "")
             if not session_id:
                 return
+            approval_payload = {key: value for key, value in payload.items() if key != "event_type"}
+            approval_event = str(payload.get("event_type") or "updated")
+            await self.manager.send_or_queue_json(
+                session_id,
+                ev_tools_approval_update(
+                    approval_payload,
+                    approval_event=approval_event,
+                ),
+            )
+            if approval_payload.get("state") != "pending":
+                return
             await self.manager.send_or_queue_json(
                 session_id,
                 ev_tools_approval_request(
-                    request_id=payload.get("request_id", ""),
-                    tool_name=payload.get("tool_name", ""),
-                    agent_name=payload.get("agent_name", ""),
-                    args=payload.get("args") or {},
-                    reason=payload.get("reason", ""),
-                    state=payload.get("state", "pending"),
-                    scope=payload.get("scope", "single"),
-                    tool_pattern=payload.get("tool_pattern"),
-                    path_scope=payload.get("path_scope"),
-                    expires_at=payload.get("expires_at"),
-                    propagate_to_subagents=bool(payload.get("propagate_to_subagents", False)),
-                    source_request_id=payload.get("source_request_id"),
+                    request_id=approval_payload.get("request_id", ""),
+                    tool_name=approval_payload.get("tool_name", ""),
+                    agent_name=approval_payload.get("agent_name", ""),
+                    args=approval_payload.get("args") or {},
+                    reason=approval_payload.get("reason", ""),
+                    state=approval_payload.get("state", "pending"),
+                    scope=approval_payload.get("scope", "single"),
+                    tool_pattern=approval_payload.get("tool_pattern"),
+                    path_scope=approval_payload.get("path_scope"),
+                    expires_at=approval_payload.get("expires_at"),
+                    propagate_to_subagents=bool(approval_payload.get("propagate_to_subagents", False)),
+                    source_request_id=approval_payload.get("source_request_id"),
                 ),
             )
 
         self._approval_notifier_fn = _approval_notifier
+
+        async def _task_notifier(payload: Dict[str, Any]) -> None:
+            task = payload.get("task")
+            task = task if isinstance(task, dict) else {}
+            owner_session_id = str(task.get("owner_session_id") or "")
+            if not owner_session_id:
+                return
+            await self.manager.send_or_queue_json(
+                owner_session_id,
+                ev_task_update(task, payload.get("event") or {}),
+            )
+
+        self._task_notifier_fn = _task_notifier
+
+        async def _audit_notifier(payload: Dict[str, Any]) -> None:
+            metadata = payload.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            session_ids = {
+                str(payload.get("session_id") or "").strip(),
+                str(metadata.get("target_session_id") or "").strip(),
+            }
+            for session_id in sorted(session_id for session_id in session_ids if session_id):
+                if session_id not in self.manager.active_connections:
+                    continue
+                await self.manager.send_json(session_id, ev_audit_append(payload))
+
+        self._audit_notifier_fn = _audit_notifier
         self._setup_routes()
 
     @asynccontextmanager
@@ -414,6 +454,8 @@ class GatewayServer:
         set_subagent_notifier(self._subagent_notifier_fn)
         set_tool_event_notifier(self._send_tool_event)
         self.tool_policy.set_notifier(self._approval_notifier_fn)
+        self.task_store.set_notifier(self._task_notifier_fn)
+        self.audit_logger.set_notifier(self._audit_notifier_fn)
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(), name="heartbeat"
@@ -428,6 +470,8 @@ class GatewayServer:
         set_subagent_notifier(None)
         set_tool_event_notifier(None)
         self.tool_policy.set_notifier(None)
+        self.task_store.set_notifier(None)
+        self.audit_logger.set_notifier(None)
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
         self._heartbeat_task = None
@@ -1168,6 +1212,161 @@ class GatewayServer:
             agent_name=agent_name,
         )
 
+    def _related_approvals_for_task(
+        self,
+        *,
+        approval_ids: list[str],
+        session_id: Optional[str],
+    ) -> list[dict[str, Any]]:
+        if not approval_ids:
+            return []
+        lookup = {item for item in approval_ids if item}
+        approvals = self.tool_policy.list_approvals(
+            session_id=session_id,
+            state="all",
+            include_expired=True,
+            limit=max(100, len(lookup) * 4),
+        )
+        related: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for approval in approvals:
+            request_id = str(approval.get("request_id") or "")
+            source_request_id = str(approval.get("source_request_id") or "")
+            if request_id not in lookup and source_request_id not in lookup:
+                continue
+            if request_id in seen:
+                continue
+            seen.add(request_id)
+            related.append(approval)
+        return related
+
+    @staticmethod
+    def _task_timeline_sort_key(entry: dict[str, Any]) -> tuple[float, str]:
+        return (float(entry.get("timestamp") or 0.0), str(entry.get("timeline_id") or ""))
+
+    def _build_task_timeline_payload(
+        self,
+        task: dict[str, Any],
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        resolved_page = max(1, int(page or 1))
+        resolved_page_size = max(1, min(int(page_size or 50), 200))
+        history_limit = min(max(resolved_page * resolved_page_size * 4, 100), 500)
+        task_history = self.task_store.query_timeline(
+            task["task_id"],
+            page=1,
+            page_size=history_limit,
+        )
+        approvals = self._related_approvals_for_task(
+            approval_ids=list(task.get("approval_dependencies") or []),
+            session_id=task.get("owner_session_id"),
+        )
+        audit_entries = self.audit_logger.query_related(
+            session_id=task.get("owner_session_id"),
+            task_id=task.get("task_id"),
+            run_id=task.get("run_id"),
+            request_ids=list(task.get("approval_dependencies") or []),
+            limit=history_limit,
+        )
+
+        timeline_entries: list[dict[str, Any]] = []
+        for event in task_history.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            timeline_entries.append(
+                {
+                    "timeline_id": str(event.get("entry_id") or ""),
+                    "kind": "task_event",
+                    "timestamp": float(event.get("timestamp") or 0.0),
+                    "title": str(event.get("title") or task.get("title") or "task"),
+                    "status": str(event.get("status") or task.get("status") or ""),
+                    "event_type": str(event.get("event_type") or "updated"),
+                    "summary": str(event.get("event_type") or "updated"),
+                    "task_id": task.get("task_id"),
+                    "payload": event.get("payload") or {},
+                    "task_event": event,
+                }
+            )
+
+        for approval in approvals:
+            history = approval.get("history")
+            history = history if isinstance(history, list) else []
+            for index, history_entry in enumerate(history):
+                if not isinstance(history_entry, dict):
+                    continue
+                state = str(history_entry.get("state") or approval.get("state") or "pending")
+                reason = str(history_entry.get("reason") or "").strip()
+                summary = f"{state}: {approval.get('tool_name') or approval.get('tool_pattern') or approval.get('request_id') or 'approval'}"
+                if reason:
+                    summary = f"{summary} — {reason}"
+                timeline_entries.append(
+                    {
+                        "timeline_id": f"approval-{approval.get('request_id')}-{index}",
+                        "kind": "approval",
+                        "timestamp": float(history_entry.get("ts") or approval.get("created_at") or 0.0),
+                        "title": str(approval.get("tool_name") or approval.get("tool_pattern") or "approval"),
+                        "status": state,
+                        "event_type": state,
+                        "summary": summary,
+                        "request_id": approval.get("request_id"),
+                        "source_request_id": approval.get("source_request_id"),
+                        "approval": approval,
+                        "history_entry": history_entry,
+                    }
+                )
+
+        for entry in audit_entries:
+            if not isinstance(entry, dict):
+                continue
+            metadata = entry.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            title = str(entry.get("event_type") or entry.get("action") or "audit")
+            summary_parts = [
+                str(entry.get("action") or "").strip(),
+                str(entry.get("resource") or "").strip(),
+                str(metadata.get("resolve_reason") or "").strip(),
+            ]
+            summary = " · ".join(part for part in summary_parts if part) or title
+            timeline_entries.append(
+                {
+                    "timeline_id": str(entry.get("entry_id") or ""),
+                    "kind": "audit",
+                    "timestamp": float(entry.get("timestamp") or 0.0),
+                    "title": title,
+                    "status": str(entry.get("result") or entry.get("event_type") or ""),
+                    "event_type": str(entry.get("event_type") or ""),
+                    "summary": summary,
+                    "audit_entry_id": entry.get("entry_id"),
+                    "audit_focus": {
+                        "entryId": entry.get("entry_id"),
+                        "requestId": metadata.get("request_id") or metadata.get("source_request_id") or entry.get("resource"),
+                        "taskId": metadata.get("task_id") or task.get("task_id"),
+                        "runId": metadata.get("run_id") or task.get("run_id"),
+                        "sessionId": entry.get("session_id") or metadata.get("target_session_id") or task.get("owner_session_id"),
+                        "toolName": metadata.get("tool_name") or metadata.get("tool_pattern"),
+                        "source": metadata.get("source"),
+                        "result": entry.get("result"),
+                    },
+                    "entry": entry,
+                }
+            )
+
+        timeline_entries.sort(key=self._task_timeline_sort_key, reverse=True)
+        offset = (resolved_page - 1) * resolved_page_size
+        page_entries = timeline_entries[offset:offset + resolved_page_size]
+        return {
+            "task": task,
+            "entries": page_entries,
+            "pagination": {
+                "page": resolved_page,
+                "page_size": resolved_page_size,
+                "total": len(timeline_entries),
+                "has_more": offset + len(page_entries) < len(timeline_entries),
+            },
+        }
+
     def _shared_api_key_principal(self) -> str:
         api_key = self.settings.gateway_api_key or ""
         digest = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
@@ -1644,10 +1843,27 @@ class GatewayServer:
 
         @self.app.get("/tasks/{task_id}")
         async def task_get_endpoint(task_id: str):
-            task = get_task_store().get(task_id)
+            task = self.task_store.get(task_id)
             if task is None:
                 raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
             return {"task": task}
+
+        @self.app.get("/tasks/{task_id}/timeline")
+        async def task_timeline_endpoint(
+            task_id: str,
+            page: int = 1,
+            page_size: Optional[int] = None,
+            limit: int = 50,
+        ):
+            task = self.task_store.get(task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            resolved_page_size = max(1, min(int(page_size or limit or 50), 200))
+            return self._build_task_timeline_payload(
+                task,
+                page=page,
+                page_size=resolved_page_size,
+            )
 
         @self.app.get("/audit")
         async def audit_list_endpoint(
@@ -2974,6 +3190,7 @@ class GatewayServer:
                     "resolved_kind": "tool_approval",
                     "tool_name": after.get("tool_name"),
                     "agent_name": after.get("agent_name"),
+                    "source_request_id": after.get("source_request_id"),
                     "state_before": before.get("state") if isinstance(before, dict) else None,
                     "state_after": after.get("state"),
                     "scope_before": before.get("scope") if isinstance(before, dict) else None,

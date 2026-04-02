@@ -281,6 +281,40 @@ class ToolPolicyEngine:
     ) -> None:
         self._notifier = notifier
 
+    @staticmethod
+    def _notification_payload(
+        approval: ApprovalRecord,
+        *,
+        event_type: str,
+    ) -> Dict[str, Any]:
+        payload = approval.to_dict()
+        payload["event_type"] = event_type
+        return payload
+
+    async def _emit_notification(
+        self,
+        approval: ApprovalRecord,
+        *,
+        event_type: str,
+    ) -> None:
+        if self._notifier is None:
+            return
+        await self._notifier(self._notification_payload(approval, event_type=event_type))
+
+    def _notify(
+        self,
+        approval: ApprovalRecord,
+        *,
+        event_type: str,
+    ) -> None:
+        if self._notifier is None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._emit_notification(approval, event_type=event_type))
+
     def list_policies(self) -> Dict[str, Any]:
         return {
             "default": {
@@ -421,6 +455,7 @@ class ToolPolicyEngine:
         waiter = self._approval_waiters.pop(request_id, None)
         if waiter and not waiter.done():
             waiter.set_result((approved, reason))
+        self._notify(approval, event_type="resolved")
         return approval
 
     def get_pending_approval(self, request_id: str) -> Optional[ApprovalRecord]:
@@ -578,6 +613,7 @@ class ToolPolicyEngine:
             waiter = self._approval_waiters.pop(approval.request_id, None)
             if waiter and not waiter.done():
                 waiter.set_result((False, "approval expired"))
+            self._notify(approval, event_type="expired")
         return expired_count
 
     def propagate_approvals_to_session(
@@ -606,8 +642,7 @@ class ToolPolicyEngine:
                 target_session_id=target_session_id,
             ):
                 continue
-            propagated.append(
-                self.create_approval_request(
+            created = self.create_approval_request(
                     request_id=f"apg_{uuid.uuid4().hex[:12]}",
                     tool_name=approval.tool_name,
                     agent_name=agent_name or approval.agent_name,
@@ -622,7 +657,8 @@ class ToolPolicyEngine:
                     state="propagated",
                     source_request_id=approval.request_id,
                 )
-            )
+            propagated.append(created)
+            self._notify(created, event_type="propagated")
         return [item.to_dict() for item in propagated]
 
     def _has_existing_propagation(
@@ -733,7 +769,7 @@ class ToolPolicyEngine:
         self._approval_waiters[request_id] = waiter
 
         try:
-            await self._notifier(approval.to_dict())
+            await self._emit_notification(approval, event_type="created")
         except Exception as exc:
             self._approvals.pop(request_id, None)
             self._approval_waiters.pop(request_id, None)
