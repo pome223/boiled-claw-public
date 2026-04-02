@@ -173,6 +173,24 @@ _DESKTOP_RUNTIME_KEYWORDS = {
     "abort gui",
 }
 
+_DESKTOP_PLAYBACK_KEYWORDS = {
+    "djay",
+    "spotify",
+    "apple music",
+    "itunes",
+    "music",
+    "song",
+    "track",
+    "playlist",
+    "曲",
+    "再生",
+    "音楽",
+    "プレイリスト",
+    "かけて",
+    "流して",
+    "play",
+}
+
 _FILE_KEYWORDS = {
     "ファイル",
     "readme",
@@ -374,7 +392,7 @@ def heuristic_decision(message: str) -> RoutingDecision:
             confidence=0.84,
         )
 
-    if has_desktop_control and (has_sequence or has_longform):
+    if _requires_desktop_control_loop(normalized):
         return RoutingDecision(
             target="control_loop",
             reason="multi-step or verification-heavy desktop automation request",
@@ -494,6 +512,13 @@ def decision_from_payload(
             confidence=0.94,
         )
 
+    if _requires_desktop_control_loop(fallback_message):
+        return RoutingDecision(
+            target="control_loop",
+            reason="desktop playback or multi-action app workflow requires control loop verification",
+            confidence=0.92,
+        )
+
     decision = coerce_decision(payload)
     if decision.target == "control_loop" and _is_browser_only_flow(fallback_message):
         return RoutingDecision(
@@ -532,6 +557,19 @@ def _requires_current_browser_control_loop(text: str) -> bool:
     has_desktop = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
 
     return has_spreadsheet or has_research or has_longform or ((has_browser or has_desktop) and has_sequence)
+
+
+def _requires_desktop_control_loop(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+
+    has_desktop_control = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS)
+    has_sequence = _contains_any(normalized, _SEQUENCE_KEYWORDS)
+    has_longform = _contains_any(normalized, _LONGFORM_KEYWORDS)
+    has_playback = _contains_any(normalized, _DESKTOP_PLAYBACK_KEYWORDS)
+
+    return has_desktop_control and (has_sequence or has_longform or has_playback)
 
 
 def _is_current_tab_web_flow(text: str) -> bool:

@@ -232,6 +232,21 @@ docker compose logs -f boiled-claw-gateway
 docker compose down
 ```
 
+To deploy the current local workspace into the running runtime, use:
+
+```bash
+./scripts/deploy_runtime.sh deploy
+```
+
+This starts the host / desktop bridge processes, then tries to rebuild the
+Gateway from the current workspace. If Docker rebuild is unavailable, it falls
+back to hot-syncing `src/` into the running `boiled-claw-gateway` container and
+restarts it. For source-only hot reload, use:
+
+```bash
+./scripts/deploy_runtime.sh sync
+```
+
 ### 3a. Optional: Start Redis-backed Session State
 
 ```bash

@@ -97,6 +97,29 @@ class TestHostBridgeTools:
         assert mcp.settings.transport_security.enable_dns_rebinding_protection is False
 
     @pytest.mark.asyncio
+    async def test_create_server_starts_current_tab_relay_on_sse_startup(self, monkeypatch):
+        from src.mcp_servers.host_bridge_server import create_server
+
+        class FakeBridge:
+            ws_url = "ws://127.0.0.1:8768"
+
+            def __init__(self):
+                self.started = False
+
+            async def ensure_started(self):
+                self.started = True
+
+        fake_bridge = FakeBridge()
+        monkeypatch.setattr(server_module, "current_tab_bridge_enabled", lambda: True)
+        monkeypatch.setattr(server_module, "get_current_tab_extension_bridge", lambda: fake_bridge)
+
+        mcp = create_server(host="127.0.0.1")
+        app = mcp.sse_app()
+        await app.router.startup()
+
+        assert fake_bridge.started is True
+
+    @pytest.mark.asyncio
     async def test_host_shell_run_success(self, mcp):
         result = await mcp.call_tool(
             "host.shell.run",

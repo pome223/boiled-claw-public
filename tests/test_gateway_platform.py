@@ -938,6 +938,60 @@ def test_websocket_auto_routes_desktop_query_to_desktop_operator(monkeypatch, tm
             assert done["text"] == "desktop answer"
 
 
+def test_websocket_forces_desktop_playback_request_to_control_loop(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_routing_run_async(*, user_id, session_id, new_message):
+        yield Event(
+            author="routing_agent",
+            content=types.Content(
+                role="model",
+                parts=[
+                    types.Part(
+                        text=(
+                            '{"target":"specialist","specialist":"desktop_operator",'
+                            '"handoff_mode":"direct","reason":"desktop control request",'
+                            '"confidence":0.91,'
+                            '"dynamic_agent":{"instruction":"","mcp_servers":[],"mode":"run"}}'
+                        )
+                    )
+                ],
+            ),
+        )
+
+    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+        assert goal == "Djayを開いて曲をかけて"
+        assert user_id == "alice"
+        return ExecutionResult(
+            request_id="req-ctl-djay",
+            session_id=session_id or "session-1",
+            user_id=user_id,
+            final_text="control loop desktop playback answer",
+            plan_id="plan-djay-1",
+            success=True,
+        )
+
+    monkeypatch.setattr(gateway.routing_runner, "run_async", _fake_routing_run_async)
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_run)
+
+    with TestClient(gateway.app) as client:
+        with client.websocket_connect("/ws/alice") as ws:
+            connected = ws.receive_json()
+            assert connected["event"] == "connected"
+
+            ws.send_json({"event": "chat.send", "text": "Djayを開いて曲をかけて"})
+
+            route_selected = _receive_foreground_event(ws)
+            done = _receive_foreground_event(ws)
+
+            assert route_selected["event"] == "system.event"
+            assert route_selected["source"] == "router"
+            assert route_selected["agent_name"] == "root_workflow"
+            assert "control loop" in route_selected["message"]
+            assert done["event"] == "chat.done"
+            assert done["text"] == "control loop desktop playback answer"
+
+
 def test_websocket_auto_routes_computer_use_query_to_computer_operator(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 

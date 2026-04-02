@@ -34,6 +34,13 @@ def test_heuristic_decision_routes_multistep_desktop_task_to_control_loop():
     assert decision.specialist is None
 
 
+def test_heuristic_decision_routes_desktop_playback_task_to_control_loop():
+    decision = heuristic_decision("Djayを開いて曲をかけて")
+
+    assert decision.target == "control_loop"
+    assert decision.specialist is None
+
+
 def test_heuristic_decision_routes_browser_spreadsheet_task_to_control_loop():
     decision = heuristic_decision(
         "ブラウザを開いて GTCの予想を調べてスプレッドシートにまとめて"
@@ -109,6 +116,23 @@ def test_decision_from_payload_routes_current_browser_research_to_current_tab_op
     assert decision.target == "specialist"
     assert decision.specialist == "current_tab_operator"
     assert decision.handoff_mode == "direct"
+
+
+def test_decision_from_payload_forces_control_loop_for_desktop_playback_request():
+    decision = decision_from_payload(
+        {
+            "target": "specialist",
+            "specialist": "desktop_operator",
+            "handoff_mode": "direct",
+            "reason": "desktop control request",
+            "confidence": 0.88,
+            "dynamic_agent": {},
+        },
+        fallback_message="Djayを開いて曲をかけて",
+    )
+
+    assert decision.target == "control_loop"
+    assert decision.specialist is None
 
 
 def test_decision_from_payload_routes_screen_aware_current_browser_request_to_computer_operator():

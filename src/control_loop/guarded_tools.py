@@ -9,6 +9,7 @@ Executor agent にアタッチし、approved plan の範囲外の実行を防ぐ
 
 from __future__ import annotations
 
+import json
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -103,6 +104,36 @@ _CURRENT_BROWSER_SEARCH_KEYWORDS = {
     "天気",
     "最新",
 }
+_PLAYBACK_TASK_KEYWORDS = {
+    "djay",
+    "spotify",
+    "apple music",
+    "itunes",
+    "music",
+    "song",
+    "track",
+    "playlist",
+    "playback",
+    "audio",
+    "media",
+    "再生",
+    "停止",
+    "止めて",
+    "一時停止",
+    "曲",
+    "楽曲",
+    "音楽",
+    "プレイリスト",
+    "かけて",
+    "流して",
+}
+_PLAYBACK_APP_NAME_HINTS = (
+    ("djay", "djay Pro"),
+    ("spotify", "Spotify"),
+    ("apple music", "Music"),
+    ("itunes", "Music"),
+    ("music", "Music"),
+)
 
 
 def _check_approval(tool_context: ToolContext, capability: str) -> None:
@@ -123,16 +154,9 @@ def _check_capability_in_plan(
     """
     plan:approved に capability が含まれているか確認する。
     """
-    import json
-
-    raw_plan = tool_context.state.get(StateKeys.PLAN_APPROVED)
-    if raw_plan is None:
+    plan = _approved_plan(tool_context)
+    if plan is None:
         raise PermissionError("No approved plan in session state.")
-
-    try:
-        plan = raw_plan if isinstance(raw_plan, dict) else json.loads(raw_plan)
-    except (json.JSONDecodeError, TypeError) as exc:
-        raise PermissionError("Approved plan is not valid JSON.") from exc
     required = {
         cap.get("name", "") for cap in plan.get("required_capabilities", [])
     }
@@ -161,6 +185,83 @@ def _is_current_browser_task(tool_context: ToolContext | None) -> bool:
         return False
     goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
     return isinstance(goal, str) and targets_user_browser(goal)
+
+
+def _approved_plan(tool_context: ToolContext | None) -> dict[str, Any] | None:
+    if tool_context is None:
+        return None
+    raw_plan = tool_context.state.get(StateKeys.PLAN_APPROVED)
+    if raw_plan is None:
+        return None
+    try:
+        return raw_plan if isinstance(raw_plan, dict) else json.loads(raw_plan)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise PermissionError("Approved plan is not valid JSON.") from exc
+
+
+def _plan_allows_capability(
+    tool_context: ToolContext | None,
+    capability_name: str,
+) -> bool:
+    plan = _approved_plan(tool_context)
+    if not isinstance(plan, dict):
+        return False
+    required = {
+        str(cap.get("name", "")).strip()
+        for cap in plan.get("required_capabilities", [])
+        if isinstance(cap, dict)
+    }
+    implied_by = _IMPLICIT_PLAN_CAPABILITIES.get(capability_name, set())
+    return capability_name in required or bool(required & implied_by)
+
+
+def _is_desktop_playback_task(tool_context: ToolContext | None) -> bool:
+    if tool_context is None:
+        return False
+    plan = _approved_plan(tool_context) or {}
+    chunks: list[str] = []
+    goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
+    if isinstance(goal, str):
+        chunks.append(goal)
+    for value in (
+        plan.get("goal"),
+        plan.get("plan_id"),
+    ):
+        if isinstance(value, str):
+            chunks.append(value)
+    for step in plan.get("steps", []):
+        if not isinstance(step, dict):
+            continue
+        for key in ("title", "description"):
+            value = step.get(key)
+            if isinstance(value, str):
+                chunks.append(value)
+        expected = step.get("expected_outputs", [])
+        if isinstance(expected, list):
+            chunks.extend(str(item) for item in expected)
+    haystack = " ".join(chunks).lower()
+    return any(keyword in haystack for keyword in _PLAYBACK_TASK_KEYWORDS)
+
+
+def _playback_app_name_hint(
+    tool_context: ToolContext | None,
+    app_name: str | None,
+) -> str | None:
+    if isinstance(app_name, str) and app_name.strip():
+        return app_name.strip()
+    plan = _approved_plan(tool_context) or {}
+    chunks: list[str] = []
+    goal = tool_context.state.get(StateKeys.TASK_GOAL, "") if tool_context is not None else ""
+    if isinstance(goal, str):
+        chunks.append(goal)
+    for value in (plan.get("goal"), plan.get("plan_id")):
+        if isinstance(value, str):
+            chunks.append(value)
+    haystack = " ".join(chunks).lower()
+    for marker, resolved_name in _PLAYBACK_APP_NAME_HINTS:
+        if marker in haystack:
+            return resolved_name
+    return None
 
 
 def _normalize_hotkeys(keys: list[str]) -> tuple[str, ...]:
@@ -723,7 +824,19 @@ async def guarded_desktop_control_launch_app(
                 "desktop.control.launch_app requires human_approved status. "
                 f"Current status: '{status}'"
             )
-        _check_capability_in_plan(tool_context, "desktop.control.launch_app")
+        try:
+            _check_capability_in_plan(tool_context, "desktop.control.launch_app")
+        except PermissionError:
+            if (
+                _is_desktop_playback_task(tool_context)
+                and _plan_allows_capability(tool_context, "desktop.control.focus_window")
+            ):
+                from src.tools.desktop import desktop_control_focus_window
+
+                candidate_app = _playback_app_name_hint(tool_context, app_name)
+                if candidate_app:
+                    return await desktop_control_focus_window(app_name=candidate_app)
+            raise
 
     from src.tools.desktop import desktop_control_launch_app
     return await desktop_control_launch_app(

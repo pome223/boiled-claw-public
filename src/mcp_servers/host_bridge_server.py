@@ -15,6 +15,7 @@ v1 tools:
 
 import argparse
 import asyncio
+import logging
 from pathlib import Path
 import subprocess
 from typing import Optional
@@ -67,6 +68,8 @@ from src.security.shell_intent import inspect_shell_command
 from src.security.network import enforce_loopback_bind, is_loopback_host
 from src.tools import browser as browser_tools
 from src.tools import control_ui_chat as control_ui_chat_tools
+
+logger = logging.getLogger(__name__)
 
 
 # Best-effort guard only. The actual security boundary is policy.is_command_allowed()
@@ -456,6 +459,22 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
     mcp.settings.host = host
     mcp.settings.port = port
     mcp.settings.transport_security = transport_security
+
+    if host != "stdio" and current_tab_bridge_enabled():
+        original_sse_app = mcp.sse_app
+
+        def sse_app_with_runtime_startup(mount_path: str | None = None):
+            app = original_sse_app(mount_path)
+
+            async def _startup_current_tab_relay() -> None:
+                bridge = get_current_tab_extension_bridge()
+                await bridge.ensure_started()
+                logger.info("Current Tab relay listening on %s", bridge.ws_url)
+
+            app.router.on_startup.append(_startup_current_tab_relay)
+            return app
+
+        mcp.sse_app = sse_app_with_runtime_startup
 
     transport_hint = "sse" if host != "stdio" else "stdio"
 
