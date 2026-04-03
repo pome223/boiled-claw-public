@@ -24,12 +24,44 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Tuple
 
 Action = Literal["allow", "deny", "approve"]
-ApprovalState = Literal["pending", "approved", "denied", "propagated", "expired"]
+ApprovalState = Literal["pending", "expiring", "approved", "denied", "propagated", "expired"]
 ApprovalScope = Literal["single", "session"]
 
 _DEFAULT_APPROVAL_TTL_SECONDS = 300.0
+_EXPIRING_THRESHOLD = 0.8  # notify "expiring" at 80% of TTL
+
+# Canonical reason strings for approval timeout/expiry — used for structured
+# detection in downstream layers (e.g. task error classification) so they are
+# not coupled to English prose.
+APPROVAL_EXPIRED_REASON = "approval expired"
+APPROVAL_TIMED_OUT_REASON = "approval timed out"
+APPROVAL_EXPIRY_REASONS = frozenset({APPROVAL_EXPIRED_REASON, APPROVAL_TIMED_OUT_REASON})
 _PATH_ARG_KEYS = ("path", "cwd", "source_path", "dest_path", "target_path")
 _PATH_LIST_KEYS = ("paths",)
+
+_DESKTOP_FAMILY_PREFIXES = {
+    "desktop_ax_": "desktop_ax_*",
+    "desktop_view_": "desktop_view_*",
+    "desktop_wait_": "desktop_wait_*",
+    "desktop_control_": "desktop_control_*",
+}
+_DESKTOP_FAMILY_LABELS = {
+    "desktop_ax_*": "Desktop AX Family",
+    "desktop_view_*": "Desktop View Family",
+    "desktop_wait_*": "Desktop Wait Family",
+    "desktop_control_*": "Desktop Control Family",
+}
+
+
+def _desktop_family_pattern(tool_name: str) -> str:
+    for prefix, pattern in _DESKTOP_FAMILY_PREFIXES.items():
+        if tool_name.startswith(prefix):
+            return pattern
+    return tool_name
+
+
+def _desktop_family_label(pattern: str) -> str:
+    return _DESKTOP_FAMILY_LABELS.get(pattern, pattern)
 
 
 @dataclass
@@ -89,7 +121,19 @@ class ApprovalRecord:
 
     @property
     def resolved(self) -> bool:
-        return self.state != "pending"
+        return self.state not in {"pending", "expiring"}
+
+    def is_expiring(self, now: Optional[float] = None) -> bool:
+        if self.expires_at is None or self.created_at is None:
+            return False
+        t = now or time.time()
+        if t >= self.expires_at:
+            return False  # already expired
+        ttl = self.expires_at - self.created_at
+        if ttl <= 0:
+            return False
+        elapsed_ratio = (t - self.created_at) / ttl
+        return elapsed_ratio >= _EXPIRING_THRESHOLD
 
     def is_expired(self, now: Optional[float] = None) -> bool:
         if self.expires_at is None:
@@ -315,6 +359,53 @@ class ToolPolicyEngine:
             return
         loop.create_task(self._emit_notification(approval, event_type=event_type))
 
+    def _notify_with_extra(
+        self,
+        approval: ApprovalRecord,
+        *,
+        event_type: str,
+        extra: Dict[str, Any],
+    ) -> None:
+        if self._notifier is None:
+            return
+        payload = self._notification_payload(approval, event_type=event_type)
+        payload.update(extra)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        loop.create_task(self._notifier(payload))
+
+    @staticmethod
+    def _escalation_suggestions(approval: ApprovalRecord) -> List[Dict[str, str]]:
+        """Build scope-upgrade suggestions for an expiring approval."""
+        suggestions: List[Dict[str, str]] = []
+        tool_name = approval.tool_name or ""
+        if approval.scope == "single":
+            suggestions.append({
+                "strategy": "session_exact",
+                "label": "Upgrade to Session Scope",
+                "description": (
+                    f"Re-approve '{tool_name}' with session scope so future "
+                    "requests in this session are auto-approved."
+                ),
+                "tool_pattern": tool_name,
+                "scope": "session",
+            })
+        if tool_name.startswith("desktop_"):
+            family = _desktop_family_pattern(tool_name)
+            if family and family != tool_name:
+                suggestions.append({
+                    "strategy": "family_session",
+                    "label": f"Upgrade to {_desktop_family_label(family)}",
+                    "description": (
+                        f"Re-approve with pattern '{family}' at session scope."
+                    ),
+                    "tool_pattern": family,
+                    "scope": "session",
+                })
+        return suggestions
+
     def list_policies(self) -> Dict[str, Any]:
         return {
             "default": {
@@ -422,7 +513,7 @@ class ToolPolicyEngine:
         history_metadata: Optional[dict[str, Any]] = None,
     ) -> Optional[ApprovalRecord]:
         approval = self._approvals.get(request_id)
-        if approval is None or approval.state != "pending":
+        if approval is None or approval.state not in {"pending", "expiring"}:
             return None
 
         approval.scope = _normalize_scope(scope, approval.scope)
@@ -549,7 +640,10 @@ class ToolPolicyEngine:
         if session_id:
             approvals = [item for item in approvals if item.session_id == session_id]
         if state and state.lower() != "all":
-            approvals = [item for item in approvals if item.state == state]
+            if state == "pending":
+                approvals = [item for item in approvals if item.state in {"pending", "expiring"}]
+            else:
+                approvals = [item for item in approvals if item.state == state]
         if not include_expired:
             approvals = [item for item in approvals if item.state != "expired"]
         query_text = (q or "").strip().lower()
@@ -581,12 +675,36 @@ class ToolPolicyEngine:
         }
 
     def cleanup_expired(self, max_age: float = _DEFAULT_APPROVAL_TTL_SECONDS) -> int:
-        """Expire old approval requests and grants without deleting history."""
+        """Expire old approval requests and grants without deleting history.
+
+        Also transitions pending approvals to "expiring" at the 80% TTL mark
+        and attaches escalation suggestions so the UI can offer scope upgrades.
+        """
         now = time.time()
         expired_count = 0
         for approval in self._approvals.values():
+            # --- expiring transition (pending → expiring) ---
+            if approval.state == "pending" and approval.is_expiring(now):
+                approval.state = "expiring"
+                suggestions = self._escalation_suggestions(approval)
+                approval.add_history(
+                    "expiring",
+                    reason="approaching TTL limit",
+                    metadata={"escalation_suggestions": suggestions},
+                    ts=now,
+                )
+                self._notify_with_extra(
+                    approval,
+                    event_type="expiring",
+                    extra={"escalation_suggestions": suggestions},
+                )
+                continue
+
+            # --- expired transition ---
             expired = False
-            if approval.state == "pending" and now - approval.created_at > max_age:
+            if approval.state in {"pending", "expiring"} and (
+                now - approval.created_at > max_age or approval.is_expired(now)
+            ):
                 expired = True
             elif approval.state in {"approved", "propagated"} and approval.is_expired(now):
                 expired = True
@@ -595,7 +713,7 @@ class ToolPolicyEngine:
 
             approval.state = "expired"
             approval.approved = False
-            approval.resolve_reason = approval.resolve_reason or "approval expired"
+            approval.resolve_reason = approval.resolve_reason or APPROVAL_EXPIRED_REASON
             approval.resolved_at = approval.resolved_at or now
             approval.add_history(
                 "expired",
@@ -612,7 +730,7 @@ class ToolPolicyEngine:
 
             waiter = self._approval_waiters.pop(approval.request_id, None)
             if waiter and not waiter.done():
-                waiter.set_result((False, "approval expired"))
+                waiter.set_result((False, APPROVAL_EXPIRED_REASON))
             self._notify(approval, event_type="expired")
         return expired_count
 
@@ -779,7 +897,7 @@ class ToolPolicyEngine:
             approved, resolve_reason = await asyncio.wait_for(waiter, timeout=timeout)
         except asyncio.TimeoutError:
             self.cleanup_expired(max_age=timeout)
-            return False, "approval timed out", request_id
+            return False, APPROVAL_TIMED_OUT_REASON, request_id
         except asyncio.CancelledError:
             self._approval_waiters.pop(request_id, None)
             raise

@@ -429,6 +429,46 @@ body {
   border-color: rgba(255, 111, 127, 0.38);
 }
 
+.bubble.approval.approval-expiring {
+  border-color: rgba(255, 200, 60, 0.55);
+  animation: approval-pulse 2s ease-in-out infinite;
+}
+
+@keyframes approval-pulse {
+  0%, 100% { border-color: rgba(255, 200, 60, 0.55); }
+  50% { border-color: rgba(255, 160, 30, 0.85); }
+}
+
+.approval-countdown {
+  font-size: 0.78em;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.approval-countdown.warning {
+  color: #e0a030;
+}
+
+.approval-countdown.urgent {
+  color: #ff6f7f;
+  font-weight: 600;
+}
+
+.approval-countdown.expired {
+  color: #ff6f7f;
+}
+
+.approval-escalation {
+  display: grid;
+  gap: 6px;
+}
+
+.approval-escalation-label {
+  font-size: 0.82em;
+  color: #e0a030;
+}
+
 .approval-card {
   display: grid;
   gap: 10px;

@@ -25,7 +25,6 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from google.adk.events.event import Event
 from google.adk.runners import Runner
-from google.adk.sessions import InMemorySessionService
 from google.genai import types
 from pathlib import Path
 
@@ -36,18 +35,29 @@ from src.control_loop.root_workflow import ControlLoop, ExecutionResult
 from src.gateway.routing_agent import routing_agent
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
 from src.security.audit import get_audit_logger, AuditEventType
-from src.security.tool_policy import get_tool_policy_engine
+from src.security.tool_policy import APPROVAL_EXPIRY_REASONS, get_tool_policy_engine
 from src.tools.finance import is_direct_stock_price_query, stock_price
 from src.tools.web_search import web_search
 from src.skills.runtime import ensure_skills_loaded, get_skills_report
-from src.tools.skills import skill_list as tool_skill_list, skill_execute as tool_skill_execute
+from src.tools.skills import (
+    capability_invoke as tool_capability_invoke,
+    capability_list as tool_capability_list,
+    resource_list as tool_resource_list,
+    resource_read as tool_resource_read,
+    skill_execute as tool_skill_execute,
+    skill_list as tool_skill_list,
+)
 from src.tools.memory import memory_search, memory_stats, memory_delete
 from src.tools.subagents import get_subagent_manager, set_subagent_notifier
 from src.gateway.protocol import (
+    EVENT_SCHEMAS,
+    HTTP_ROUTE_SCHEMAS,
     PROTOCOL_VERSION,
+    RUNTIME_SUBSTRATE_SCHEMA,
     ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
     ev_health_tick, ev_cron_update, ev_tools_approval_request,
     ev_control_approval_request,
+    ev_tools_approval_update, ev_task_update, ev_audit_append,
     ev_tool_start, ev_tool_result,
     normalize_client_event, validate_client_event,
 )
@@ -58,8 +68,11 @@ from src.gateway.routing import (
     targets_user_browser,
 )
 from src.runtime.tool_events import set_tool_event_notifier
+from src.runtime.session_service import create_session_service, describe_session_backend
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
+from src.runtime.task_store import get_task_store
+from src.tools.tasks import create_task_record, update_task_record
 
 _HEARTBEAT_INTERVAL = 30  # seconds
 _AGENT_TIMEOUT = 120       # seconds
@@ -245,9 +258,10 @@ class GatewayServer:
 
     def __init__(self):
         self.settings = get_settings()
+        self.session_backend = describe_session_backend(self.settings)
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.manager = ConnectionManager()
-        self.session_service = InMemorySessionService()
+        self.session_service = create_session_service(self.settings)
         self.memory_service = get_promoted_memory_service()
         self.subagent_manager = get_subagent_manager()
         self.runner = Runner(
@@ -256,7 +270,7 @@ class GatewayServer:
             session_service=self.session_service,
             memory_service=self.memory_service,
         )
-        self.routing_session_service = InMemorySessionService()
+        self.routing_session_service = create_session_service(self.settings)
         self.routing_runner = Runner(
             agent=routing_agent,
             app_name="boiled-claw-router",
@@ -277,6 +291,7 @@ class GatewayServer:
             memory_service=self.memory_service,
         )
         self.audit_logger = get_audit_logger()
+        self.task_store = get_task_store()
         self.transcript = get_transcript_store()
         self.tool_policy = get_tool_policy_engine()
         self._heartbeat_task: Optional[asyncio.Task] = None
@@ -338,6 +353,7 @@ class GatewayServer:
                 status=payload.get("status", ""),
                 message=payload.get("message", ""),
                 run_id=payload.get("run_id"),
+                task_id=payload.get("task_id"),
                 agent_name=payload.get("agent_name"),
             )
 
@@ -366,18 +382,74 @@ class GatewayServer:
             session_id = payload.get("session_id", "")
             if not session_id:
                 return
+            approval_payload = {key: value for key, value in payload.items() if key != "event_type"}
+            approval_event = str(payload.get("event_type") or "updated")
+            await self.manager.send_or_queue_json(
+                session_id,
+                ev_tools_approval_update(
+                    approval_payload,
+                    approval_event=approval_event,
+                ),
+            )
+            if approval_payload.get("state") != "pending":
+                return
             await self.manager.send_or_queue_json(
                 session_id,
                 ev_tools_approval_request(
-                    request_id=payload.get("request_id", ""),
-                    tool_name=payload.get("tool_name", ""),
-                    agent_name=payload.get("agent_name", ""),
-                    args=payload.get("args") or {},
-                    reason=payload.get("reason", ""),
+                    request_id=approval_payload.get("request_id", ""),
+                    tool_name=approval_payload.get("tool_name", ""),
+                    agent_name=approval_payload.get("agent_name", ""),
+                    args=approval_payload.get("args") or {},
+                    reason=approval_payload.get("reason", ""),
+                    state=approval_payload.get("state", "pending"),
+                    scope=approval_payload.get("scope", "single"),
+                    tool_pattern=approval_payload.get("tool_pattern"),
+                    path_scope=approval_payload.get("path_scope"),
+                    expires_at=approval_payload.get("expires_at"),
+                    propagate_to_subagents=bool(approval_payload.get("propagate_to_subagents", False)),
+                    source_request_id=approval_payload.get("source_request_id"),
                 ),
             )
 
         self._approval_notifier_fn = _approval_notifier
+
+        async def _task_notifier(payload: Dict[str, Any]) -> None:
+            task = payload.get("task")
+            task = task if isinstance(task, dict) else {}
+            owner_session_id = str(task.get("owner_session_id") or "")
+            if not owner_session_id:
+                return
+            await self.manager.send_or_queue_json(
+                owner_session_id,
+                ev_task_update(task, payload.get("event") or {}),
+            )
+
+        self._task_notifier_fn = _task_notifier
+
+        def _iter_audit_push_sessions(payload: Dict[str, Any]) -> list[str]:
+            metadata = payload.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            primary_session_id = str(payload.get("session_id") or "").strip()
+            target_session_id = str(metadata.get("target_session_id") or "").strip()
+
+            session_ids = {primary_session_id} if primary_session_id else set()
+            # Only approval resolution events are allowed to fan out to an
+            # explicitly-targeted session. Other audit types stay session-local.
+            if (
+                target_session_id
+                and target_session_id != primary_session_id
+                and str(payload.get("event_type") or "") == AuditEventType.TOOL_APPROVAL.value
+            ):
+                session_ids.add(target_session_id)
+            return sorted(session_ids)
+
+        async def _audit_notifier(payload: Dict[str, Any]) -> None:
+            for session_id in _iter_audit_push_sessions(payload):
+                if session_id not in self.manager.active_connections:
+                    continue
+                await self.manager.send_json(session_id, ev_audit_append(payload))
+
+        self._audit_notifier_fn = _audit_notifier
         self._setup_routes()
 
     @asynccontextmanager
@@ -393,6 +465,8 @@ class GatewayServer:
         set_subagent_notifier(self._subagent_notifier_fn)
         set_tool_event_notifier(self._send_tool_event)
         self.tool_policy.set_notifier(self._approval_notifier_fn)
+        self.task_store.set_notifier(self._task_notifier_fn)
+        self.audit_logger.set_notifier(self._audit_notifier_fn)
         if self._heartbeat_task is None or self._heartbeat_task.done():
             self._heartbeat_task = asyncio.create_task(
                 self._heartbeat_loop(), name="heartbeat"
@@ -407,6 +481,8 @@ class GatewayServer:
         set_subagent_notifier(None)
         set_tool_event_notifier(None)
         self.tool_policy.set_notifier(None)
+        self.task_store.set_notifier(None)
+        self.audit_logger.set_notifier(None)
         if self._heartbeat_task and not self._heartbeat_task.done():
             self._heartbeat_task.cancel()
         self._heartbeat_task = None
@@ -1098,6 +1174,7 @@ class GatewayServer:
             session_id=session_id,
             goal=goal,
             constraints=[],
+            source="cron",
         )
         await self._deliver_background_result(
             session_id=session_id,
@@ -1107,7 +1184,11 @@ class GatewayServer:
             agent_name="control_loop",
             message=result.final_text,
             ok=result.success,
-            metadata={"type": "control_loop", "plan_id": result.plan_id},
+            metadata={
+                "type": "control_loop",
+                "plan_id": result.plan_id,
+                "task_id": result.metadata.get("task_id"),
+            },
         )
 
     async def _deliver_background_result(
@@ -1141,6 +1222,497 @@ class GatewayServer:
             run_id=run_id,
             agent_name=agent_name,
         )
+
+    def _related_approvals_for_task(
+        self,
+        *,
+        approval_ids: list[str],
+        session_id: Optional[str],
+    ) -> list[dict[str, Any]]:
+        if not approval_ids:
+            return []
+        lookup = {item for item in approval_ids if item}
+        approvals = self.tool_policy.list_approvals(
+            session_id=session_id,
+            state="all",
+            include_expired=True,
+            limit=max(100, len(lookup) * 4),
+        )
+        related: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for approval in approvals:
+            request_id = str(approval.get("request_id") or "")
+            source_request_id = str(approval.get("source_request_id") or "")
+            if request_id not in lookup and source_request_id not in lookup:
+                continue
+            if request_id in seen:
+                continue
+            seen.add(request_id)
+            related.append(approval)
+        return related
+
+    @staticmethod
+    def _approval_is_desktop_tool(tool_name: str) -> bool:
+        return str(tool_name or "").startswith("desktop_")
+
+    @staticmethod
+    def _approval_family_pattern(tool_name: str) -> str:
+        normalized = str(tool_name or "").strip()
+        if normalized.startswith("desktop_ax_"):
+            return "desktop_ax_*"
+        if normalized.startswith("desktop_view_"):
+            return "desktop_view_*"
+        if normalized.startswith("desktop_wait_"):
+            return "desktop_wait_*"
+        if normalized.startswith("desktop_control_"):
+            return "desktop_control_*"
+        return normalized
+
+    @staticmethod
+    def _approval_family_label(tool_name: str) -> str:
+        pattern = GatewayServer._approval_family_pattern(tool_name)
+        labels = {
+            "desktop_ax_*": "Desktop AX Family",
+            "desktop_view_*": "Desktop View Family",
+            "desktop_wait_*": "Desktop Wait Family",
+            "desktop_control_*": "Desktop Control Family",
+        }
+        return labels.get(pattern, str(tool_name or "Tool"))
+
+    def _session_pending_approvals(self, session_id: str) -> list[dict[str, Any]]:
+        if not session_id:
+            return []
+        result = self.tool_policy.query_approvals(
+            session_id=session_id,
+            state="pending",
+            include_expired=False,
+            page=1,
+            page_size=200,
+        )
+        approvals = result.get("approvals")
+        return approvals if isinstance(approvals, list) else []
+
+    def _approval_resolve_suggestions(self, approval: dict[str, Any]) -> list[dict[str, Any]]:
+        if str(approval.get("state") or "") not in {"pending", "expiring"}:
+            return []
+        session_id = str(approval.get("session_id") or "")
+        tool_name = str(approval.get("tool_name") or approval.get("tool_pattern") or "")
+        if not session_id or not tool_name:
+            return []
+        pending = self._session_pending_approvals(session_id)
+        family_pattern = self._approval_family_pattern(tool_name)
+        desktop_pending = [
+            item for item in pending if self._approval_is_desktop_tool(item.get("tool_name") or "")
+        ]
+        suggestions = [
+            {
+                "strategy": "session_exact",
+                "label": "Approve This Tool For Session",
+                "description": "Reuse this exact tool approval for later requests in the same session.",
+                "affected_count": max(
+                    1,
+                    sum(
+                        1
+                        for item in pending
+                        if str(item.get("tool_name") or "") == tool_name
+                    ),
+                ),
+                "tool_pattern": tool_name,
+                "scope": "session",
+            }
+        ]
+        if family_pattern and family_pattern != tool_name:
+            suggestions.append(
+                {
+                    "strategy": "family_session",
+                    "label": f"Approve {self._approval_family_label(tool_name)}",
+                    "description": "Reuse a family-scoped approval for similar desktop capabilities in this session.",
+                    "affected_count": max(
+                        1,
+                        sum(
+                            1
+                            for item in pending
+                            if self._approval_family_pattern(item.get("tool_name") or "") == family_pattern
+                        ),
+                    ),
+                    "tool_pattern": family_pattern,
+                    "scope": "session",
+                }
+            )
+        if self._approval_is_desktop_tool(tool_name) and desktop_pending:
+            suggestions.append(
+                {
+                    "strategy": "desktop_session_pack",
+                    "label": "Approve Desktop Pack For Session",
+                    "description": "Resolve all currently-pending desktop approvals in this session using family-scoped rules.",
+                    "affected_count": len(desktop_pending),
+                    "tool_pattern": "desktop::*",
+                    "scope": "session",
+                }
+            )
+        return suggestions
+
+    def _approval_bundle_specs(
+        self,
+        approval: dict[str, Any],
+        *,
+        strategy: str,
+        path_scope: Optional[str] = None,
+        propagate_to_subagents: Optional[bool] = None,
+    ) -> list[dict[str, Any]]:
+        request_id = str(approval.get("request_id") or "")
+        session_id = str(approval.get("session_id") or "")
+        tool_name = str(approval.get("tool_name") or approval.get("tool_pattern") or "")
+        if not request_id or not session_id or not tool_name:
+            return []
+
+        pending = self._session_pending_approvals(session_id)
+        family_pattern = self._approval_family_pattern(tool_name)
+
+        def build_item(item: dict[str, Any], tool_pattern_value: str) -> dict[str, Any]:
+            return {
+                "request_id": str(item.get("request_id") or ""),
+                "scope": "session",
+                "tool_pattern": tool_pattern_value,
+                "path_scope": path_scope if path_scope is not None else item.get("path_scope"),
+                "propagate_to_subagents": (
+                    bool(propagate_to_subagents)
+                    if propagate_to_subagents is not None
+                    else bool(item.get("propagate_to_subagents"))
+                ),
+            }
+
+        if strategy == "single":
+            return [{"request_id": request_id, "scope": approval.get("scope") or "single"}]
+        if strategy == "session_exact":
+            return [
+                build_item(item, tool_name)
+                for item in pending
+                if str(item.get("tool_name") or "") == tool_name
+            ] or [build_item(approval, tool_name)]
+        if strategy == "family_session":
+            return [
+                build_item(item, self._approval_family_pattern(item.get("tool_name") or ""))
+                for item in pending
+                if self._approval_family_pattern(item.get("tool_name") or "") == family_pattern
+            ] or [build_item(approval, family_pattern)]
+        if strategy == "desktop_session_pack":
+            if not self._approval_is_desktop_tool(tool_name):
+                raise ValueError("desktop_session_pack is only available for desktop approvals")
+            return [
+                build_item(item, self._approval_family_pattern(item.get("tool_name") or ""))
+                for item in pending
+                if self._approval_is_desktop_tool(item.get("tool_name") or "")
+            ] or [build_item(approval, family_pattern)]
+        raise ValueError(f"unsupported approval bundle strategy: {strategy}")
+
+    def _control_loop_seed_payload(
+        self,
+        *,
+        goal: str,
+        constraints: list[str],
+        source: str,
+        request_id: Optional[str],
+        replay_of_task_id: Optional[str] = None,
+        compare_to_task_id: Optional[str] = None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        artifacts: dict[str, Any] = {
+            "goal": goal,
+            "constraints": constraints,
+            "resume_context": {
+                "goal": goal,
+                "constraints": constraints,
+            },
+        }
+        metadata: dict[str, Any] = {
+            "source": source,
+            "request_id": request_id,
+        }
+        if replay_of_task_id:
+            artifacts["replay"] = {
+                "source_task_id": replay_of_task_id,
+                "compare_to_task_id": compare_to_task_id or replay_of_task_id,
+            }
+            artifacts["resume_context"]["replay_of_task_id"] = replay_of_task_id
+            metadata["replay_of_task_id"] = replay_of_task_id
+            metadata["compare_to_task_id"] = compare_to_task_id or replay_of_task_id
+        return artifacts, metadata
+
+    def _create_control_loop_task_record(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        goal: str,
+        constraints: list[str],
+        request_id: Optional[str],
+        source: str,
+        parent_task_id: Optional[str] = None,
+        replay_of_task_id: Optional[str] = None,
+        compare_to_task_id: Optional[str] = None,
+    ) -> dict[str, Any]:
+        artifacts, metadata = self._control_loop_seed_payload(
+            goal=goal,
+            constraints=constraints,
+            source=source,
+            request_id=request_id,
+            replay_of_task_id=replay_of_task_id,
+            compare_to_task_id=compare_to_task_id,
+        )
+        return create_task_record(
+            kind="control_loop",
+            title=goal,
+            status="running",
+            owner_session_id=session_id,
+            owner_user_id=user_id,
+            parent_task_id=parent_task_id,
+            artifacts=artifacts,
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _task_result_snapshot(task: dict[str, Any]) -> dict[str, Any]:
+        artifacts = task.get("artifacts")
+        artifacts = artifacts if isinstance(artifacts, dict) else {}
+        result = artifacts.get("result")
+        result = result if isinstance(result, dict) else {}
+        verification_report = result.get("verification_report")
+        verification_report = verification_report if isinstance(verification_report, dict) else {}
+        verification_inputs = result.get("verification_inputs")
+        verification_inputs = verification_inputs if isinstance(verification_inputs, dict) else {}
+        artifact_refs = result.get("artifact_refs")
+        if not isinstance(artifact_refs, list):
+            artifact_refs = verification_inputs.get("artifact_refs")
+        artifact_refs = [
+            str(ref) for ref in (artifact_refs or []) if str(ref).strip()
+        ]
+        screenshot_refs = [ref for ref in artifact_refs if ref.lower().endswith(".png")]
+        criteria = verification_report.get("criterion_results")
+        criteria = criteria if isinstance(criteria, list) else []
+        failed_criteria = [
+            str(item.get("name") or "")
+            for item in criteria
+            if isinstance(item, dict) and not item.get("passed")
+        ]
+        passed_count = sum(
+            1 for item in criteria
+            if isinstance(item, dict) and item.get("passed")
+        )
+        return {
+            "success": bool(result.get("success")),
+            "final_text": str(result.get("final_text") or ""),
+            "verification_report_id": result.get("verification_report_id"),
+            "verification_status": (
+                result.get("verification_status")
+                or verification_report.get("status")
+                or ""
+            ),
+            "overall_score": float(verification_report.get("overall_score") or 0.0),
+            "repair_count": int(result.get("repair_count") or 0),
+            "artifact_refs": artifact_refs,
+            "screenshot_refs": screenshot_refs,
+            "failed_criteria": failed_criteria,
+            "passed_criteria_count": passed_count,
+            "criteria_count": len(criteria),
+            "verification_report": verification_report,
+            "verification_inputs": verification_inputs,
+        }
+
+    @staticmethod
+    def _timeline_kind_counts(entries: list[dict[str, Any]]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for entry in entries:
+            kind = str(entry.get("kind") or "unknown")
+            counts[kind] = counts.get(kind, 0) + 1
+        return counts
+
+    def _build_task_compare_payload(
+        self,
+        left_task: dict[str, Any],
+        right_task: dict[str, Any],
+    ) -> dict[str, Any]:
+        left_timeline = self._build_task_timeline_payload(left_task, page=1, page_size=40)
+        right_timeline = self._build_task_timeline_payload(right_task, page=1, page_size=40)
+        left_result = self._task_result_snapshot(left_task)
+        right_result = self._task_result_snapshot(right_task)
+        summary: list[str] = []
+        if left_task.get("status") != right_task.get("status"):
+            summary.append(
+                f"task status changed: {left_task.get('status') or '-'} -> {right_task.get('status') or '-'}"
+            )
+        if left_result["verification_status"] != right_result["verification_status"]:
+            summary.append(
+                f"verification changed: {left_result['verification_status'] or '-'} -> {right_result['verification_status'] or '-'}"
+            )
+        if left_result["overall_score"] != right_result["overall_score"]:
+            summary.append(
+                f"overall score changed: {left_result['overall_score']:.2f} -> {right_result['overall_score']:.2f}"
+            )
+        if left_result["repair_count"] != right_result["repair_count"]:
+            summary.append(
+                f"repair count changed: {left_result['repair_count']} -> {right_result['repair_count']}"
+            )
+        if len(left_result["screenshot_refs"]) != len(right_result["screenshot_refs"]):
+            summary.append(
+                f"screenshot refs changed: {len(left_result['screenshot_refs'])} -> {len(right_result['screenshot_refs'])}"
+            )
+        if left_result["failed_criteria"] != right_result["failed_criteria"]:
+            summary.append(
+                "failed criteria changed: "
+                f"{', '.join(left_result['failed_criteria']) or '-'} -> "
+                f"{', '.join(right_result['failed_criteria']) or '-'}"
+            )
+        if not summary:
+            summary.append("No high-level diff detected beyond timeline ordering.")
+
+        return {
+            "left_task": left_task,
+            "right_task": right_task,
+            "left": {
+                "result": left_result,
+                "timeline": {
+                    "total": left_timeline["pagination"]["total"],
+                    "kind_counts": self._timeline_kind_counts(left_timeline["entries"]),
+                    "entries": left_timeline["entries"][:8],
+                },
+            },
+            "right": {
+                "result": right_result,
+                "timeline": {
+                    "total": right_timeline["pagination"]["total"],
+                    "kind_counts": self._timeline_kind_counts(right_timeline["entries"]),
+                    "entries": right_timeline["entries"][:8],
+                },
+            },
+            "summary": summary,
+        }
+
+    @staticmethod
+    def _task_timeline_sort_key(entry: dict[str, Any]) -> tuple[float, str]:
+        return (float(entry.get("timestamp") or 0.0), str(entry.get("timeline_id") or ""))
+
+    def _build_task_timeline_payload(
+        self,
+        task: dict[str, Any],
+        *,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> dict[str, Any]:
+        resolved_page = max(1, int(page or 1))
+        resolved_page_size = max(1, min(int(page_size or 50), 200))
+        history_limit = min(max(resolved_page * resolved_page_size * 4, 100), 500)
+        task_history = self.task_store.query_timeline(
+            task["task_id"],
+            page=1,
+            page_size=history_limit,
+        )
+        approvals = self._related_approvals_for_task(
+            approval_ids=list(task.get("approval_dependencies") or []),
+            session_id=task.get("owner_session_id"),
+        )
+        audit_entries = self.audit_logger.query_related(
+            session_id=task.get("owner_session_id"),
+            task_id=task.get("task_id"),
+            run_id=task.get("run_id"),
+            request_ids=list(task.get("approval_dependencies") or []),
+            limit=history_limit,
+        )
+
+        timeline_entries: list[dict[str, Any]] = []
+        for event in task_history.get("events") or []:
+            if not isinstance(event, dict):
+                continue
+            timeline_entries.append(
+                {
+                    "timeline_id": str(event.get("entry_id") or ""),
+                    "kind": "task_event",
+                    "timestamp": float(event.get("timestamp") or 0.0),
+                    "title": str(event.get("title") or task.get("title") or "task"),
+                    "status": str(event.get("status") or task.get("status") or ""),
+                    "event_type": str(event.get("event_type") or "updated"),
+                    "summary": str(event.get("event_type") or "updated"),
+                    "task_id": task.get("task_id"),
+                    "payload": event.get("payload") or {},
+                    "task_event": event,
+                }
+            )
+
+        for approval in approvals:
+            history = approval.get("history")
+            history = history if isinstance(history, list) else []
+            for index, history_entry in enumerate(history):
+                if not isinstance(history_entry, dict):
+                    continue
+                state = str(history_entry.get("state") or approval.get("state") or "pending")
+                reason = str(history_entry.get("reason") or "").strip()
+                summary = f"{state}: {approval.get('tool_name') or approval.get('tool_pattern') or approval.get('request_id') or 'approval'}"
+                if reason:
+                    summary = f"{summary} — {reason}"
+                timeline_entries.append(
+                    {
+                        "timeline_id": f"approval-{approval.get('request_id')}-{index}",
+                        "kind": "approval",
+                        "timestamp": float(history_entry.get("ts") or approval.get("created_at") or 0.0),
+                        "title": str(approval.get("tool_name") or approval.get("tool_pattern") or "approval"),
+                        "status": state,
+                        "event_type": state,
+                        "summary": summary,
+                        "request_id": approval.get("request_id"),
+                        "source_request_id": approval.get("source_request_id"),
+                        "approval": approval,
+                        "history_entry": history_entry,
+                    }
+                )
+
+        for entry in audit_entries:
+            if not isinstance(entry, dict):
+                continue
+            metadata = entry.get("metadata")
+            metadata = metadata if isinstance(metadata, dict) else {}
+            title = str(entry.get("event_type") or entry.get("action") or "audit")
+            summary_parts = [
+                str(entry.get("action") or "").strip(),
+                str(entry.get("resource") or "").strip(),
+                str(metadata.get("resolve_reason") or "").strip(),
+            ]
+            summary = " · ".join(part for part in summary_parts if part) or title
+            timeline_entries.append(
+                {
+                    "timeline_id": str(entry.get("entry_id") or ""),
+                    "kind": "audit",
+                    "timestamp": float(entry.get("timestamp") or 0.0),
+                    "title": title,
+                    "status": str(entry.get("result") or entry.get("event_type") or ""),
+                    "event_type": str(entry.get("event_type") or ""),
+                    "summary": summary,
+                    "audit_entry_id": entry.get("entry_id"),
+                    "audit_focus": {
+                        "entryId": entry.get("entry_id"),
+                        "requestId": metadata.get("request_id") or metadata.get("source_request_id") or entry.get("resource"),
+                        "taskId": metadata.get("task_id") or task.get("task_id"),
+                        "runId": metadata.get("run_id") or task.get("run_id"),
+                        "sessionId": entry.get("session_id") or metadata.get("target_session_id") or task.get("owner_session_id"),
+                        "toolName": metadata.get("tool_name") or metadata.get("tool_pattern"),
+                        "source": metadata.get("source"),
+                        "result": entry.get("result"),
+                    },
+                    "entry": entry,
+                }
+            )
+
+        timeline_entries.sort(key=self._task_timeline_sort_key, reverse=True)
+        offset = (resolved_page - 1) * resolved_page_size
+        page_entries = timeline_entries[offset:offset + resolved_page_size]
+        return {
+            "task": task,
+            "entries": page_entries,
+            "pagination": {
+                "page": resolved_page,
+                "page_size": resolved_page_size,
+                "total": len(timeline_entries),
+                "has_more": offset + len(page_entries) < len(timeline_entries),
+            },
+        }
 
     def _shared_api_key_principal(self) -> str:
         api_key = self.settings.gateway_api_key or ""
@@ -1214,6 +1786,8 @@ class GatewayServer:
                 "version": "0.3.0",
                 "protocol_version": PROTOCOL_VERSION,
                 "status": "running",
+                "session_backend": self.session_backend["backend"],
+                "session_namespace": self.session_backend["namespace"],
                 "active_sessions": len(self.manager.active_connections),
                 "skills_loaded": get_skills_report().get("loaded", False),
                 "skills_count": get_skills_report().get("count", 0),
@@ -1221,15 +1795,20 @@ class GatewayServer:
 
         @self.app.get("/health")
         async def health():
-            return {"status": "healthy"}
+            return {
+                "status": "healthy",
+                "session_backend": self.session_backend["backend"],
+                "session_namespace": self.session_backend["namespace"],
+            }
 
         @self.app.get("/protocol")
         async def protocol_info():
-            from src.gateway.protocol import EVENT_SCHEMAS
             return {
                 "version": PROTOCOL_VERSION,
                 "events": list(EVENT_SCHEMAS.keys()),
                 "schemas": EVENT_SCHEMAS,
+                "http_surfaces": HTTP_ROUTE_SCHEMAS,
+                "runtime_substrate": RUNTIME_SUBSTRATE_SCHEMA,
             }
 
         # --- skills ---
@@ -1249,6 +1828,42 @@ class GatewayServer:
             result = await tool_skill_execute(skill_name, json.dumps(params, ensure_ascii=False))
             if not result.get("ok"):
                 raise HTTPException(status_code=400, detail=result.get("message", "Skill execution failed"))
+            return result
+
+        # --- runtime substrate ---
+
+        @self.app.get("/runtime/resources")
+        async def runtime_resources():
+            return await tool_resource_list()
+
+        @self.app.get("/runtime/resources/{resource_id:path}")
+        async def runtime_resource(resource_id: str, refresh: bool = Query(default=False)):
+            result = await tool_resource_read(resource_id, refresh=refresh)
+            if not result.get("ok"):
+                raise HTTPException(status_code=404, detail=result.get("message", "Resource not found"))
+            return result
+
+        @self.app.get("/runtime/capabilities")
+        async def runtime_capabilities(refresh: bool = Query(default=False)):
+            return await tool_capability_list(refresh=refresh)
+
+        @self.app.post("/runtime/capabilities/invoke")
+        async def runtime_capability_invoke(payload: Dict[str, Any] | None = Body(default=None)):
+            if not payload or not isinstance(payload.get("name"), str) or not payload.get("name"):
+                raise HTTPException(status_code=400, detail="name is required")
+            params = payload.get("params") or {}
+            if not isinstance(params, dict):
+                raise HTTPException(status_code=400, detail="params must be an object")
+            result = await tool_capability_invoke(
+                payload["name"],
+                json.dumps(params, ensure_ascii=False),
+            )
+            if not result.get("success") and str(result.get("error", "")).startswith("Unknown capability:"):
+                raise HTTPException(status_code=400, detail=result["error"])
+            if not result.get("success") and "requires tool_context-backed approval flow" in str(
+                result.get("error", "")
+            ):
+                raise HTTPException(status_code=403, detail=result["error"])
             return result
 
         # --- sessions ---
@@ -1409,6 +2024,7 @@ class GatewayServer:
                 session_id=session.id,
                 goal=goal,
                 constraints=constraints,
+                source="http",
             )
             self.transcript.append(
                 session.id,
@@ -1420,6 +2036,7 @@ class GatewayServer:
                     "success": result.success,
                     "needs_human": bool(result.metadata.get("needs_human")),
                     "plan_id": result.plan_id,
+                    "task_id": result.metadata.get("task_id"),
                 },
             )
             if result.metadata.get("needs_human"):
@@ -1436,6 +2053,7 @@ class GatewayServer:
                 "plan_id": result.plan_id,
                 "verification_report_id": result.verification_report_id,
                 "repair_count": result.repair_count,
+                "task_id": result.metadata.get("task_id"),
                 "needs_human": bool(result.metadata.get("needs_human")),
                 "approval_request": result.metadata.get("approval_request"),
                 "promoted_memory_ids": result.promoted_memory_ids,
@@ -1492,6 +2110,7 @@ class GatewayServer:
                     constraints=_normalize_constraints(
                         (pending.get("plan") or {}).get("constraints")
                     ),
+                    source="http",
                 )
                 if resumed_result.metadata.get("needs_human"):
                     await self._emit_control_approval_request(
@@ -1546,6 +2165,158 @@ class GatewayServer:
         @self.app.get("/subagents/{session_id}")
         async def subagents_list_endpoint(session_id: str):
             return await self.subagent_manager.list_runs(requester_session_id=session_id)
+
+        @self.app.get("/tasks")
+        async def task_list_endpoint(
+            session_id: Optional[str] = None,
+            kind: Optional[str] = None,
+            status: Optional[str] = None,
+            parent_task_id: Optional[str] = None,
+            q: Optional[str] = None,
+            page: int = 1,
+            page_size: Optional[int] = None,
+            limit: int = 20,
+        ):
+            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
+            return get_task_store().query(
+                owner_session_id=session_id,
+                kind=kind,
+                status=status,
+                parent_task_id=parent_task_id,
+                q=q,
+                page=page,
+                page_size=resolved_page_size,
+            )
+
+        @self.app.get("/tasks/{task_id}")
+        async def task_get_endpoint(task_id: str):
+            task = self.task_store.get(task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            return {"task": task}
+
+        @self.app.get("/tasks/{task_id}/timeline")
+        async def task_timeline_endpoint(
+            task_id: str,
+            page: int = 1,
+            page_size: Optional[int] = None,
+            limit: int = 50,
+        ):
+            task = self.task_store.get(task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            resolved_page_size = max(1, min(int(page_size or limit or 50), 200))
+            return self._build_task_timeline_payload(
+                task,
+                page=page,
+                page_size=resolved_page_size,
+            )
+
+        @self.app.post("/tasks/{task_id}/replay")
+        async def task_replay_endpoint(request: Request, task_id: str):
+            task = self.task_store.get(task_id)
+            if task is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            if str(task.get("kind") or "") != "control_loop":
+                raise HTTPException(status_code=400, detail="task replay currently supports control_loop tasks only")
+            artifacts = task.get("artifacts")
+            artifacts = artifacts if isinstance(artifacts, dict) else {}
+            resume_context = artifacts.get("resume_context")
+            resume_context = resume_context if isinstance(resume_context, dict) else {}
+            goal = str(resume_context.get("goal") or task.get("title") or "").strip()
+            constraints = _normalize_constraints(resume_context.get("constraints"))
+            session_id = str(task.get("owner_session_id") or "").strip()
+            user_id = str(task.get("owner_user_id") or "").strip()
+            if not goal or not session_id or not user_id:
+                raise HTTPException(status_code=400, detail="task is missing replay context")
+            effective_user_id = self._resolve_http_user_id(
+                request,
+                user_id,
+                default_user_id=user_id,
+            )
+            if effective_user_id != user_id:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+
+            replay_task = self._create_control_loop_task_record(
+                user_id=user_id,
+                session_id=session_id,
+                goal=goal,
+                constraints=constraints,
+                request_id=None,
+                source="http",
+                parent_task_id=task_id,
+                replay_of_task_id=task_id,
+                compare_to_task_id=task_id,
+            )
+            replay_task_id = str(replay_task["task_id"])
+            await self._start_control_loop_run(
+                session_id=session_id,
+                user_id=user_id,
+                goal=goal,
+                constraints=constraints,
+                task_id=replay_task_id,
+                parent_task_id=task_id,
+                replay_of_task_id=task_id,
+                compare_to_task_id=task_id,
+            )
+            return {
+                "accepted": True,
+                "task": replay_task,
+                "replay_of_task_id": task_id,
+                "compare_to_task_id": task_id,
+            }
+
+        @self.app.get("/tasks/{task_id}/compare")
+        async def task_compare_endpoint(task_id: str, other_task_id: Optional[str] = None):
+            left_task = self.task_store.get(task_id)
+            if left_task is None:
+                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+
+            candidate_task_id = str(other_task_id or "").strip()
+            if not candidate_task_id:
+                candidate_task_id = str(left_task.get("parent_task_id") or "").strip()
+            if not candidate_task_id:
+                children = self.task_store.query(
+                    owner_session_id=left_task.get("owner_session_id"),
+                    parent_task_id=left_task.get("task_id"),
+                    page=1,
+                    page_size=1,
+                )
+                child_tasks = children.get("tasks")
+                child_tasks = child_tasks if isinstance(child_tasks, list) else []
+                if child_tasks:
+                    candidate_task_id = str(child_tasks[0].get("task_id") or "").strip()
+            if not candidate_task_id:
+                raise HTTPException(status_code=400, detail="comparison task could not be determined")
+
+            right_task = self.task_store.get(candidate_task_id)
+            if right_task is None:
+                raise HTTPException(status_code=404, detail=f"comparison task not found: {candidate_task_id}")
+            return self._build_task_compare_payload(left_task, right_task)
+
+        @self.app.get("/audit")
+        async def audit_list_endpoint(
+            actor_user_id: Optional[str] = None,
+            session_id: Optional[str] = None,
+            tool: Optional[str] = None,
+            source: Optional[str] = None,
+            result: Optional[str] = None,
+            q: Optional[str] = None,
+            page: int = 1,
+            page_size: Optional[int] = None,
+            limit: int = 20,
+        ):
+            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
+            return self.audit_logger.query_logs(
+                actor_user_id=actor_user_id,
+                session_id=session_id,
+                tool=tool,
+                source=source,
+                result=result,
+                q=q,
+                page=page,
+                page_size=resolved_page_size,
+            )
 
         @self.app.post("/subagents/{run_id}/steer")
         async def subagents_steer_endpoint(run_id: str, payload: Dict[str, Any] | None = Body(default=None)):
@@ -1612,8 +2383,137 @@ class GatewayServer:
             return self.tool_policy.list_policies()
 
         @self.app.get("/tools/approvals")
-        async def tool_approvals_list(session_id: Optional[str] = None):
-            return {"approvals": self.tool_policy.list_pending_approvals(session_id)}
+        async def tool_approvals_list(
+            session_id: Optional[str] = None,
+            state: Optional[str] = None,
+            include_expired: bool = False,
+            q: Optional[str] = None,
+            page: int = 1,
+            page_size: Optional[int] = None,
+            limit: Optional[int] = None,
+        ):
+            selected_state = state or "pending"
+            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
+            return self.tool_policy.query_approvals(
+                session_id=session_id,
+                state=selected_state,
+                include_expired=include_expired,
+                q=q,
+                page=page,
+                page_size=resolved_page_size,
+            )
+
+        @self.app.get("/tools/approvals/{request_id}")
+        async def tool_approval_get(request_id: str):
+            approval = self.tool_policy.get_approval(request_id)
+            if approval is None:
+                raise HTTPException(status_code=404, detail=f"approval not found: {request_id}")
+            return {
+                "approval": approval,
+                "resolve_suggestions": self._approval_resolve_suggestions(approval),
+            }
+
+        @self.app.post("/tools/approvals/{request_id}/resolve")
+        async def tool_approval_resolve(
+            request: Request,
+            request_id: str,
+            payload: Dict[str, Any] | None = Body(default=None),
+        ):
+            body = payload or {}
+            if "approved" not in body:
+                raise HTTPException(status_code=400, detail="approved is required")
+            approved = bool(body.get("approved"))
+            reason = str(body.get("reason") or "").strip()
+            session_id = str(body.get("session_id") or "")
+            user_id = self._resolve_http_user_id(
+                request,
+                str(body.get("user_id") or "api_user"),
+                default_user_id="api_user",
+            )
+            result = await self._resolve_tool_approval_request(
+                request_id=request_id,
+                approved=approved,
+                reason=reason,
+                session_id=session_id,
+                user_id=user_id,
+                source="http",
+                scope=body.get("scope"),
+                tool_pattern=body.get("tool_pattern"),
+                path_scope=body.get("path_scope"),
+                expires_at=body.get("expires_at"),
+                propagate_to_subagents=body.get("propagate_to_subagents"),
+            )
+            if not result.get("resolved"):
+                raise HTTPException(status_code=404, detail=result.get("error", "approval not found"))
+            return result
+
+        @self.app.post("/tools/approvals/{request_id}/resolve_bundle")
+        async def tool_approval_resolve_bundle(
+            request: Request,
+            request_id: str,
+            payload: Dict[str, Any] | None = Body(default=None),
+        ):
+            body = payload or {}
+            if "approved" not in body:
+                raise HTTPException(status_code=400, detail="approved is required")
+            approval = self.tool_policy.get_approval(request_id)
+            if approval is None:
+                raise HTTPException(status_code=404, detail=f"approval not found: {request_id}")
+            strategy = str(body.get("strategy") or "single").strip() or "single"
+            approved = bool(body.get("approved"))
+            reason = str(body.get("reason") or "").strip()
+            session_id = str(body.get("session_id") or approval.get("session_id") or "")
+            user_id = self._resolve_http_user_id(
+                request,
+                str(body.get("user_id") or "api_user"),
+                default_user_id="api_user",
+            )
+            try:
+                specs = self._approval_bundle_specs(
+                    approval,
+                    strategy=strategy,
+                    path_scope=body.get("path_scope") if isinstance(body.get("path_scope"), str) else None,
+                    propagate_to_subagents=(
+                        bool(body.get("propagate_to_subagents"))
+                        if body.get("propagate_to_subagents") is not None
+                        else None
+                    ),
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            if not specs:
+                raise HTTPException(status_code=404, detail="no approvals matched the requested bundle")
+
+            default_reason = (
+                f"{'Approved' if approved else 'Denied'} in Web UI ({strategy})"
+            )
+            results = []
+            for spec in specs:
+                resolved = await self._resolve_tool_approval_request(
+                    request_id=spec["request_id"],
+                    approved=approved,
+                    reason=reason or default_reason,
+                    session_id=session_id,
+                    user_id=user_id,
+                    source="http",
+                    scope=spec.get("scope"),
+                    tool_pattern=spec.get("tool_pattern"),
+                    path_scope=spec.get("path_scope"),
+                    propagate_to_subagents=spec.get("propagate_to_subagents"),
+                )
+                if resolved.get("resolved"):
+                    results.append(resolved)
+            if not results:
+                raise HTTPException(status_code=404, detail="approvals not found")
+            return {
+                "resolved": True,
+                "strategy": strategy,
+                "approved": approved,
+                "resolved_count": len(results),
+                "request_ids": [item.get("request_id") for item in results if item.get("request_id")],
+                "results": results,
+            }
 
         # --- static / chat UI ---
 
@@ -1789,63 +2689,18 @@ class GatewayServer:
                         )
 
                     elif event_name == "tools.approval":
-                        request_id = data.get("request_id", "")
-                        approved = bool(data.get("approved", False))
-                        reason = data.get("reason", "")
-                        result = self.tool_policy.resolve_approval(
-                            request_id, approved, reason,
-                        )
-                        control_loop_resolved = False
-                        pending_control_request = None
-                        if result is None:
-                            pending_control_request = (
-                                await self.control_loop.get_pending_approval(
-                                    user_id=user_id,
-                                    session_id=session_id,
-                                )
-                            )
-                            control_loop_resolved = (
-                                await self.control_loop.resolve_human_approval(
-                                    user_id=user_id,
-                                    session_id=session_id,
-                                    approved=approved,
-                                    request_id=request_id,
-                                )
-                            )
-                            if (
-                                approved
-                                and control_loop_resolved
-                                and pending_control_request
-                            ):
-                                resume_goal = (
-                                    await self.control_loop.get_task_goal(
-                                        user_id=user_id,
-                                        session_id=session_id,
-                                    )
-                                    or pending_control_request.get("goal", "")
-                                )
-                                await self._start_control_loop_run(
-                                    session_id=session_id,
-                                    user_id=user_id,
-                                    goal=resume_goal,
-                                    constraints=_normalize_constraints(
-                                        (pending_control_request.get("plan") or {}).get(
-                                            "constraints"
-                                        )
-                                    ),
-                                )
-                        target_session_id = result.session_id if result else session_id
-                        status = (
-                            "resolved"
-                            if result or control_loop_resolved
-                            else "not_found"
-                        )
-                        await self._emit_session_event(
-                            target_session_id,
-                            source="tools.approval",
-                            status=status,
-                            message=f"Approval {request_id}: {'approved' if approved else 'denied'}",
+                        await self._resolve_tool_approval_request(
+                            request_id=data.get("request_id", ""),
+                            approved=bool(data.get("approved", False)),
+                            reason=str(data.get("reason") or ""),
+                            session_id=session_id,
                             user_id=user_id,
+                            source="websocket",
+                            scope=data.get("scope"),
+                            tool_pattern=data.get("tool_pattern"),
+                            path_scope=data.get("path_scope"),
+                            expires_at=data.get("expires_at"),
+                            propagate_to_subagents=data.get("propagate_to_subagents"),
                         )
 
             except WebSocketDisconnect:
@@ -1902,6 +2757,10 @@ class GatewayServer:
         goal: str,
         constraints: list[str],
         request_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        replay_of_task_id: Optional[str] = None,
+        compare_to_task_id: Optional[str] = None,
     ) -> None:
         await self.manager.abort(session_id)
         await self._desktop_clear_stop(session_id=session_id, user_id=user_id)
@@ -1912,6 +2771,10 @@ class GatewayServer:
                 goal,
                 constraints,
                 request_id,
+                task_id,
+                parent_task_id,
+                replay_of_task_id,
+                compare_to_task_id,
             ),
             name=f"control:{session_id}",
         )
@@ -2234,38 +3097,24 @@ class GatewayServer:
         goal: str,
         constraints: list[str],
         request_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        replay_of_task_id: Optional[str] = None,
+        compare_to_task_id: Optional[str] = None,
     ) -> None:
         try:
-            current_browser_error = await self._current_browser_runtime_error(goal)
-            if current_browser_error:
-                self.transcript.append(
-                    session_id,
-                    "assistant",
-                    current_browser_error,
-                    user_id=user_id,
-                    request_id=request_id,
-                    metadata={
-                        "type": "control_loop",
-                        "success": False,
-                        "error": "desktop_bridge_unavailable",
-                    },
-                )
-                await self.manager.send_json(
-                    session_id,
-                    ev_chat_done(current_browser_error, request_id, aborted=False),
-                )
-                return
-
-            effective_constraints = self._merge_control_constraints(
+            result = await self._run_control_loop_http(
+                user_id=user_id,
+                session_id=session_id,
                 goal=goal,
                 constraints=constraints,
+                request_id=request_id,
+                source="websocket",
                 preserve_control_ui_tab=True,
-            )
-            result = await self.control_loop.run(
-                goal=goal,
-                user_id=user_id,
-                constraints=effective_constraints,
-                session_id=session_id,
+                task_id=task_id,
+                parent_task_id=parent_task_id,
+                replay_of_task_id=replay_of_task_id,
+                compare_to_task_id=compare_to_task_id,
             )
             self.transcript.append(
                 session_id,
@@ -2278,6 +3127,7 @@ class GatewayServer:
                     "success": result.success,
                     "needs_human": bool(result.metadata.get("needs_human")),
                     "plan_id": result.plan_id,
+                    "task_id": result.metadata.get("task_id"),
                 },
             )
             if result.metadata.get("needs_human"):
@@ -2407,6 +3257,7 @@ class GatewayServer:
                 session_id=session_id,
                 goal=message,
                 constraints=[],
+                source="http",
             )
             if result.metadata.get("needs_human"):
                 await self._emit_control_approval_request(
@@ -2417,6 +3268,7 @@ class GatewayServer:
                 "type": "control_loop",
                 "message": result.final_text,
                 "ok": result.success,
+                "task_id": result.metadata.get("task_id"),
             }
 
         if decision.target == "dynamic_agent":
@@ -2607,6 +3459,134 @@ class GatewayServer:
             )
             return {"type": "error", "message": f"Error: {exc}", "ok": False}
 
+    async def _run_control_loop_with_task(
+        self,
+        *,
+        user_id: str,
+        session_id: str,
+        goal: str,
+        constraints: list[str],
+        request_id: Optional[str],
+        source: str,
+        preserve_control_ui_tab: bool,
+        task_id: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        replay_of_task_id: Optional[str] = None,
+        compare_to_task_id: Optional[str] = None,
+    ) -> tuple[ExecutionResult, str]:
+        effective_constraints = self._merge_control_constraints(
+            goal=goal,
+            constraints=constraints,
+            preserve_control_ui_tab=preserve_control_ui_tab,
+        )
+        artifacts, metadata = self._control_loop_seed_payload(
+            goal=goal,
+            constraints=effective_constraints,
+            source=source,
+            request_id=request_id,
+            replay_of_task_id=replay_of_task_id,
+            compare_to_task_id=compare_to_task_id,
+        )
+        if task_id:
+            update_task_record(
+                task_id,
+                status="running",
+                artifacts=artifacts,
+                metadata=metadata,
+                error=None,
+            )
+        else:
+            task = self._create_control_loop_task_record(
+                user_id=user_id,
+                session_id=session_id,
+                goal=goal,
+                constraints=effective_constraints,
+                request_id=request_id,
+                source=source,
+                parent_task_id=parent_task_id,
+                replay_of_task_id=replay_of_task_id,
+                compare_to_task_id=compare_to_task_id,
+            )
+            task_id = str(task["task_id"])
+
+        current_browser_error = await self._current_browser_runtime_error(goal)
+        if current_browser_error:
+            update_task_record(
+                task_id,
+                status="failed",
+                artifacts={
+                    "result": {
+                        "success": False,
+                        "error": "desktop_bridge_unavailable",
+                        "final_text": current_browser_error,
+                    }
+                },
+                error="desktop_bridge_unavailable",
+            )
+            result = ExecutionResult(
+                request_id=f"http_{uuid.uuid4().hex[:12]}",
+                session_id=session_id,
+                user_id=user_id,
+                final_text=current_browser_error,
+                success=False,
+                metadata={"error": "desktop_bridge_unavailable", "task_id": task_id},
+            )
+            return result, task_id
+
+        result = await self.control_loop.run(
+            goal=goal,
+            user_id=user_id,
+            constraints=effective_constraints,
+            session_id=session_id,
+        )
+        result.metadata["task_id"] = task_id
+        needs_human = bool(result.metadata.get("needs_human"))
+        approval_expired = (
+            not result.success
+            and not needs_human
+            and any(
+                reason in (result.final_text or "")
+                for reason in APPROVAL_EXPIRY_REASONS
+            )
+        )
+        error_text = None
+        if not result.success and not needs_human:
+            error_text = "approval_expired" if approval_expired else (result.final_text or "control loop failed")
+        update_task_record(
+            task_id,
+            status="pending" if needs_human else ("completed" if result.success else "failed"),
+            artifacts={
+                "result": {
+                    "success": result.success,
+                    "final_text": result.final_text,
+                    "plan_id": result.plan_id,
+                    "verification_report_id": result.verification_report_id,
+                    "verification_status": result.metadata.get("verification_status"),
+                    "verification_report": result.metadata.get("verification_report"),
+                    "verification_inputs": result.metadata.get("verification_inputs"),
+                    "artifact_refs": result.metadata.get("artifact_refs"),
+                    "repair_count": result.repair_count,
+                    "promoted_memory_ids": result.promoted_memory_ids,
+                    "approval_request": result.metadata.get("approval_request"),
+                    **({"approval_expired": True} if approval_expired else {}),
+                },
+                "resume_context": {
+                    "goal": goal,
+                    "constraints": effective_constraints,
+                    "plan_id": result.plan_id,
+                    "approval_request": result.metadata.get("approval_request"),
+                },
+            },
+            metadata={
+                "source": source,
+                "request_id": request_id,
+                "needs_human": needs_human,
+                **({"approval_expired": True} if approval_expired else {}),
+            },
+            error=error_text,
+        )
+        return result, task_id
+
     async def _run_control_loop_http(
         self,
         *,
@@ -2614,28 +3594,28 @@ class GatewayServer:
         session_id: str,
         goal: str,
         constraints: list[str],
+        request_id: Optional[str] = None,
+        source: str = "http",
+        preserve_control_ui_tab: bool = False,
+        task_id: Optional[str] = None,
+        parent_task_id: Optional[str] = None,
+        replay_of_task_id: Optional[str] = None,
+        compare_to_task_id: Optional[str] = None,
     ):
-        current_browser_error = await self._current_browser_runtime_error(goal)
-        if current_browser_error:
-            return ExecutionResult(
-                request_id=f"http_{uuid.uuid4().hex[:12]}",
-                session_id=session_id,
-                user_id=user_id,
-                final_text=current_browser_error,
-                success=False,
-                metadata={"error": "desktop_bridge_unavailable"},
-            )
-        effective_constraints = self._merge_control_constraints(
+        result, _task_id = await self._run_control_loop_with_task(
+            user_id=user_id,
+            session_id=session_id,
             goal=goal,
             constraints=constraints,
-            preserve_control_ui_tab=False,
+            request_id=request_id,
+            source=source,
+            preserve_control_ui_tab=preserve_control_ui_tab,
+            task_id=task_id,
+            parent_task_id=parent_task_id,
+            replay_of_task_id=replay_of_task_id,
+            compare_to_task_id=compare_to_task_id,
         )
-        return await self.control_loop.run(
-            goal=goal,
-            user_id=user_id,
-            constraints=effective_constraints,
-            session_id=session_id,
-        )
+        return result
 
     async def _emit_control_approval_request(
         self,
@@ -2658,6 +3638,148 @@ class GatewayServer:
                 reason=approval_request.get("reason", ""),
             ),
         )
+
+    async def _resolve_tool_approval_request(
+        self,
+        *,
+        request_id: str,
+        approved: bool,
+        reason: str,
+        session_id: str,
+        user_id: str,
+        source: str = "unknown",
+        scope: Any = None,
+        tool_pattern: Any = None,
+        path_scope: Any = None,
+        expires_at: Any = None,
+        propagate_to_subagents: Any = None,
+    ) -> dict[str, Any]:
+        before = self.tool_policy.get_approval(request_id)
+        requested_scope = scope if isinstance(scope, str) else None
+        requested_tool_pattern = tool_pattern if isinstance(tool_pattern, str) else None
+        requested_path_scope = path_scope if isinstance(path_scope, str) else None
+        requested_propagate = (
+            bool(propagate_to_subagents)
+            if propagate_to_subagents is not None
+            else None
+        )
+        result = self.tool_policy.resolve_approval(
+            request_id,
+            approved,
+            reason,
+            scope=requested_scope,
+            tool_pattern=requested_tool_pattern,
+            path_scope=requested_path_scope,
+            expires_at=expires_at if isinstance(expires_at, (int, float)) else None,
+            propagate_to_subagents=requested_propagate,
+            history_metadata={
+                "actor_user_id": user_id,
+                "source": source,
+                "scope_before": before.get("scope") if isinstance(before, dict) else None,
+                "tool_pattern_before": before.get("tool_pattern") if isinstance(before, dict) else None,
+                "path_scope_before": before.get("path_scope") if isinstance(before, dict) else None,
+                "propagate_to_subagents_before": (
+                    before.get("propagate_to_subagents") if isinstance(before, dict) else None
+                ),
+            },
+        )
+        control_loop_resolved = False
+        pending_control_request = None
+        if result is None:
+            pending_control_request = await self.control_loop.get_pending_approval(
+                user_id=user_id,
+                session_id=session_id,
+            )
+            control_loop_resolved = await self.control_loop.resolve_human_approval(
+                user_id=user_id,
+                session_id=session_id,
+                approved=approved,
+                request_id=request_id,
+            )
+            if approved and control_loop_resolved and pending_control_request:
+                resume_goal = (
+                    await self.control_loop.get_task_goal(
+                        user_id=user_id,
+                        session_id=session_id,
+                    )
+                    or pending_control_request.get("goal", "")
+                )
+                await self._start_control_loop_run(
+                    session_id=session_id,
+                    user_id=user_id,
+                    goal=resume_goal,
+                    constraints=_normalize_constraints(
+                        (pending_control_request.get("plan") or {}).get("constraints")
+                    ),
+                )
+
+        target_session_id = result.session_id if result else session_id
+        status = "resolved" if result or control_loop_resolved else "not_found"
+        await self._emit_session_event(
+            target_session_id,
+            source="tools.approval",
+            status=status,
+            message=f"Approval {request_id}: {'approved' if approved else 'denied'}",
+            user_id=user_id,
+        )
+        response: dict[str, Any] = {
+            "resolved": bool(result or control_loop_resolved),
+            "request_id": request_id,
+            "approved": approved,
+            "status": status,
+            "session_id": target_session_id,
+        }
+        audit_metadata: dict[str, Any] = {
+            "request_id": request_id,
+            "approved": approved,
+            "source": source,
+            "actor_user_id": user_id,
+            "target_session_id": target_session_id,
+        }
+        if result is not None:
+            response["approval"] = result.to_dict()
+            after = result.to_dict()
+            audit_metadata.update(
+                {
+                    "resolved_kind": "tool_approval",
+                    "tool_name": after.get("tool_name"),
+                    "agent_name": after.get("agent_name"),
+                    "source_request_id": after.get("source_request_id"),
+                    "state_before": before.get("state") if isinstance(before, dict) else None,
+                    "state_after": after.get("state"),
+                    "scope_before": before.get("scope") if isinstance(before, dict) else None,
+                    "scope_after": after.get("scope"),
+                    "tool_pattern_before": before.get("tool_pattern") if isinstance(before, dict) else None,
+                    "tool_pattern_after": after.get("tool_pattern"),
+                    "path_scope_before": before.get("path_scope") if isinstance(before, dict) else None,
+                    "path_scope_after": after.get("path_scope"),
+                    "propagate_to_subagents_before": (
+                        before.get("propagate_to_subagents") if isinstance(before, dict) else None
+                    ),
+                    "propagate_to_subagents_after": after.get("propagate_to_subagents"),
+                    "resolve_reason": reason,
+                }
+            )
+        elif control_loop_resolved:
+            response["control_loop"] = {"request_id": request_id, "approved": approved}
+            audit_metadata.update(
+                {
+                    "resolved_kind": "control_loop",
+                    "resolve_reason": reason,
+                }
+            )
+        else:
+            response["error"] = f"approval not found: {request_id}"
+        self.audit_logger.log(
+            event_type=AuditEventType.TOOL_APPROVAL,
+            user_id=user_id or None,
+            session_id=target_session_id or None,
+            action="resolve",
+            resource=request_id,
+            result=status,
+            metadata=audit_metadata,
+        )
+        return response
 
     async def _desktop_emergency_stop(
         self,
@@ -2820,6 +3942,7 @@ class GatewayServer:
         message: str,
         user_id: Optional[str] = None,
         run_id: Optional[str] = None,
+        task_id: Optional[str] = None,
         agent_name: Optional[str] = None,
     ) -> None:
         event = ev_system_event(
@@ -2827,6 +3950,7 @@ class GatewayServer:
             status=status,
             message=message,
             run_id=run_id,
+            task_id=task_id,
             agent_name=agent_name,
         )
         session = self.transcript.get_session(session_id)
@@ -2845,6 +3969,7 @@ class GatewayServer:
                     "source": source,
                     "status": status,
                     "run_id": run_id or "",
+                    "task_id": task_id or "",
                     "agent_name": agent_name or "",
                 },
             )
@@ -2859,6 +3984,9 @@ class GatewayServer:
     async def _heartbeat_loop(self) -> None:
         while True:
             await asyncio.sleep(_HEARTBEAT_INTERVAL)
+            # Sweep approval expiry so expiring/expired notifications fire
+            # even when no new approval request arrives.
+            self.tool_policy.cleanup_expired()
             if self.manager.active_connections:
                 tick = ev_health_tick(len(self.manager.active_connections))
                 await self.manager.broadcast_json(tick)
