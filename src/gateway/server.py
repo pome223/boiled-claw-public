@@ -426,14 +426,25 @@ class GatewayServer:
 
         self._task_notifier_fn = _task_notifier
 
-        async def _audit_notifier(payload: Dict[str, Any]) -> None:
+        def _iter_audit_push_sessions(payload: Dict[str, Any]) -> list[str]:
             metadata = payload.get("metadata")
             metadata = metadata if isinstance(metadata, dict) else {}
-            session_ids = {
-                str(payload.get("session_id") or "").strip(),
-                str(metadata.get("target_session_id") or "").strip(),
-            }
-            for session_id in sorted(session_id for session_id in session_ids if session_id):
+            primary_session_id = str(payload.get("session_id") or "").strip()
+            target_session_id = str(metadata.get("target_session_id") or "").strip()
+
+            session_ids = {primary_session_id} if primary_session_id else set()
+            # Only approval resolution events are allowed to fan out to an
+            # explicitly-targeted session. Other audit types stay session-local.
+            if (
+                target_session_id
+                and target_session_id != primary_session_id
+                and str(payload.get("event_type") or "") == AuditEventType.TOOL_APPROVAL.value
+            ):
+                session_ids.add(target_session_id)
+            return sorted(session_ids)
+
+        async def _audit_notifier(payload: Dict[str, Any]) -> None:
+            for session_id in _iter_audit_push_sessions(payload):
                 if session_id not in self.manager.active_connections:
                     continue
                 await self.manager.send_json(session_id, ev_audit_append(payload))

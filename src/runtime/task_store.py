@@ -14,7 +14,9 @@ from typing import Any, Awaitable, Callable, Optional
 from src.config.settings import get_settings
 
 
-_UNSET = object()
+# Public sentinel for "leave the current field unchanged" update calls.
+TASK_STORE_UNSET = object()
+_UNSET = TASK_STORE_UNSET
 _SEARCH_FRAGMENT_CHAR_LIMIT = 4096
 _SEARCH_FRAGMENT_TOKEN_LIMIT = 256
 _SEARCH_FRAGMENT_DEPTH_LIMIT = 6
