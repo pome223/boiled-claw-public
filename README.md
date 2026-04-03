@@ -5,16 +5,14 @@
 <h1 align="center">boiled-claw</h1>
 
 <p align="center">
-  A hackable self-improving closed-loop agent bridging computer use and physical AI.
+  A reference architecture for closed-loop AI agents — plan, execute, verify, repair.
 </p>
 
-<p align="center">
-  Browser-first. Policy-bounded. Physical-ready.
-</p>
-
-**Browser-first computer use needs more than tool calling.** boiled-claw is an open, lightweight reference system for agents that can plan, execute, verify, repair, and improve across browsers, desktop apps, and simulation-first physical AI environments.
+**Agents without a verification loop can't be trusted in production.** boiled-claw is an AI agent architecture with a closed-loop execution cycle: Planner → PolicyJudge → Executor → Verifier → Repair.
 
 Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstream-curated.
+
+Homepage: [astropomeai.com](https://astropomeai.com)
 
 > [!WARNING]
 > boiled-claw can execute shell commands, read and write files, control browsers, and drive desktop UI on the host machine.
@@ -24,84 +22,7 @@ Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstrea
 
 > **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
-## Quickstart
-
-If you want the shortest path from clone to a working session, start here:
-
-1. Create your local config and set `GOOGLE_API_KEY`:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Start the Gateway:
-
-   ```bash
-   docker compose up -d --build boiled-claw-gateway
-   ```
-
-3. Open the Control UI or use the CLI:
-
-   ```bash
-   docker compose --profile cli run --rm boiled-claw-cli chat
-   ```
-
-   Then visit `http://127.0.0.1:18789/chat` in your browser.
-
-The Web UI is the easiest way to understand the system. The CLI hits the same Gateway and is useful for quick smoke tests or scripted runs.
-
-## Control UI
-
-The Gateway ships a browser-based chat, task dashboard, audit explorer, detail / intervention panel, task timeline, and event stream so you can see routing, approvals, tool results, recovery, and operator actions in one place.
-
-![boiled-claw Control UI example](assets/control-ui-demo.png)
-
-The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened. The Dashboard and Audit tabs then let you drill into task artifacts, inspect merged task timelines, jump into related audit events, and watch task / approval / audit updates arrive over the WebSocket without leaving the Control UI.
-
-## Thesis
-
-boiled-claw keeps the OpenClaw spirit of local-first, composable, inspectable tooling, but reframes it around the agent stack that matters in 2026: browser-first computer use, verification-driven recovery, measured improvement, and a clear adapter path toward physical AI environments.
-
-The winning agent stack in 2026 is not just "LLM + tools." It is a Karpathy-style AutoResearch closed loop: observe -> act -> verify -> store trajectory -> improve.
-
-Most open agents stop at browser automation. Most physical AI stacks stop at simulation and robotics infrastructure. boiled-claw sits between them as a policy-bounded control plane that can operate current tabs, managed browsers, desktop UI, and future simulator / robotics adapters without changing its core philosophy.
-
-## What boiled-claw Is
-
-- A browser-first computer-use system with current-tab preference and desktop fallback
-- A closed-loop execution runtime with verification and repair
-- A local-first, Docker-ready reference system for skills, MCP servers, and agent orchestration
-- A trajectory-aware computer-use runtime with recovery-aware tooling and inspection
-- A self-improvement workflow with offline canaries, benchmark gates, and typed memory
-- A physical-ready adapter surface for simulators and robotics runtimes
-
-## What boiled-claw Is Not
-
-- An unstoppable agent without a kill switch
-- A fully autonomous robotics stack
-- A safety-free self-modifying runtime
-- A polished SaaS abstraction that hides the internals
-
-## Design Principles
-
-- Browser first: prefer structured current-tab and browser actions before pixel-only desktop control
-- Recovery over bravado: detect failure, retry carefully, escalate when needed
-- Improvement through evidence: keep trajectories, score outcomes, and learn from measured failures
-- Self-improvement with boundaries: candidate changes belong in isolated canaries before promotion
-- Physical-ready, not robotics-bloated: start with simulator and adapter surfaces before claiming end-to-end autonomy
-- Small enough to fork: keep the system understandable, inspectable, and hackable
-
-## Near-Term Direction
-
-- Reliable computer use: strengthen browser and desktop evals, recovery loops, and trajectory capture
-- Self-improving agents: add benchmark-gated canary worktrees and typed memory for failures, facts, and approved improvements
-- Physical AI adapters: extend toward NVIDIA Isaac Sim / GR00T-style environments and ROS2-friendly action surfaces with a simulation-first posture
-
-The current tree already ships a first slice of all three layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state.
-
-## The Bet
-
-The next important open agent framework will not be the biggest model wrapper. It will be the most editable closed-loop system that can move from browser tasks toward real-world operations without changing its core philosophy.
+Start with [ARCHITECTURE.md](ARCHITECTURE.md) if you want the design rationale before the implementation details.
 
 ## Features
 
@@ -109,26 +30,19 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🔍 **Web Search** - Via DuckDuckGo API
 - 🌐 **Browser Automation** - Scraping and screenshots with Playwright
 - 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
-- 🖥️ **Reliable Computer Use** - Browser-first observe / evaluate / act / recover flows with SQLite trajectory capture
-- 🧪 **Offline Self-Improvement** - Canary worktrees, benchmark gating, candidate packaging, cleanup, and approved-improvement reuse injected into repair prompts
-- 🤖 **Simulation-First Physical AI** - Isaac Sim / OSMO submission, persisted validation, and ROS2-friendly dispatch envelopes
-- 💻 **Shell Execution** - Guarded execution with shell AST parsing, intent classification, and approvals
+- 🖥️ **Browser-First Computer Use** - Observe and operate visible browser/UI flows with current-tab first and desktop fallback
+- 💻 **Shell Execution** - Secure command execution with security policies
 - 📁 **File Operations** - Read and write support
 - 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
 - 🧠 **Memory System** - SQLite + vector search
 - 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
-- 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
-- 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state, subscribes to task / approval deltas over WebSocket, and exposes a clickable detail / intervention panel
-- 🕵️ **Audit Log Explorer** - Filter audit events by actor / session / tool / source / result, deep-link from task or approval detail, inspect approval resolve before / after state, and stream indexed audit appends in the browser
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
-- 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
 - 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
 - 📝 **Persistent Transcript** - Gateway holds SQLite-backed session history
-- 🗃️ **Redis Sessions** - Optional Redis-backed ADK live session state while transcript / task / memory stores remain SQLite-backed
 - ⏰ **Cron Platform** - System event integration, delivery targets, and retry support
 - 🔌 **MCP Support** - Bundled sample MCP server supporting SSE / HTTP / stdio connections
-- 🔒 **Security** - Audit logs, command policies, stateful tool approvals, and approval resolve history with actor / source tracking
+- 🔒 **Security** - Audit logs, command policies, tool approvals
 - 📦 **Extensible** - Skill plugin system
 - 🐳 **Docker Ready** - Easy deployment with `docker compose`
 
@@ -139,11 +53,9 @@ Inspired by OpenClaw's control plane / execution plane separation, boiled-claw i
 - **Gateway (Docker / control plane)**: Routing, session, transcript, cron, approvals, UI event stream
 - **Host Bridge (host OS / execution plane)**: Runs shell, file, and browser operations in a separate process on the host
 - **Desktop Bridge (host OS / desktop capability plane)**: Runtime for GUI automation, Accessibility, and emergency stop
-- **Runtime substrate (common registry plane)**: Canonical resources / capabilities over skills + bridges + browser-first surfaces
 
 The desktop core lives in `src/desktop/`, with bridges hanging off it as adapters.
 Common capability / ping schemas are placed in `src/bridges/common_schema.py` to ensure the desktop runtime does not depend on the host bridge schema.
-The runtime substrate then lifts those scattered tools into `resource_list`, `resource_read`, `capability_list`, and `capability_invoke`, so Gateway HTTP routes and the root agent can inspect skills and bridge-backed surfaces through one canonical layer.
 
 ```mermaid
 flowchart LR
@@ -167,7 +79,6 @@ flowchart LR
         DesktopRuntime["runtime / view / control"]
     end
 
-    RuntimeRegistry["Runtime substrate<br/>resource_* / capability_*"]
     MCP["MCP servers"]
     Skills["Skills / plugins"]
 
@@ -177,10 +88,6 @@ flowchart LR
     ControlLoop --> Memory
     ControlLoop --> MCP
     ControlLoop --> Skills
-    ControlLoop --> RuntimeRegistry
-    RuntimeRegistry --> Skills
-    RuntimeRegistry --> HostTools
-    RuntimeRegistry --> DesktopRuntime
     ControlLoop --> HostTools
     ControlLoop --> DesktopRuntime
     HostTools --> CurrentTab
@@ -204,17 +111,12 @@ cp .env.example .env
 # Optionally configure Gateway auth:
 # GATEWAY_API_KEY=change-me
 # GATEWAY_AUTH_USER_HEADER=X-Auth-User
-# Optionally persist live ADK sessions in Redis:
-# REDIS_URL=redis://boiled-claw-redis:6379/0
-# REDIS_SESSION_NAMESPACE=boiled-claw:sessions
 ```
 
 You can obtain a Google API Key from [Google AI Studio](https://aistudio.google.com/apikey).
 
 Setting `GATEWAY_API_KEY` enables authentication on the Gateway's HTTP / WebSocket API.
 If `GATEWAY_AUTH_USER_HEADER` is also set, the effective `user_id` is resolved from that trusted header, and cannot be overridden by the `user_id` in the path or body. When `GATEWAY_AUTH_USER_HEADER` is left unset and a shared API key is used, authenticated requests are grouped under a single shared principal.
-
-`REDIS_URL` only changes the live ADK session backend used by Gateway / CLI / channel runners. Transcript history, task objects, computer trajectories, memory, and physical validation state stay in SQLite.
 
 ### 3. Start the Gateway
 
@@ -231,33 +133,6 @@ docker compose logs -f boiled-claw-gateway
 # Stop
 docker compose down
 ```
-
-To deploy the current local workspace into the running runtime, use:
-
-```bash
-./scripts/deploy_runtime.sh deploy
-```
-
-This starts the host / desktop bridge processes, then tries to rebuild the
-Gateway from the current workspace. If Docker rebuild is unavailable, it falls
-back to hot-syncing `src/` into the running `boiled-claw-gateway` container and
-restarts it. For source-only hot reload, use:
-
-```bash
-./scripts/deploy_runtime.sh sync
-```
-
-### 3a. Optional: Start Redis-backed Session State
-
-```bash
-# In .env:
-# REDIS_URL=redis://boiled-claw-redis:6379/0
-# REDIS_SESSION_NAMESPACE=boiled-claw:sessions
-
-docker compose --profile redis up -d --build boiled-claw-redis boiled-claw-gateway
-```
-
-Use this when you want Gateway, CLI, and channel workers to share the same live ADK session state across processes or container restarts. This does not replace SQLite-backed transcript or task persistence.
 
 Endpoints available after Gateway startup:
 
@@ -372,7 +247,7 @@ The extension continuously reconnects to the relay, so it is easiest to start Ho
 - Selector text extraction
 
 This is the minimal implementation for routing current-tab research flows like "use this browser to look up ..." through the browser natively rather than through the desktop control loop.
-For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient. The higher-level `computer_observe`, `computer_evaluate`, `computer_click`, `computer_fill`, and `computer_trajectory_recent` tools bundle that browser-first selection so a caller can observe once, verify expectations, recover across surfaces, and inspect recent trajectories.
+For browser-first computer-use tasks, `computer_operator` combines this relay with desktop observations so the agent can inspect the visible browser/UI first, stay on the current tab when possible, and fall back to Desktop Bridge only when DOM-level control is insufficient. The higher-level `computer_observe`, `computer_click`, and `computer_fill` tools bundle that browser-first selection so a caller can observe once and act on the best available surface.
 Bridges bind to loopback only by default. DNS rebinding protection is also enabled on Host/Desktop Bridge.
 Only set `BRIDGE_ALLOW_REMOTE_BIND=true` explicitly if you need to allow binding to addresses like `0.0.0.0`.
 
@@ -416,135 +291,6 @@ DESKTOP_BRIDGE_ENABLED=true
 DESKTOP_BRIDGE_URL=http://127.0.0.1:8767/sse
 ```
 
-### 7. Reliable Computer Use
-
-The browser-first computer-use stack now exposes an explicit observe / evaluate / act / recover loop:
-
-- `computer_observe` gathers current-tab and desktop context in one bundle
-- `computer_evaluate` checks explicit URL / text / frontmost-app / window-title expectations
-- `computer_click` and `computer_fill` prefer current-tab first, then retry across desktop or managed browser when verification fails
-- `computer_trajectory_recent` returns recent `success`, `recovered`, or `failed` runs from the local trajectory store
-
-Optional `.env`:
-
-```bash
-COMPUTER_TRAJECTORY_DB_PATH=data/computer_trajectories.db
-```
-
-Trajectories persist the request, observation summary, attempts, verification result, and final surface. This makes recovery debugging and future repair loops inspectable instead of hidden in prompt state.
-Longer-running flows now also emit first-class task objects, so `task_get` / `task_list` can track orchestration state separately from chat history.
-
-### 8. Offline Self-Improvement Canaries
-
-The self-improvement slice is intentionally offline and benchmark-gated:
-
-- `self_improvement_prepare_canary` creates an isolated git worktree for a candidate change
-- `self_improvement_run_benchmarks` executes guarded shell commands inside that canary
-- `self_improvement_demo_from_trajectory` runs a failed computer trajectory through one canary -> candidate -> benchmark -> package flow
-- `self_improvement_search_from_trajectory` fans one failed computer trajectory out into multiple canaries, compares benchmarked candidates, and keeps the winner
-- `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, and can record approved changes into memory
-- `self_improvement_cleanup_canary` removes the worktree and deletes the canary branch when finished
-- new failed trajectories automatically surface matching `approved_improvement` memories as reuse suggestions, using cheap trajectory-key / selector / action / surface prefilters before semantic fallback
-
-Optional `.env`:
-
-```bash
-SELF_IMPROVEMENT_CANARY_ROOT=data/canaries
-SELF_IMPROVEMENT_BENCHMARK_TIMEOUT_SECONDS=900
-```
-
-Typed memory kinds are used to keep long-lived facts separate from execution traces and promotions:
-
-- `fact`
-- `trajectory`
-- `approved_improvement`
-
-The high-level demo and search flows now create persistent task objects:
-
-- `self_improvement_demo_from_trajectory` returns one `task_id` for the end-to-end demo run
-- `self_improvement_search_from_trajectory` creates a parent search task plus candidate child tasks, then records `winner_task_id` / `loser_task_ids`
-- both flows attach `reuse_query` and `reuse_suggestions` so the dashboard can show prior approved fixes for similar failures
-
-CLI demo:
-
-```bash
-boiled-claw self-improvement-demo \
-  --trajectory-id 42 \
-  --candidate-command "python3 scripts/apply_fix.py" \
-  --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q"
-```
-
-Search demo:
-
-```bash
-boiled-claw self-improvement-search \
-  --trajectory-id 42 \
-  --candidate-spec '{"name":"small-fix","commands":["python3 scripts/apply_small_fix.py"]}' \
-  --candidate-spec '{"name":"bolder-fix","commands":["python3 scripts/apply_bolder_fix.py"]}' \
-  --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q"
-```
-
-### 9. Physical AI Adapters
-
-The physical AI slice is simulation-first by design:
-
-- `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
-- `physical_ai_validation_status` returns the persisted validation state for a run id and can refresh queued runs from adapter status endpoints
-- `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges
-- `physical_ai_dispatch_ros2_action` only allows real dispatch when a persisted validation run is explicitly marked as validated
-- `physical_ai_replay_computer_trajectory` turns a recorded browser/desktop trajectory into a simulation request plus ROS2 dry-run candidate for PoC work
-
-Optional `.env`:
-
-```bash
-PHYSICAL_AI_ISAAC_SIM_URL=http://127.0.0.1:9001/sim
-PHYSICAL_AI_ISAAC_SIM_STATUS_URL=http://127.0.0.1:9001/status
-PHYSICAL_AI_OSMO_URL=http://127.0.0.1:9002/workflows
-PHYSICAL_AI_OSMO_STATUS_URL=http://127.0.0.1:9002/status
-PHYSICAL_AI_ROS2_BRIDGE_URL=http://127.0.0.1:9003/dispatch
-PHYSICAL_AI_VALIDATION_DB_PATH=data/physical_ai_validation.db
-```
-
-Validation runs are stored in SQLite so simulation approvals survive process restarts. Status values like `ready` are not treated as validated; real dispatch requires an explicit pass / validated signal.
-
-For a simple Physical AI PoC, replay a failed `computer_*` trajectory into `physical_ai_replay_computer_trajectory`, let the adapter validate it in Isaac Sim / OSMO, and only then inspect or dispatch the ROS2 envelope.
-That replay flow now also returns a persistent `task_id` with simulation / ROS2 / dispatch artifacts attached.
-
-### 10. Task Object Layer
-
-Long-running or orchestration-heavy flows now emit persistent task objects instead of hiding all state inside chat side effects.
-
-- `task_create`, `task_get`, `task_list`, `task_update` expose a shared task surface
-- `sessions_spawn` / `sessions_spawn_dynamic` create `subagent` tasks linked to their `run_id`
-- `self_improvement_demo_from_trajectory` creates a single self-improvement task
-- `self_improvement_search_from_trajectory` creates a parent search task plus candidate child tasks with `winner_task_id` / `loser_task_ids`
-- `physical_ai_replay_computer_trajectory` creates a replay task with simulation / validation / dispatch artifacts
-
-Task objects persist:
-
-- `task_id`, `kind`, `status`, `title`
-- `artifacts` and `metadata`
-- `winner_task_id` / `loser_task_ids`
-- `approval_dependencies`
-- `run_id` for subagent-backed tasks
-
-The Control UI dashboard builds on top of that task layer:
-
-- click a task or approval to open a full detail panel with artifacts, metadata, errors, and links
-- follow `winner_task_id`, `loser_task_ids`, `approval_dependencies`, and child tasks without leaving the UI
-- inspect a merged task timeline that combines task state changes, approval lifecycle, and related audit events
-- steer or kill active session-mode subagents directly from the panel
-- inspect approval history, scope, path scope, propagation flags, and resolve pending requests in-place
-- dashboard task / approval lists use server-side search and paging so large artifacts stay inspectable without pushing full-text filtering into the browser
-- task, approval, and audit deltas arrive over the Gateway WebSocket instead of periodic dashboard polling
-
-The Audit Explorer complements that operator view:
-
-- filter audit events by actor, session, tool, source, result, and free-text query
-- inspect approval resolve events with explicit before / after scope, tool pattern, path scope, and propagation changes
-- jump into the audit trail directly from task and approval detail panels when you need to trace who approved what and why
-- query an indexed SQLite-backed audit store instead of replaying the whole JSONL file on every filter change
-
 ## Project Structure
 
 ```
@@ -568,19 +314,12 @@ boiled-claw/
 │   │   └── desktop_bridge_schema.py  # Desktop Bridge contract
 │   ├── browser/
 │   │   └── current_tab_bridge.py     # Chrome extension relay server
-│   ├── computer_use/
-│   │   └── trajectory_store.py       # Browser-first computer-use trajectory storage
 │   ├── desktop/
 │   │   ├── client.py           # Desktop runtime interface
 │   │   ├── runtime.py          # Emergency stop / runtime state
 │   │   ├── fake_client.py      # Fake runtime for contract tests
 │   │   ├── pyobjc_client.py    # macOS pyobjc implementation
 │   │   └── factory.py          # Runtime factory
-│   ├── physical_ai/
-│   │   └── validation_store.py # Persisted simulation validation store
-│   ├── runtime/
-│   │   ├── session_service.py  # Optional Redis-backed ADK sessions
-│   │   └── task_store.py       # Persistent workflow task objects
 │   ├── tools/
 │   │   ├── web_search.py       # Web search
 │   │   ├── finance.py          # Stock price lookup
@@ -593,11 +332,8 @@ boiled-claw/
 │   │   ├── computer.py         # Browser-first computer-use tools
 │   │   ├── desktop.py          # Desktop observation and control
 │   │   ├── memory.py           # Memory tools
-│   │   ├── self_improvement.py # Offline canary self-improvement tools
-│   │   ├── physical_ai.py      # Simulation-first physical AI adapter tools
 │   │   ├── skills.py           # Skill listing / execution
-│   │   ├── subagents.py        # Sub-agent / dynamic agent management
-│   │   └── tasks.py            # First-class task object tools
+│   │   └── subagents.py        # Sub-agent / dynamic agent management
 │   ├── mcp_servers/
 │   │   ├── sample_server.py         # Sample MCP server
 │   │   ├── host_bridge_server.py    # Host Bridge MCP server
@@ -612,7 +348,6 @@ boiled-claw/
 │   ├── security/
 │   │   ├── audit.py            # Audit logs
 │   │   ├── policy.py           # Command/path security policy
-│   │   ├── shell_intent.py     # Shell parsing + intent classification
 │   │   └── tool_policy.py      # Tool approvals / per-agent policy
 │   ├── config/
 │   │   ├── settings.py         # Pydantic settings
@@ -752,11 +487,8 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `GET /sessions/{user_id}/{session_id}/history` - Transcript history
 - `GET /transcript/sessions?user_id=...` - Transcript-backed session summaries
 - `POST /cron` / `GET /cron` - Cron platform
-- `GET /tasks` / `GET /tasks/{task_id}` - Persistent workflow task objects
-- `GET /runtime/resources` / `GET /runtime/resources/{resource_id}` - Runtime substrate resources
-- `GET /runtime/capabilities` / `POST /runtime/capabilities/invoke` - Canonical capability registry and invoke surface
 - `GET /tools/policy` - Tool policy list
-- `GET /tools/approvals` - Approval state list (`state=pending|approved|denied|propagated|expired|all`)
+- `GET /tools/approvals` - Pending approval list
 
 ### Using with Telegram
 
@@ -774,15 +506,11 @@ The default root agent exposes these tool families:
 - `web_search`, `stock_price`
 - `browser_navigate`, `browser_click`, `browser_fill`, `browser_press`, `browser_screenshot`, `browser_extract_text`
 - `control_ui_chat_send_message`
-- `computer_observe`, `computer_evaluate`, `computer_click`, `computer_fill`, `computer_trajectory_recent`
+- `computer_observe`, `computer_click`, `computer_fill`
 - `desktop_view_*`, `desktop_wait_*`, `desktop_runtime_*`, `desktop_control_*`
 - `run_shell`, `read_file`, `write_file`
 - `memory_store`, `memory_search`, `memory_stats`, `memory_delete`
-- `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_demo_from_trajectory`, `self_improvement_search_from_trajectory`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
-- `physical_ai_submit_simulation`, `physical_ai_validation_status`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`, `physical_ai_replay_computer_trajectory`
 - `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
-- `task_create`, `task_get`, `task_list`, `task_update`
-- `resource_list`, `resource_read`, `capability_list`, `capability_invoke`
 - `skill_list`, `skill_execute`
 
 ### Dynamic Agent Generation (sessions_spawn_dynamic)
@@ -800,9 +528,6 @@ curl -sS -X POST http://127.0.0.1:18789/agent/run \
 
 # Check execution results
 curl http://127.0.0.1:18789/subagents/{session_id}
-
-# Or inspect the persistent task object returned by sessions_spawn(_dynamic)
-curl http://127.0.0.1:18789/tasks/{task_id}
 ```
 
 **MCP Connection Types:**
@@ -842,23 +567,15 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - For backward compatibility, the legacy `skills/*.py` format is still loaded.
 - After the Gateway starts, check loading status via `GET /skills`.
 - Use `skill_list` and `skill_execute` to inspect and run bundled skill content.
-- Use `resource_list` / `resource_read` to inspect bundled skills and bridge resources through one canonical surface.
-- Use `capability_list` / `capability_invoke` when you want a transport-neutral registry over shell, file, browser, current-tab, desktop, and skill capabilities.
 - Bundled skills include `skills/auto-fix/SKILL.md`, `skills/code-review/SKILL.md`, `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, `skills/e2e-test/SKILL.md`, and `skills/multi-llm-judge/SKILL.md`.
-- `skills/computer-use/SKILL.md` is the repo-local entry point for the browser-first computer-use stack.
-- `skills/e2e-test/SKILL.md` includes smoke checks for skill loading and recent computer-use / CLI surfaces.
 
 ### Security
 
 - Audit logs (all operations are recorded)
 - Command blocklist
-- Shell AST parsing + intent classification before execution
-- Shell wrappers, control operators, redirections, and inline interpreter eval blocked by default
 - Path access control
 - Secret detection
 - Per-agent tool policy
-- Stateful tool approvals (`pending -> approved/denied -> propagated -> expired`)
-- Approval scope / tool pattern / path scope / expiry / subagent propagation metadata
 - Tool approval request / resolve (`tools.approval_request`, `tools.approval`)
 - Transcript ownership protection via Gateway API key + trusted identity header
 
@@ -904,10 +621,7 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - [x] Skill plugin system
 - [x] Dynamic agent generation (sessions_spawn_dynamic)
 - [x] MCP support (SSE / HTTP / stdio) + sample server
-- [x] Reliable computer use (evaluation, recovery, trajectory capture)
-- [x] Offline canary self-improvement workflow
-- [x] Simulation-first physical AI adapters
-- [x] Redis sessions
+- [ ] Redis sessions
 - [ ] Slack channel
 - [ ] WhatsApp channel
 - [ ] Canvas (visual workspace)
