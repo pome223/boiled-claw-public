@@ -38,6 +38,13 @@ from src.control_loop.callbacks import (
 )
 from src.control_loop.constants import DEFAULT_MAX_REPAIR_ATTEMPTS
 from src.control_loop.executor_agent import executor_agent
+from src.control_loop.replay_trace import (
+    _build_executor_message,
+    _build_step_trace,
+    _extract_plan_id,
+    _infer_tail_replay_from_step,
+    _parse_replay_context,
+)
 from src.control_loop.guarded_tools import (
     guarded_browser_click,
     guarded_browser_extract_text,
@@ -266,6 +273,7 @@ class ControlLoop:
             approval = state.get(StateKeys.APPROVAL_STATUS, "")
             has_approved_plan = bool(state.get(StateKeys.PLAN_APPROVED))
             replay_context = _parse_replay_context(state.get(StateKeys.REPLAY_CONTEXT))
+            approved_plan = _parse_json(state.get(StateKeys.PLAN_APPROVED)) or {}
             resume_existing_plan = (
                 attempt == 0
                 and has_approved_plan
@@ -289,6 +297,7 @@ class ControlLoop:
                 # approval:status を確認
                 state = await self._get_state(user_id, session_id)
                 approval = state.get(StateKeys.APPROVAL_STATUS, "")
+                approved_plan = _parse_json(state.get(StateKeys.PLAN_APPROVED)) or {}
             else:
                 logger.info(
                     "ControlLoop: resuming approved plan for session=%s", session_id
@@ -297,8 +306,7 @@ class ControlLoop:
             if approval == "denied":
                 result.final_text = "Plan was denied by policy judge."
                 result.success = False
-                result.plan_id = _extract_plan_id(state)
-                approved_plan = _parse_json(state.get(StateKeys.PLAN_APPROVED)) or {}
+                result.plan_id = _extract_plan_id(state, approved_plan)
                 if approved_plan:
                     result.metadata["approved_plan"] = approved_plan
                 break
@@ -309,12 +317,11 @@ class ControlLoop:
                     "Please review plan:approved in session state."
                 )
                 result.success = False
-                result.plan_id = _extract_plan_id(state)
+                result.plan_id = _extract_plan_id(state, approved_plan)
                 result.metadata["needs_human"] = True
                 result.metadata["approval_request"] = state.get(
                     StateKeys.APPROVAL_REQUEST
                 )
-                approved_plan = _parse_json(state.get(StateKeys.PLAN_APPROVED)) or {}
                 if approved_plan:
                     result.metadata["approved_plan"] = approved_plan
                 break
@@ -365,9 +372,9 @@ class ControlLoop:
             verify_status = report.get("status", "error")
 
             result.repair_count = state.get(StateKeys.REPAIR_COUNT, 0)
-            result.plan_id = _extract_plan_id(state)
-            result.verification_report_id = report.get("report_id")
             approved_plan = _parse_json(state.get(StateKeys.PLAN_APPROVED)) or {}
+            result.plan_id = _extract_plan_id(state, approved_plan)
+            result.verification_report_id = report.get("report_id")
             if approved_plan:
                 result.metadata["approved_plan"] = approved_plan
             result.metadata["verification_status"] = verify_status
@@ -740,190 +747,6 @@ def _parse_json(raw: Any) -> dict | None:
         return json.loads(raw)
     except (json.JSONDecodeError, TypeError):
         return None
-
-
-def _parse_replay_context(raw: Any) -> dict[str, Any] | None:
-    parsed = _parse_json(raw)
-    return parsed if isinstance(parsed, dict) else None
-
-
-def _extract_plan_id(state: dict) -> str | None:
-    plan = _parse_json(state.get(StateKeys.PLAN_APPROVED))
-    return plan.get("plan_id") if plan else None
-
-
-def _build_executor_message(
-    *,
-    replay_context: dict[str, Any] | None,
-) -> str:
-    if not replay_context:
-        return "Execute the approved plan."
-    from_step = str(replay_context.get("from_step") or "").strip()
-    source_task_id = str(replay_context.get("source_task_id") or "").strip()
-    if not from_step:
-        return "Execute the approved plan."
-    return (
-        "Replay the approved plan from the specified step.\n\n"
-        f"Replay source task: {source_task_id or '-'}\n"
-        f"Replay from step: {from_step}\n"
-        "Treat earlier approved steps as already satisfied unless redoing them is "
-        "strictly necessary to regain focus, recover the target app/tab state, or "
-        "gather fresh evidence for the remaining suffix."
-    )
-
-
-def _build_step_trace(
-    *,
-    plan: dict[str, Any],
-    executor_outputs: dict[str, Any],
-    report: dict[str, Any],
-    replay_context: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    steps = plan.get("steps")
-    steps = steps if isinstance(steps, list) else []
-    executed_items = executor_outputs.get("steps_executed")
-    executed_items = executed_items if isinstance(executed_items, list) else []
-    executed_by_step: dict[str, dict[str, Any]] = {}
-    for item in executed_items:
-        if not isinstance(item, dict):
-            continue
-        step_id = str(item.get("step_id") or "").strip()
-        if step_id:
-            executed_by_step[step_id] = item
-
-    criterion_results = report.get("criterion_results")
-    criterion_results = criterion_results if isinstance(criterion_results, list) else []
-    failed_criteria_by_step: dict[str, list[str]] = {}
-    for criterion in criterion_results:
-        if not isinstance(criterion, dict) or criterion.get("passed"):
-            continue
-        criterion_name = str(criterion.get("name") or "").strip()
-        refs = criterion.get("evidence_refs")
-        refs = refs if isinstance(refs, list) else []
-        for ref in refs:
-            ref_text = str(ref or "").strip()
-            if not ref_text:
-                continue
-            failed_criteria_by_step.setdefault(ref_text, [])
-            if criterion_name and criterion_name not in failed_criteria_by_step[ref_text]:
-                failed_criteria_by_step[ref_text].append(criterion_name)
-
-    repair_actions = report.get("repair_actions")
-    repair_actions = repair_actions if isinstance(repair_actions, list) else []
-    repair_actions_by_step: dict[str, list[dict[str, Any]]] = {}
-    for action in repair_actions:
-        if not isinstance(action, dict):
-            continue
-        target_step_ids = action.get("target_step_ids")
-        target_step_ids = target_step_ids if isinstance(target_step_ids, list) else []
-        for step_id in target_step_ids:
-            normalized_step_id = str(step_id or "").strip()
-            if normalized_step_id:
-                repair_actions_by_step.setdefault(normalized_step_id, []).append(action)
-
-    replay_from_step = str((replay_context or {}).get("from_step") or "").strip()
-    replay_started = not replay_from_step
-    trace: list[dict[str, Any]] = []
-    for index, step in enumerate(steps):
-        if not isinstance(step, dict):
-            continue
-        step_id = str(step.get("step_id") or f"step_{index + 1}").strip()
-        if replay_from_step and step_id == replay_from_step:
-            replay_started = True
-        executed = executed_by_step.get(step_id, {})
-        status = str(executed.get("status") or "").strip()
-        replay_scope = "replayed" if replay_started else "preserved"
-        summary = str(executed.get("output_summary") or "").strip()
-        if not summary:
-            if status:
-                summary = f"{step_id} {status}"
-            elif replay_scope == "preserved":
-                summary = "kept from earlier successful prefix"
-            else:
-                summary = "not executed in this attempt"
-        trace.append(
-            {
-                "step_id": step_id,
-                "title": str(step.get("title") or step_id),
-                "description": str(step.get("description") or ""),
-                "step_type": "plan",
-                "status": status or ("preserved" if replay_scope == "preserved" else "pending"),
-                "tool": str(executed.get("tool") or ""),
-                "artifact_ref": str(executed.get("artifact_ref") or ""),
-                "output_summary": summary,
-                "replay_scope": replay_scope,
-                "failed_criteria": failed_criteria_by_step.get(step_id, []),
-                "repair_actions": repair_actions_by_step.get(step_id, []),
-            }
-        )
-
-    if report:
-        trace.append(
-            {
-                "step_id": "__verification__",
-                "title": "Verification",
-                "description": "Verifier assessment for the current control-loop attempt.",
-                "step_type": "verification",
-                "status": str(report.get("status") or "error"),
-                "output_summary": str(report.get("summary") or ""),
-                "failure_type": report.get("failure_type"),
-                "overall_score": float(report.get("overall_score") or 0.0),
-                "failed_criteria": [
-                    str(item.get("name") or "")
-                    for item in criterion_results
-                    if isinstance(item, dict) and not item.get("passed")
-                ],
-            }
-        )
-        if repair_actions:
-            trace.append(
-                {
-                    "step_id": "__repair__",
-                    "title": "Repair Tail",
-                    "description": "Repair actions suggested by the verifier for the next attempt.",
-                    "step_type": "repair",
-                    "status": "triggered",
-                    "output_summary": "; ".join(
-                        str(action.get("description") or "").strip()
-                        for action in repair_actions
-                        if isinstance(action, dict) and str(action.get("description") or "").strip()
-                    ) or "repair actions queued",
-                    "target_step_ids": [
-                        str(step_id)
-                        for action in repair_actions
-                        if isinstance(action, dict)
-                        for step_id in (action.get("target_step_ids") if isinstance(action.get("target_step_ids"), list) else [])
-                        if str(step_id).strip()
-                    ],
-                }
-            )
-    return trace
-
-
-def _infer_tail_replay_from_step(
-    *,
-    step_trace: list[dict[str, Any]],
-    report: dict[str, Any],
-) -> str | None:
-    repair_actions = report.get("repair_actions")
-    repair_actions = repair_actions if isinstance(repair_actions, list) else []
-    for action in repair_actions:
-        if not isinstance(action, dict):
-            continue
-        target_step_ids = action.get("target_step_ids")
-        target_step_ids = target_step_ids if isinstance(target_step_ids, list) else []
-        for step_id in target_step_ids:
-            normalized = str(step_id or "").strip()
-            if normalized:
-                return normalized
-    for step in step_trace:
-        if str(step.get("step_type") or "") != "plan":
-            continue
-        if step.get("failed_criteria"):
-            return str(step.get("step_id") or "").strip() or None
-        if str(step.get("status") or "") in {"failed", "pending", "skipped"}:
-            return str(step.get("step_id") or "").strip() or None
-    return None
 
 
 def _latest_agent_invocation_id(events: list[Event], agent_name: str) -> str | None:
