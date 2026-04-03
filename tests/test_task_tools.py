@@ -4,12 +4,17 @@ from types import SimpleNamespace
 import pytest
 
 from src.runtime import task_store as task_store_module
+from src.tools import tasks as tasks_module
 from src.tools.tasks import task_create, task_get, task_list, task_update
 
 
 def _tool_context(user_id: str = "test-user", session_id: str = "sess-1"):
     session = SimpleNamespace(id=session_id, app_name="boiled-claw")
     return SimpleNamespace(user_id=user_id, session=session)
+
+
+def test_tasks_module_uses_public_task_store_unset_sentinel():
+    assert tasks_module.TASK_UPDATE_ERROR_UNSET is task_store_module.TASK_STORE_UNSET
 
 
 @pytest.mark.asyncio

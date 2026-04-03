@@ -260,6 +260,11 @@ async def run_shell(
     timeout: int = 30,
     tool_context: Optional[ToolContext] = None,
 ) -> dict:
+    """Deprecated compatibility wrapper for `run_shell_guarded`.
+
+    New call sites should prefer `run_shell_guarded` so the execution `cwd`
+    and approval context remain explicit.
+    """
     return await run_shell_guarded(
         command=command,
         timeout=timeout,

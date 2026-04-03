@@ -1513,6 +1513,56 @@ def test_http_audit_list_endpoint_backfills_indexed_store_from_jsonl(monkeypatch
     assert payload["entries"][0]["metadata"]["tool_name"] == "run_shell"
 
 
+@pytest.mark.asyncio
+async def test_audit_notifier_keeps_non_approval_events_session_local(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    gateway.manager.active_connections = {
+        "sess-source": object(),
+        "sess-target": object(),
+    }
+    sent = []
+
+    async def _capture(session_id, data):
+        sent.append((session_id, data))
+
+    gateway.manager.send_json = _capture
+
+    await gateway._audit_notifier_fn(
+        {
+            "event_type": "shell_command",
+            "session_id": "sess-source",
+            "metadata": {"target_session_id": "sess-target"},
+        }
+    )
+
+    assert [session_id for session_id, _data in sent] == ["sess-source"]
+
+
+@pytest.mark.asyncio
+async def test_audit_notifier_fans_out_target_session_for_tool_approval(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    gateway.manager.active_connections = {
+        "sess-source": object(),
+        "sess-target": object(),
+    }
+    sent = []
+
+    async def _capture(session_id, data):
+        sent.append((session_id, data))
+
+    gateway.manager.send_json = _capture
+
+    await gateway._audit_notifier_fn(
+        {
+            "event_type": "tool_approval",
+            "session_id": "sess-source",
+            "metadata": {"target_session_id": "sess-target"},
+        }
+    )
+
+    assert [session_id for session_id, _data in sent] == ["sess-source", "sess-target"]
+
+
 def test_http_task_timeline_endpoint_merges_task_approval_and_audit_entries(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
     store = server_module.get_task_store()

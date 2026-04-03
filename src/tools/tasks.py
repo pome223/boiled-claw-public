@@ -7,11 +7,11 @@ from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
-from src.runtime.task_store import get_task_store, _UNSET as _TASK_STORE_UNSET
+from src.runtime.task_store import get_task_store, TASK_STORE_UNSET
 from src.tools.context import resolve_tool_context
 
 
-_UNSET = _TASK_STORE_UNSET
+TASK_UPDATE_ERROR_UNSET = TASK_STORE_UNSET
 
 
 def _parse_json_object(name: str, payload: Optional[str]) -> dict[str, Any]:
@@ -88,7 +88,7 @@ def update_task_record(
     title: Optional[str] = None,
     artifacts: Optional[dict[str, Any]] = None,
     metadata: Optional[dict[str, Any]] = None,
-    error: Any = _UNSET,
+    error: Any = TASK_UPDATE_ERROR_UNSET,
     run_id: Optional[str] = None,
     winner_task_id: Optional[str] = None,
     loser_task_ids: Optional[list[str]] = None,
@@ -237,7 +237,7 @@ async def task_update(
             metadata=_parse_json_object("metadata_json", metadata_json)
             if metadata_json is not None
             else None,
-            error=error if error is not None else _UNSET,
+            error=error if error is not None else TASK_UPDATE_ERROR_UNSET,
         )
     except ValueError as exc:
         return {"success": False, "error": str(exc)}
