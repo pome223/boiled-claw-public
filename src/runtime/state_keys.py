@@ -15,6 +15,11 @@ class StateKeys:
     PLAN_APPROVED = "plan:approved"
     PLAN_RISK_LEVEL = "plan:risk_level"
 
+    # ── Replay ────────────────────────────────────────────────────────────
+    REPLAY_SOURCE_TASK_ID = "replay:source_task_id"
+    REPLAY_FROM_STEP = "replay:from_step"
+    REPLAY_CONTEXT = "replay:context"
+
     # ── Approval / Verification / Repair ──────────────────────────────────
     APPROVAL_STATUS = "approval:status"
     APPROVAL_REQUEST = "approval:request"

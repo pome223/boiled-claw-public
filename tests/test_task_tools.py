@@ -156,6 +156,41 @@ def test_task_store_reopen_skips_full_search_rebuild(monkeypatch, tmp_path):
     assert result["tasks"][0]["title"] == "Repair selector for save button"
 
 
+def test_task_store_supports_custom_step_events(tmp_path):
+    db_path = tmp_path / "tasks.db"
+    store = task_store_module.TaskStore(str(db_path))
+    task = store.create(
+        kind="control_loop",
+        title="Desktop playback",
+        status="running",
+        owner_session_id="sess-step",
+        owner_user_id="alice",
+    )
+
+    event = store.append_event(
+        task["task_id"],
+        event_type="step_plan",
+        title="verify_visual_state",
+        status="pending",
+        payload={
+            "summary": "waiting for visual confirmation",
+            "step": {
+                "step_id": "verify_visual_state",
+                "title": "Verify visual state",
+                "status": "pending",
+            },
+        },
+    )
+
+    timeline = store.query_timeline(task["task_id"], page=1, page_size=10)
+
+    assert event is not None
+    assert timeline["pagination"]["total"] == 2
+    assert timeline["events"][0]["event_type"] == "step_plan"
+    assert timeline["events"][0]["payload"]["step"]["step_id"] == "verify_visual_state"
+    assert timeline["events"][0]["payload"]["summary"] == "waiting for visual confirmation"
+
+
 def test_task_store_backfills_split_search_fragments_for_legacy_rows(tmp_path):
     db_path = tmp_path / "tasks.db"
     with sqlite3.connect(db_path) as conn:
