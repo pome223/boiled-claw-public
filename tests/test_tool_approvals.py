@@ -1423,3 +1423,191 @@ async def test_desktop_launch_and_focus_wait_for_approval(monkeypatch):
     assert focus["success"] is True
     assert seen["launch_token"]
     assert seen["focus_token"]
+
+
+# --------------------------------------------------------------------------
+# Approval expiry lifecycle
+# --------------------------------------------------------------------------
+
+
+def test_approval_is_expiring_at_80_percent_ttl():
+    engine = ToolPolicyEngine()
+    now = time.time()
+    approval = engine.create_approval_request(
+        request_id="exp-1",
+        tool_name="desktop_ax_snapshot",
+        agent_name="test",
+        args={},
+        session_id="sess-exp",
+        reason="test",
+        expires_at=now + 100.0,  # 100s TTL
+    )
+    record = engine._approvals["exp-1"]
+
+    # At 79% elapsed — should NOT be expiring
+    assert not record.is_expiring(now + 79.0)
+    # At 81% elapsed — SHOULD be expiring
+    assert record.is_expiring(now + 81.0)
+    # At 100% elapsed — expired, not "expiring"
+    assert not record.is_expiring(now + 100.0)
+
+
+@pytest.mark.asyncio
+async def test_cleanup_expired_transitions_pending_to_expiring():
+    engine = ToolPolicyEngine()
+    notifications = []
+
+    async def _capture(payload):
+        notifications.append(payload)
+
+    engine.set_notifier(_capture)
+
+    now = time.time()
+    engine.create_approval_request(
+        request_id="exp-2",
+        tool_name="desktop_view_screenshot",
+        agent_name="test",
+        args={},
+        session_id="sess-exp",
+        reason="test",
+        expires_at=now + 10.0,  # 10s TTL, created_at ~ now
+    )
+    # Force created_at so 80% = 8s
+    record = engine._approvals["exp-2"]
+    record.created_at = now - 9.0  # 9s elapsed out of 10s TTL → 90% → expiring
+    record.expires_at = now + 1.0
+
+    engine.cleanup_expired(max_age=300.0)
+    # Allow the fire-and-forget notification task to run
+    import asyncio
+    await asyncio.sleep(0)
+
+    assert record.state == "expiring"
+    assert len(notifications) >= 1
+    expiring_notifications = [n for n in notifications if n.get("event_type") == "expiring"]
+    assert len(expiring_notifications) == 1
+    assert "escalation_suggestions" in expiring_notifications[0]
+    suggestions = expiring_notifications[0]["escalation_suggestions"]
+    strategies = {s["strategy"] for s in suggestions}
+    assert "session_exact" in strategies
+    assert "family_session" in strategies  # desktop_view_* family
+
+
+def test_expiring_approval_can_be_resolved():
+    engine = ToolPolicyEngine()
+    now = time.time()
+    engine.create_approval_request(
+        request_id="exp-3",
+        tool_name="desktop_control_click",
+        agent_name="test",
+        args={},
+        session_id="sess-exp",
+        reason="test",
+        expires_at=now + 10.0,
+    )
+    record = engine._approvals["exp-3"]
+    record.state = "expiring"
+
+    result = engine.resolve_approval("exp-3", approved=True, reason="user approved")
+    assert result is not None
+    assert result.state == "approved"
+
+
+def test_query_approvals_pending_includes_expiring():
+    engine = ToolPolicyEngine()
+    now = time.time()
+    engine.create_approval_request(
+        request_id="exp-4a",
+        tool_name="run_shell",
+        agent_name="test",
+        args={},
+        session_id="sess-exp",
+        reason="test",
+        expires_at=now + 600.0,
+    )
+    engine.create_approval_request(
+        request_id="exp-4b",
+        tool_name="desktop_ax_snapshot",
+        agent_name="test",
+        args={},
+        session_id="sess-exp",
+        reason="test",
+        expires_at=now + 600.0,
+    )
+    engine._approvals["exp-4b"].state = "expiring"
+
+    result = engine.query_approvals(session_id="sess-exp", state="pending")
+    ids = [a["request_id"] for a in result["approvals"]]
+    assert "exp-4a" in ids
+    assert "exp-4b" in ids
+
+
+def test_escalation_suggestions_include_family_for_desktop_tools():
+    engine = ToolPolicyEngine()
+    now = time.time()
+    engine.create_approval_request(
+        request_id="esc-1",
+        tool_name="desktop_ax_find",
+        agent_name="test",
+        args={},
+        session_id="sess-esc",
+        reason="test",
+        expires_at=now + 100.0,
+    )
+    record = engine._approvals["esc-1"]
+    suggestions = engine._escalation_suggestions(record)
+    strategies = {s["strategy"] for s in suggestions}
+    assert "session_exact" in strategies
+    assert "family_session" in strategies
+    family = next(s for s in suggestions if s["strategy"] == "family_session")
+    assert family["tool_pattern"] == "desktop_ax_*"
+
+
+def test_escalation_suggestions_session_only_for_non_desktop():
+    engine = ToolPolicyEngine()
+    now = time.time()
+    engine.create_approval_request(
+        request_id="esc-2",
+        tool_name="run_shell",
+        agent_name="test",
+        args={},
+        session_id="sess-esc",
+        reason="test",
+        expires_at=now + 100.0,
+    )
+    record = engine._approvals["esc-2"]
+    suggestions = engine._escalation_suggestions(record)
+    strategies = {s["strategy"] for s in suggestions}
+    assert strategies == {"session_exact"}
+
+
+@pytest.mark.asyncio
+async def test_cleanup_expired_expires_expiring_approval_after_ttl():
+    engine = ToolPolicyEngine()
+    notifications = []
+
+    async def _capture(payload):
+        notifications.append(payload)
+
+    engine.set_notifier(_capture)
+
+    now = time.time()
+    engine.create_approval_request(
+        request_id="exp-5",
+        tool_name="desktop_control_type",
+        agent_name="test",
+        args={},
+        session_id="sess-exp",
+        reason="test",
+        expires_at=now - 1.0,  # already expired
+    )
+    record = engine._approvals["exp-5"]
+    record.state = "expiring"  # was already marked expiring
+
+    engine.cleanup_expired(max_age=300.0)
+    import asyncio
+    await asyncio.sleep(0)
+
+    assert record.state == "expired"
+    expired_notifications = [n for n in notifications if n.get("event_type") == "expired"]
+    assert len(expired_notifications) == 1
