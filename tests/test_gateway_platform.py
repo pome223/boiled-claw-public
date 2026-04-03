@@ -496,7 +496,15 @@ async def test_run_control_loop_http_adds_current_browser_constraints(
     async def _fake_current_browser_runtime_error(_goal: str):
         return None
 
-    async def _fake_control_loop_run(*, goal, user_id, constraints, session_id):
+    async def _fake_control_loop_run(
+        *,
+        goal,
+        user_id,
+        constraints,
+        session_id,
+        initial_state=None,
+        reset_if_terminal=False,
+    ):
         captured["goal"] = goal
         captured["user_id"] = user_id
         captured["constraints"] = constraints
@@ -537,7 +545,15 @@ async def test_control_loop_task_preserves_control_ui_tab_for_current_browser(
     async def _fake_current_browser_runtime_error(_goal: str):
         return None
 
-    async def _fake_control_loop_run(*, goal, user_id, constraints, session_id):
+    async def _fake_control_loop_run(
+        *,
+        goal,
+        user_id,
+        constraints,
+        session_id,
+        initial_state=None,
+        reset_if_terminal=False,
+    ):
         captured["goal"] = goal
         captured["user_id"] = user_id
         captured["constraints"] = constraints
@@ -833,7 +849,15 @@ def test_websocket_auto_routes_longform_research_to_control_loop(monkeypatch, tm
             ),
         )
 
-    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+    async def _fake_control_run(
+        *,
+        goal: str,
+        user_id: str,
+        constraints=None,
+        session_id=None,
+        initial_state=None,
+        reset_if_terminal=False,
+    ):
         assert goal == "中東情勢を詳細に調べてレポートを書いて"
         assert user_id == "alice"
         return ExecutionResult(
@@ -959,7 +983,15 @@ def test_websocket_forces_desktop_playback_request_to_control_loop(monkeypatch, 
             ),
         )
 
-    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+    async def _fake_control_run(
+        *,
+        goal: str,
+        user_id: str,
+        constraints=None,
+        session_id=None,
+        initial_state=None,
+        reset_if_terminal=False,
+    ):
         assert goal == "Djayを開いて曲をかけて"
         assert user_id == "alice"
         return ExecutionResult(
@@ -1796,6 +1828,8 @@ def test_http_task_replay_endpoint_creates_child_control_loop_task(monkeypatch, 
         parent_task_id=None,
         replay_of_task_id=None,
         compare_to_task_id=None,
+        initial_state=None,
+        reset_if_terminal=False,
     ):
         captured["session_id"] = session_id
         captured["user_id"] = user_id
@@ -1805,6 +1839,8 @@ def test_http_task_replay_endpoint_creates_child_control_loop_task(monkeypatch, 
         captured["parent_task_id"] = parent_task_id
         captured["replay_of_task_id"] = replay_of_task_id
         captured["compare_to_task_id"] = compare_to_task_id
+        captured["initial_state"] = initial_state
+        captured["reset_if_terminal"] = reset_if_terminal
 
     monkeypatch.setattr(gateway, "_start_control_loop_run", _fake_start_control_loop_run)
 
@@ -1830,10 +1866,68 @@ def test_http_task_replay_endpoint_creates_child_control_loop_task(monkeypatch, 
     assert captured["parent_task_id"] == source_task["task_id"]
     assert captured["replay_of_task_id"] == source_task["task_id"]
     assert captured["compare_to_task_id"] == source_task["task_id"]
+    assert captured["initial_state"] is None
+    assert captured["reset_if_terminal"] is True
 
     stored_replay = store.get(replay_task["task_id"])
     assert stored_replay is not None
     assert stored_replay["parent_task_id"] == source_task["task_id"]
+
+
+def test_http_task_replay_endpoint_accepts_from_step_tail_seed(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    store = server_module.get_task_store()
+    source_task = store.create(
+        kind="control_loop",
+        title="Replay desktop playback",
+        status="failed",
+        owner_session_id="sess-replay-http",
+        owner_user_id="alice",
+        artifacts={
+            "resume_context": {
+                "goal": "Replay desktop playback",
+                "constraints": ["preserve-control-ui-tab"],
+            },
+            "result": {
+                "success": False,
+                "final_text": "verification failed",
+                "approved_plan": {
+                    "plan_id": "plan-1",
+                    "risk_level": "medium",
+                    "steps": [
+                        {"step_id": "launch_djay", "title": "Launch Djay"},
+                        {"step_id": "verify_visual_state", "title": "Verify visual state"},
+                    ],
+                },
+                "step_trace": [
+                    {"step_id": "launch_djay", "step_type": "plan", "status": "succeeded"},
+                    {"step_id": "verify_visual_state", "step_type": "plan", "status": "failed"},
+                ],
+                "tail_replay_from_step_id": "verify_visual_state",
+            },
+        },
+    )
+    captured: dict[str, object] = {}
+
+    async def _fake_start_control_loop_run(**kwargs):
+        captured.update(kwargs)
+
+    monkeypatch.setattr(gateway, "_start_control_loop_run", _fake_start_control_loop_run)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            f"/tasks/{source_task['task_id']}/replay",
+            json={"from_step": "verify_visual_state"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["replay_from_step"] == "verify_visual_state"
+    assert payload["replay_mode"] == "tail"
+    assert captured["reset_if_terminal"] is True
+    assert captured["initial_state"]["replay:from_step"] == "verify_visual_state"
+    assert captured["initial_state"]["replay:context"]["mode"] == "tail"
+    assert captured["initial_state"]["plan:approved"]["plan_id"] == "plan-1"
 
 
 def test_http_task_replay_endpoint_requires_task_owner_identity(monkeypatch, tmp_path):
@@ -1901,6 +1995,16 @@ def test_http_task_compare_endpoint_defaults_to_latest_replay(monkeypatch, tmp_p
                 "artifact_refs": [
                     "data/screenshots/baseline-before.png",
                 ],
+                "step_trace": [
+                    {
+                        "step_id": "verify_visual_state",
+                        "title": "Verify visual state",
+                        "step_type": "plan",
+                        "status": "failed",
+                        "output_summary": "evidence thin",
+                        "failed_criteria": ["music_playing"],
+                    }
+                ],
                 "repair_count": 1,
             },
         },
@@ -1930,6 +2034,16 @@ def test_http_task_compare_endpoint_defaults_to_latest_replay(monkeypatch, tmp_p
                     "data/screenshots/replay-before.png",
                     "data/screenshots/replay-after.png",
                 ],
+                "step_trace": [
+                    {
+                        "step_id": "verify_visual_state",
+                        "title": "Verify visual state",
+                        "step_type": "plan",
+                        "status": "succeeded",
+                        "output_summary": "captured fresh screenshots",
+                        "failed_criteria": [],
+                    }
+                ],
                 "repair_count": 0,
             },
         },
@@ -1951,6 +2065,8 @@ def test_http_task_compare_endpoint_defaults_to_latest_replay(monkeypatch, tmp_p
         "data/screenshots/replay-after.png",
     ]
     assert payload["right"]["timeline"]["total"] >= 1
+    assert payload["step_compare"]["changed"] >= 1
+    assert payload["step_compare"]["rows"][0]["step_id"] == "verify_visual_state"
     assert any("verification changed" in item for item in payload["summary"])
 
 
@@ -2104,7 +2220,15 @@ def test_websocket_control_loop_approval_resume_uses_session_task_goal(monkeypat
 def test_http_control_loop_run_returns_pending_approval(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
-    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+    async def _fake_control_run(
+        *,
+        goal: str,
+        user_id: str,
+        constraints=None,
+        session_id=None,
+        initial_state=None,
+        reset_if_terminal=False,
+    ):
         assert goal == "Ship the ADK-aligned runtime"
         assert user_id == "alice"
         assert session_id
@@ -2153,7 +2277,15 @@ def test_http_control_loop_run_creates_task_object(monkeypatch, tmp_path):
     async def _fake_runtime_error(goal: str):
         return None
 
-    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+    async def _fake_control_run(
+        *,
+        goal: str,
+        user_id: str,
+        constraints=None,
+        session_id=None,
+        initial_state=None,
+        reset_if_terminal=False,
+    ):
         assert goal == "Inspect current browser session"
         assert session_id
         return ExecutionResult(
@@ -2191,7 +2323,15 @@ def test_http_control_loop_run_creates_task_object(monkeypatch, tmp_path):
 def test_websocket_control_run_emits_control_approval_request(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
-    async def _fake_control_run(*, goal: str, user_id: str, constraints=None, session_id=None):
+    async def _fake_control_run(
+        *,
+        goal: str,
+        user_id: str,
+        constraints=None,
+        session_id=None,
+        initial_state=None,
+        reset_if_terminal=False,
+    ):
         return ExecutionResult(
             request_id="req-1",
             session_id=session_id or "session-1",

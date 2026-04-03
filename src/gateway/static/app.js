@@ -1325,6 +1325,8 @@ function renderTaskComparison(comparison) {
   const right = comparison.right || {};
   const leftResult = left.result || {};
   const rightResult = right.result || {};
+  const stepCompare = comparison.step_compare || {};
+  const stepRows = Array.isArray(stepCompare.rows) ? stepCompare.rows : [];
   const summaryItems = Array.isArray(comparison.summary) ? comparison.summary : [];
   const summaryHtml = summaryItems.length
     ? `<ul class="detail-list">${summaryItems.map((item) => `<li>${escapeHtml(String(item))}</li>`).join("")}</ul>`
@@ -1341,6 +1343,24 @@ function renderTaskComparison(comparison) {
   );
   const leftLabel = leftIsReplay ? "Replay" : "Baseline";
   const rightLabel = rightIsReplay ? "Replay" : "Baseline";
+  const renderStepRow = (row) => {
+    const leftStep = row.left || {};
+    const rightStep = row.right || {};
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div>`,
+      `<div class="k">${escapeHtml(row.title || row.step_id || "step")}</div>`,
+      `<div class="item-meta mono">${escapeHtml(row.step_id || "-")}</div>`,
+      `</div>`,
+      row.changed ? `<span class="tag warning">changed</span>` : `<span class="tag">same</span>`,
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(`${leftStep.status || "-"} -> ${rightStep.status || "-"}`)}</div>`,
+      `<div class="item-meta">${escapeHtml(`${leftStep.output_summary || "-"} -> ${rightStep.output_summary || "-"}`)}</div>`,
+      `<div class="item-meta">${escapeHtml(`failed: ${(leftStep.failed_criteria || []).join(", ") || "-"} -> ${(rightStep.failed_criteria || []).join(", ") || "-"}`)}</div>`,
+      `</div>`,
+    ].join("");
+  };
   const renderSide = (label, task, snapshot) => [
     `<div class="detail-card">`,
     `<div class="k">${escapeHtml(label)}</div>`,
@@ -1365,6 +1385,10 @@ function renderTaskComparison(comparison) {
     renderSide(leftLabel, leftTask, leftResult),
     renderSide(rightLabel, rightTask, rightResult),
     `</div>`,
+    `<div class="k">Step Diff</div>`,
+    stepRows.length
+      ? `<div class="detail-grid">${stepRows.map(renderStepRow).join("")}</div>`
+      : `<div class="muted">No step-level diff available.</div>`,
     `</div>`,
   ].join("");
 }
@@ -1380,6 +1404,9 @@ function renderTaskDetail(task) {
   const taskTimeline = Array.isArray(dashboardState.taskTimeline) ? dashboardState.taskTimeline : [];
   const taskTimelinePagination = dashboardState.taskTimelinePagination;
   const taskComparison = dashboardState.taskComparison;
+  const resultSnapshot = artifacts.result && typeof artifacts.result === "object" ? artifacts.result : {};
+  const stepTrace = Array.isArray(resultSnapshot.step_trace) ? resultSnapshot.step_trace : [];
+  const tailReplayFromStep = String(resultSnapshot.tail_replay_from_step_id || "");
   const detailMeta = [
     task.task_id,
     task.kind || "-",
@@ -1390,6 +1417,31 @@ function renderTaskDetail(task) {
   const canKillSubagent = Boolean(subagentRun && ["accepted", "running", "idle"].includes(String(subagentRun.status || "").toLowerCase()));
   const auditQuery = task.run_id || task.task_id || task.title || "";
   const canReplay = task.kind === "control_loop" && Boolean(artifacts.resume_context?.goal || task.title);
+  const renderStepTrace = () => {
+    if (!stepTrace.length) {
+      return `<div class="muted">No step trace recorded yet.</div>`;
+    }
+    return `<div class="detail-grid">${stepTrace.map((step) => {
+      const stepId = String(step.step_id || "");
+      const canReplayFromHere = canReplay && String(step.step_type || "") === "plan" && stepId;
+      return [
+        `<div class="detail-card">`,
+        `<div class="detail-heading">`,
+        `<div>`,
+        `<div class="k">${escapeHtml(step.title || stepId || "step")}</div>`,
+        `<div class="item-meta mono">${escapeHtml(stepId || "-")}</div>`,
+        `</div>`,
+        statusTag(step.status || "unknown"),
+        `</div>`,
+        `<div class="item-meta">${escapeHtml(step.output_summary || step.description || "-")}</div>`,
+        `<div class="item-meta">${escapeHtml(`scope=${step.replay_scope || "-"} failed=${(step.failed_criteria || []).join(", ") || "-"}`)}</div>`,
+        canReplayFromHere
+          ? `<div class="detail-actions"><button class="btn" type="button" data-action="task-replay-from-step" data-task-id="${escapeAttr(task.task_id || "")}" data-from-step="${escapeAttr(stepId)}">Replay From Here</button></div>`
+          : "",
+        `</div>`,
+      ].join("");
+    }).join("")}</div>`;
+  };
   const compareTarget = task.parent_task_id || childTasks[0]?.task_id || "";
   const compareLabel = task.parent_task_id ? "Compare With Parent" : (childTasks[0] ? "Compare With Latest Replay" : "");
 
@@ -1423,10 +1475,15 @@ function renderTaskDetail(task) {
     `<div class="detail-actions">`,
     `<button class="btn" type="button" data-action="open-related-audit" data-audit-session-id="${escapeAttr(task.owner_session_id || "")}" data-audit-query="${escapeAttr(auditQuery)}" data-audit-task-id="${escapeAttr(task.task_id || "")}" data-audit-run-id="${escapeAttr(task.run_id || "")}">Open Related Audit</button>`,
     canReplay ? `<button class="btn primary" type="button" data-action="task-replay" data-task-id="${escapeAttr(task.task_id || "")}">Replay Task</button>` : "",
+    (canReplay && tailReplayFromStep) ? `<button class="btn" type="button" data-action="task-replay-from-step" data-task-id="${escapeAttr(task.task_id || "")}" data-from-step="${escapeAttr(tailReplayFromStep)}">Replay Verification Tail</button>` : "",
     compareTarget ? `<button class="btn" type="button" data-action="task-compare" data-task-id="${escapeAttr(task.task_id || "")}" data-other-task-id="${escapeAttr(compareTarget)}">${escapeHtml(compareLabel)}</button>` : "",
     `</div>`,
     `</div>`,
     renderTaskComparison(taskComparison),
+    `<div class="detail-section">`,
+    `<div class="k">Step Trace</div>`,
+    renderStepTrace(),
+    `</div>`,
     subagentRun ? [
       `<div class="detail-section">`,
       `<div class="k">Subagent Run</div>`,
@@ -1805,14 +1862,19 @@ async function killSubagentFromPanel(runId) {
   }
 }
 
-async function replayTaskFromPanel(taskId) {
+async function replayTaskFromPanel(taskId, fromStep = "") {
   const base = toHttpBaseUrl(currentSettings());
   try {
     const payload = await fetchJsonOrThrow(`${base}/tasks/${encodeURIComponent(taskId)}/replay`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fromStep ? { from_step: fromStep } : {}),
     });
-    addSystemMessage(`replay accepted: ${payload.task?.task_id || "-"}`);
+    addSystemMessage(
+      fromStep
+        ? `tail replay accepted from ${fromStep}: ${payload.task?.task_id || "-"}`
+        : `replay accepted: ${payload.task?.task_id || "-"}`
+    );
     scheduleDashboardRefresh(50);
     if (payload.task?.task_id) {
       void loadTaskDetail(payload.task.task_id);
@@ -1893,6 +1955,13 @@ function handleSelectionPanelClick(event) {
   }
   if (actionButton.dataset.action === "task-replay") {
     void replayTaskFromPanel(actionButton.dataset.taskId || "");
+    return;
+  }
+  if (actionButton.dataset.action === "task-replay-from-step") {
+    void replayTaskFromPanel(
+      actionButton.dataset.taskId || "",
+      actionButton.dataset.fromStep || "",
+    );
     return;
   }
   if (actionButton.dataset.action === "task-compare") {

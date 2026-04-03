@@ -162,6 +162,7 @@ You MUST only use tools that correspond to the approved capabilities in the plan
 Current session state:
 - Approved Plan: {_state_block(ctx, StateKeys.PLAN_APPROVED)}
 - Approval Status: {_state_block(ctx, StateKeys.APPROVAL_STATUS)}
+- Replay Context: {_state_block(ctx, StateKeys.REPLAY_CONTEXT)}
 
 If approval status is not one of [policy_approved, human_approved, auto_approved],
 do NOT call any tools. Return a JSON error immediately.
@@ -181,6 +182,10 @@ chat tab remains connected.
 When preserving that tab, focus the browser window whose title contains
 "boiled-claw Control UI" instead of focusing an arbitrary browser window by
 app name alone.
+If Replay Context includes "from_step", resume from that step onward.
+Treat earlier approved steps as already satisfied unless redoing them is
+strictly necessary to regain focus, recover the target application state, or
+gather fresh evidence for the remaining suffix.
 
 Return ONLY a JSON object:
 {{

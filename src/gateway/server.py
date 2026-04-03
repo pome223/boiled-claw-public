@@ -69,10 +69,11 @@ from src.gateway.routing import (
 )
 from src.runtime.tool_events import set_tool_event_notifier
 from src.runtime.session_service import create_session_service, describe_session_backend
+from src.runtime.state_keys import StateKeys
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 from src.runtime.task_store import get_task_store
-from src.tools.tasks import create_task_record, update_task_record
+from src.tools.tasks import append_task_event_record, create_task_record, update_task_record
 
 _HEARTBEAT_INTERVAL = 30  # seconds
 _AGENT_TIMEOUT = 120       # seconds
@@ -1415,6 +1416,8 @@ class GatewayServer:
         request_id: Optional[str],
         replay_of_task_id: Optional[str] = None,
         compare_to_task_id: Optional[str] = None,
+        replay_from_step: Optional[str] = None,
+        replay_mode: Optional[str] = None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         artifacts: dict[str, Any] = {
             "goal": goal,
@@ -1436,6 +1439,14 @@ class GatewayServer:
             artifacts["resume_context"]["replay_of_task_id"] = replay_of_task_id
             metadata["replay_of_task_id"] = replay_of_task_id
             metadata["compare_to_task_id"] = compare_to_task_id or replay_of_task_id
+            if replay_from_step:
+                artifacts["replay"]["from_step"] = replay_from_step
+                artifacts["resume_context"]["replay_from_step"] = replay_from_step
+                metadata["replay_from_step"] = replay_from_step
+            if replay_mode:
+                artifacts["replay"]["mode"] = replay_mode
+                artifacts["resume_context"]["replay_mode"] = replay_mode
+                metadata["replay_mode"] = replay_mode
         return artifacts, metadata
 
     def _create_control_loop_task_record(
@@ -1450,6 +1461,8 @@ class GatewayServer:
         parent_task_id: Optional[str] = None,
         replay_of_task_id: Optional[str] = None,
         compare_to_task_id: Optional[str] = None,
+        replay_from_step: Optional[str] = None,
+        replay_mode: Optional[str] = None,
     ) -> dict[str, Any]:
         artifacts, metadata = self._control_loop_seed_payload(
             goal=goal,
@@ -1458,6 +1471,8 @@ class GatewayServer:
             request_id=request_id,
             replay_of_task_id=replay_of_task_id,
             compare_to_task_id=compare_to_task_id,
+            replay_from_step=replay_from_step,
+            replay_mode=replay_mode,
         )
         return create_task_record(
             kind="control_loop",
@@ -1516,6 +1531,9 @@ class GatewayServer:
             "criteria_count": len(criteria),
             "verification_report": verification_report,
             "verification_inputs": verification_inputs,
+            "approved_plan": result.get("approved_plan") if isinstance(result.get("approved_plan"), dict) else {},
+            "step_trace": result.get("step_trace") if isinstance(result.get("step_trace"), list) else [],
+            "tail_replay_from_step_id": str(result.get("tail_replay_from_step_id") or ""),
         }
 
     @staticmethod
@@ -1526,6 +1544,128 @@ class GatewayServer:
             counts[kind] = counts.get(kind, 0) + 1
         return counts
 
+    @staticmethod
+    def _step_compare_rows(
+        left_steps: list[dict[str, Any]],
+        right_steps: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        order: list[str] = []
+        left_by_id: dict[str, dict[str, Any]] = {}
+        right_by_id: dict[str, dict[str, Any]] = {}
+        for side, bucket in ((left_by_id, left_steps), (right_by_id, right_steps)):
+            for item in bucket:
+                if not isinstance(item, dict):
+                    continue
+                step_id = str(item.get("step_id") or "").strip()
+                if not step_id:
+                    continue
+                if step_id not in order:
+                    order.append(step_id)
+                side[step_id] = item
+
+        rows: list[dict[str, Any]] = []
+        for step_id in order:
+            left_item = left_by_id.get(step_id, {})
+            right_item = right_by_id.get(step_id, {})
+            title = str(
+                left_item.get("title")
+                or right_item.get("title")
+                or step_id
+            )
+            left_status = str(left_item.get("status") or "-")
+            right_status = str(right_item.get("status") or "-")
+            changed = any(
+                (
+                    left_status != right_status,
+                    str(left_item.get("output_summary") or "") != str(right_item.get("output_summary") or ""),
+                    list(left_item.get("failed_criteria") or []) != list(right_item.get("failed_criteria") or []),
+                )
+            )
+            rows.append(
+                {
+                    "step_id": step_id,
+                    "title": title,
+                    "left": left_item,
+                    "right": right_item,
+                    "changed": changed,
+                }
+            )
+        return rows
+
+    @staticmethod
+    def _suggest_tail_replay_from_task(task: dict[str, Any]) -> str:
+        result = GatewayServer._task_result_snapshot(task)
+        explicit = str(result.get("tail_replay_from_step_id") or "").strip()
+        if explicit:
+            return explicit
+        for item in result.get("step_trace") or []:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("step_type") or "") != "plan":
+                continue
+            if item.get("failed_criteria"):
+                return str(item.get("step_id") or "").strip()
+        return ""
+
+    def _build_partial_replay_seed(
+        self,
+        source_task: dict[str, Any],
+        *,
+        from_step: str,
+    ) -> dict[str, Any]:
+        result = self._task_result_snapshot(source_task)
+        approved_plan = result.get("approved_plan")
+        approved_plan = approved_plan if isinstance(approved_plan, dict) else {}
+        if not approved_plan:
+            raise HTTPException(status_code=400, detail="task is missing approved plan snapshot")
+        normalized_from_step = str(from_step or "").strip()
+        allowed_step_ids = {
+            str(step.get("step_id") or "").strip()
+            for step in approved_plan.get("steps", [])
+            if isinstance(step, dict)
+        }
+        if normalized_from_step and normalized_from_step not in allowed_step_ids:
+            raise HTTPException(status_code=400, detail=f"unknown replay step: {normalized_from_step}")
+        return {
+            StateKeys.PLAN_APPROVED: approved_plan,
+            StateKeys.PLAN_RISK_LEVEL: approved_plan.get("risk_level"),
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.APPROVAL_REQUEST: None,
+            StateKeys.REPLAY_SOURCE_TASK_ID: source_task.get("task_id"),
+            StateKeys.REPLAY_FROM_STEP: normalized_from_step,
+            StateKeys.REPLAY_CONTEXT: {
+                "source_task_id": source_task.get("task_id"),
+                "from_step": normalized_from_step,
+                "mode": "tail",
+                "previous_verification_status": result.get("verification_status"),
+                "previous_failed_criteria": result.get("failed_criteria") or [],
+                "step_trace": result.get("step_trace") or [],
+            },
+        }
+
+    def _persist_control_loop_step_events(
+        self,
+        *,
+        task_id: str,
+        result: ExecutionResult,
+    ) -> None:
+        step_trace = result.metadata.get("step_trace")
+        if not isinstance(step_trace, list) or not step_trace:
+            return
+        for item in step_trace:
+            if not isinstance(item, dict):
+                continue
+            append_task_event_record(
+                task_id,
+                event_type=f"step_{str(item.get('step_type') or 'plan')}",
+                title=str(item.get("title") or item.get("step_id") or "step"),
+                status=str(item.get("status") or ""),
+                payload={
+                    "summary": str(item.get("output_summary") or ""),
+                    "step": item,
+                },
+            )
+
     def _build_task_compare_payload(
         self,
         left_task: dict[str, Any],
@@ -1535,6 +1675,10 @@ class GatewayServer:
         right_timeline = self._build_task_timeline_payload(right_task, page=1, page_size=40)
         left_result = self._task_result_snapshot(left_task)
         right_result = self._task_result_snapshot(right_task)
+        step_rows = self._step_compare_rows(
+            left_result.get("step_trace") or [],
+            right_result.get("step_trace") or [],
+        )
         summary: list[str] = []
         if left_task.get("status") != right_task.get("status"):
             summary.append(
@@ -1562,6 +1706,9 @@ class GatewayServer:
                 f"{', '.join(left_result['failed_criteria']) or '-'} -> "
                 f"{', '.join(right_result['failed_criteria']) or '-'}"
             )
+        changed_step_count = sum(1 for row in step_rows if row.get("changed"))
+        if changed_step_count:
+            summary.append(f"step-level diff detected in {changed_step_count} step(s)")
         if not summary:
             summary.append("No high-level diff detected beyond timeline ordering.")
 
@@ -1583,6 +1730,11 @@ class GatewayServer:
                     "kind_counts": self._timeline_kind_counts(right_timeline["entries"]),
                     "entries": right_timeline["entries"][:8],
                 },
+            },
+            "step_compare": {
+                "total": len(step_rows),
+                "changed": changed_step_count,
+                "rows": step_rows,
             },
             "summary": summary,
         }
@@ -1622,17 +1774,36 @@ class GatewayServer:
         for event in task_history.get("events") or []:
             if not isinstance(event, dict):
                 continue
+            payload = event.get("payload") or {}
+            payload = payload if isinstance(payload, dict) else {}
+            step_payload = payload.get("step")
+            step_payload = step_payload if isinstance(step_payload, dict) else {}
+            summary = (
+                str(payload.get("summary") or "").strip()
+                or str(step_payload.get("output_summary") or "").strip()
+                or str(event.get("event_type") or "updated")
+            )
             timeline_entries.append(
                 {
                     "timeline_id": str(event.get("entry_id") or ""),
                     "kind": "task_event",
                     "timestamp": float(event.get("timestamp") or 0.0),
-                    "title": str(event.get("title") or task.get("title") or "task"),
-                    "status": str(event.get("status") or task.get("status") or ""),
+                    "title": str(
+                        step_payload.get("title")
+                        or event.get("title")
+                        or task.get("title")
+                        or "task"
+                    ),
+                    "status": str(
+                        step_payload.get("status")
+                        or event.get("status")
+                        or task.get("status")
+                        or ""
+                    ),
                     "event_type": str(event.get("event_type") or "updated"),
-                    "summary": str(event.get("event_type") or "updated"),
+                    "summary": summary,
                     "task_id": task.get("task_id"),
-                    "payload": event.get("payload") or {},
+                    "payload": payload,
                     "task_event": event,
                 }
             )
@@ -2236,6 +2407,21 @@ class GatewayServer:
             )
             if effective_user_id != user_id:
                 raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+            body: dict[str, Any] | object = {}
+            if request.headers.get("content-type", "").startswith("application/json"):
+                try:
+                    body = await request.json()
+                except Exception:
+                    body = {}
+            body = body if isinstance(body, dict) else {}
+            replay_from_step = str(body.get("from_step") or "").strip()
+            replay_mode = "tail" if replay_from_step else "full"
+            initial_state = None
+            if replay_from_step:
+                initial_state = self._build_partial_replay_seed(
+                    task,
+                    from_step=replay_from_step,
+                )
 
             replay_task = self._create_control_loop_task_record(
                 user_id=user_id,
@@ -2247,6 +2433,8 @@ class GatewayServer:
                 parent_task_id=task_id,
                 replay_of_task_id=task_id,
                 compare_to_task_id=task_id,
+                replay_from_step=replay_from_step or None,
+                replay_mode=replay_mode,
             )
             replay_task_id = str(replay_task["task_id"])
             await self._start_control_loop_run(
@@ -2258,12 +2446,16 @@ class GatewayServer:
                 parent_task_id=task_id,
                 replay_of_task_id=task_id,
                 compare_to_task_id=task_id,
+                initial_state=initial_state,
+                reset_if_terminal=True,
             )
             return {
                 "accepted": True,
                 "task": replay_task,
                 "replay_of_task_id": task_id,
                 "compare_to_task_id": task_id,
+                "replay_from_step": replay_from_step or None,
+                "replay_mode": replay_mode,
             }
 
         @self.app.get("/tasks/{task_id}/compare")
@@ -2761,6 +2953,8 @@ class GatewayServer:
         parent_task_id: Optional[str] = None,
         replay_of_task_id: Optional[str] = None,
         compare_to_task_id: Optional[str] = None,
+        initial_state: Optional[dict[str, Any]] = None,
+        reset_if_terminal: bool = False,
     ) -> None:
         await self.manager.abort(session_id)
         await self._desktop_clear_stop(session_id=session_id, user_id=user_id)
@@ -2775,6 +2969,8 @@ class GatewayServer:
                 parent_task_id,
                 replay_of_task_id,
                 compare_to_task_id,
+                initial_state,
+                reset_if_terminal,
             ),
             name=f"control:{session_id}",
         )
@@ -3101,6 +3297,8 @@ class GatewayServer:
         parent_task_id: Optional[str] = None,
         replay_of_task_id: Optional[str] = None,
         compare_to_task_id: Optional[str] = None,
+        initial_state: Optional[dict[str, Any]] = None,
+        reset_if_terminal: bool = False,
     ) -> None:
         try:
             result = await self._run_control_loop_http(
@@ -3115,6 +3313,8 @@ class GatewayServer:
                 parent_task_id=parent_task_id,
                 replay_of_task_id=replay_of_task_id,
                 compare_to_task_id=compare_to_task_id,
+                initial_state=initial_state,
+                reset_if_terminal=reset_if_terminal,
             )
             self.transcript.append(
                 session_id,
@@ -3473,6 +3673,8 @@ class GatewayServer:
         parent_task_id: Optional[str] = None,
         replay_of_task_id: Optional[str] = None,
         compare_to_task_id: Optional[str] = None,
+        initial_state: Optional[dict[str, Any]] = None,
+        reset_if_terminal: bool = False,
     ) -> tuple[ExecutionResult, str]:
         effective_constraints = self._merge_control_constraints(
             goal=goal,
@@ -3486,6 +3688,16 @@ class GatewayServer:
             request_id=request_id,
             replay_of_task_id=replay_of_task_id,
             compare_to_task_id=compare_to_task_id,
+            replay_from_step=(
+                str(initial_state.get(StateKeys.REPLAY_FROM_STEP) or "").strip()
+                if isinstance(initial_state, dict)
+                else None
+            ),
+            replay_mode=(
+                str((initial_state.get(StateKeys.REPLAY_CONTEXT) or {}).get("mode") or "").strip()
+                if isinstance(initial_state, dict) and isinstance(initial_state.get(StateKeys.REPLAY_CONTEXT), dict)
+                else None
+            ),
         )
         if task_id:
             update_task_record(
@@ -3538,6 +3750,8 @@ class GatewayServer:
             user_id=user_id,
             constraints=effective_constraints,
             session_id=session_id,
+            initial_state=initial_state,
+            reset_if_terminal=reset_if_terminal,
         )
         result.metadata["task_id"] = task_id
         needs_human = bool(result.metadata.get("needs_human"))
@@ -3565,6 +3779,9 @@ class GatewayServer:
                     "verification_report": result.metadata.get("verification_report"),
                     "verification_inputs": result.metadata.get("verification_inputs"),
                     "artifact_refs": result.metadata.get("artifact_refs"),
+                    "approved_plan": result.metadata.get("approved_plan"),
+                    "step_trace": result.metadata.get("step_trace"),
+                    "tail_replay_from_step_id": result.metadata.get("tail_replay_from_step_id"),
                     "repair_count": result.repair_count,
                     "promoted_memory_ids": result.promoted_memory_ids,
                     "approval_request": result.metadata.get("approval_request"),
@@ -3574,6 +3791,7 @@ class GatewayServer:
                     "goal": goal,
                     "constraints": effective_constraints,
                     "plan_id": result.plan_id,
+                    "approved_plan": result.metadata.get("approved_plan"),
                     "approval_request": result.metadata.get("approval_request"),
                 },
             },
@@ -3581,10 +3799,18 @@ class GatewayServer:
                 "source": source,
                 "request_id": request_id,
                 "needs_human": needs_human,
+                **(
+                    {
+                        "replay_from_step": str(initial_state.get(StateKeys.REPLAY_FROM_STEP) or "").strip(),
+                    }
+                    if isinstance(initial_state, dict) and initial_state.get(StateKeys.REPLAY_FROM_STEP)
+                    else {}
+                ),
                 **({"approval_expired": True} if approval_expired else {}),
             },
             error=error_text,
         )
+        self._persist_control_loop_step_events(task_id=task_id, result=result)
         return result, task_id
 
     async def _run_control_loop_http(
@@ -3601,6 +3827,8 @@ class GatewayServer:
         parent_task_id: Optional[str] = None,
         replay_of_task_id: Optional[str] = None,
         compare_to_task_id: Optional[str] = None,
+        initial_state: Optional[dict[str, Any]] = None,
+        reset_if_terminal: bool = False,
     ):
         result, _task_id = await self._run_control_loop_with_task(
             user_id=user_id,
@@ -3614,6 +3842,8 @@ class GatewayServer:
             parent_task_id=parent_task_id,
             replay_of_task_id=replay_of_task_id,
             compare_to_task_id=compare_to_task_id,
+            initial_state=initial_state,
+            reset_if_terminal=reset_if_terminal,
         )
         return result
 

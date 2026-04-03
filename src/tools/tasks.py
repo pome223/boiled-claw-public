@@ -108,6 +108,27 @@ def update_task_record(
     )
 
 
+def append_task_event_record(
+    task_id: str,
+    *,
+    event_type: str,
+    payload: Optional[dict[str, Any]] = None,
+    status: Optional[str] = None,
+    title: Optional[str] = None,
+    error: Optional[str] = None,
+    timestamp: Optional[float] = None,
+) -> dict[str, Any] | None:
+    return get_task_store().append_event(
+        task_id,
+        event_type=event_type,
+        payload=payload,
+        status=status,
+        title=title,
+        error=error,
+        timestamp=timestamp,
+    )
+
+
 async def task_create(
     kind: str,
     title: str,

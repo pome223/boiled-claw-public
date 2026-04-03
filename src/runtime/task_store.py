@@ -489,6 +489,75 @@ class TaskStore:
             "task": current,
         }
 
+    def append_event(
+        self,
+        task_id: str,
+        *,
+        event_type: str,
+        payload: Optional[dict[str, Any]] = None,
+        status: Optional[str] = None,
+        title: Optional[str] = None,
+        error: Optional[str] = None,
+        timestamp: Optional[float] = None,
+    ) -> dict[str, Any] | None:
+        current = self.get(task_id)
+        if current is None:
+            return None
+        resolved_status = status if status is not None else current.get("status")
+        resolved_title = title if title is not None else current.get("title")
+        resolved_error = error if error is not None else current.get("error")
+        payload_json = dict(payload or {})
+        ts = float(timestamp or time.time())
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO task_events (
+                    task_id,
+                    owner_session_id,
+                    owner_user_id,
+                    run_id,
+                    timestamp,
+                    event_type,
+                    status,
+                    title,
+                    error,
+                    payload_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    task_id,
+                    current.get("owner_session_id"),
+                    current.get("owner_user_id"),
+                    current.get("run_id"),
+                    ts,
+                    event_type,
+                    resolved_status,
+                    resolved_title,
+                    resolved_error,
+                    json.dumps(payload_json, ensure_ascii=True),
+                ),
+            )
+            event = self._row_to_task_event(
+                (
+                    cursor.lastrowid,
+                    task_id,
+                    current.get("owner_session_id"),
+                    current.get("owner_user_id"),
+                    current.get("run_id"),
+                    ts,
+                    event_type,
+                    resolved_status,
+                    resolved_title,
+                    resolved_error,
+                    json.dumps(payload_json, ensure_ascii=True),
+                )
+            )
+            conn.commit()
+        event_payload = {"event": event, "task": current}
+        self._notify(event_payload)
+        return event
+
     def _notify(self, payload: dict[str, Any]) -> None:
         if self._notifier is None:
             return
