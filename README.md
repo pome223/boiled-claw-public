@@ -755,7 +755,7 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `GET /transcript/sessions?user_id=...` - Transcript-backed session summaries
 - `POST /cron` / `GET /cron` - Cron platform
 - `GET /tasks` / `GET /tasks/{task_id}` - Persistent workflow task objects
-- `GET /tasks/{task_id}/timeline` / `POST /tasks/{task_id}/replay` / `GET /tasks/{task_id}/compare` - Task timeline, replay, and comparison surfaces for control-loop runs
+- `GET /tasks/{task_id}/timeline` / `POST /tasks/{task_id}/replay` / `GET /tasks/{task_id}/compare` - Task timeline, replay, and comparison surfaces for control-loop runs (`POST /tasks/{task_id}/replay` accepts optional JSON `{ "from_step": "<step_id>" }` for tail replay; compare payload includes `step_compare.rows[]`)
 - `GET /runtime/resources` / `GET /runtime/resources/{resource_id}` - Runtime substrate resources
 - `GET /runtime/capabilities` / `POST /runtime/capabilities/invoke` - Canonical capability registry and invoke surface
 - `GET /tools/policy` - Tool policy list
