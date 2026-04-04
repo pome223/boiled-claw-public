@@ -310,6 +310,44 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
 
 
 HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
+    "POST /tasks/supervisors/control-loop": {
+        "description": "Start an opt-in long-running supervisor that repeatedly runs the control loop against a stable maintenance goal.",
+        "request": {
+            "type": "object",
+            "required": ["goal"],
+            "properties": {
+                "goal": {"type": "string"},
+                "constraints": {"type": "array"},
+                "duration_seconds": {"type": "integer"},
+                "interval_seconds": {"type": "integer"},
+                "maintenance_goal": {"type": "string"},
+            },
+        },
+        "response": {
+            "type": "object",
+            "properties": {
+                "accepted": {"type": "boolean"},
+                "task": {"type": "object"},
+                "control_session_id": {"type": "string"},
+                "duration_seconds": {"type": "integer"},
+                "interval_seconds": {"type": "integer"},
+                "max_iterations": {"type": "integer"},
+                "ends_at": {"type": "number"},
+                "next_run_at": {"type": "number"},
+            },
+        },
+    },
+    "POST /tasks/{task_id}/cancel": {
+        "description": "Request a graceful stop for a running control supervisor task.",
+        "response": {
+            "type": "object",
+            "properties": {
+                "accepted": {"type": "boolean"},
+                "task": {"type": "object"},
+                "message": {"type": "string"},
+            },
+        },
+    },
     "GET /tasks/{task_id}/timeline": {
         "description": "Return a merged task timeline combining task state changes, approval lifecycle, and related audit events.",
         "query": {

@@ -759,11 +759,31 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `GET /tasks` / `GET /tasks/{task_id}` - Persistent workflow task objects
 - `GET /tasks/{task_id}/timeline` / `POST /tasks/{task_id}/replay` / `GET /tasks/{task_id}/compare` - Task timeline, replay, and comparison surfaces for control-loop runs (`POST /tasks/{task_id}/replay` accepts optional JSON `{ "from_step": "<step_id>" }` for tail replay; compare payload includes `step_compare.rows[]`)
 - `GET /tasks/analytics` - Cross-session step failure ranking, replay improvement rates, and task overview stats
+- `POST /tasks/supervisors/control-loop` / `POST /tasks/{task_id}/cancel` - Opt-in long-running supervisor that repeatedly runs child control-loop tasks against a stable maintenance goal, plus graceful stop for the current iteration boundary
 - `GET /runtime/resources` / `GET /runtime/resources/{resource_id}` - Runtime substrate resources
 - `GET /runtime/capabilities` / `POST /runtime/capabilities/invoke` - Canonical capability registry and invoke surface
 - `GET /tools/policy` - Tool policy list
 - `GET /tools/approvals` - Approval state list (`state=pending|approved|denied|propagated|expired|all`)
 - `GET /tools/approvals/{request_id}` / `POST /tools/approvals/{request_id}/resolve_bundle` - Approval detail plus session-bundle resolution helpers
+
+### Long-Running Control Supervisor
+
+Use the supervisor surface when you want the existing control loop to keep a long-running objective healthy without turning that objective into app-specific core logic.
+
+```bash
+curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "web_user",
+    "goal": "Keep the desktop playback session healthy for the next hour",
+    "constraints": ["Prefer minimal intervention and stop on unexpected approval prompts."],
+    "duration_seconds": 3600,
+    "interval_seconds": 60
+  }'
+
+# Later, request a graceful stop at the current iteration boundary.
+curl -sS -X POST http://127.0.0.1:18789/tasks/{task_id}/cancel
+```
 
 ### Using with Telegram
 

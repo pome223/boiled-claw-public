@@ -69,6 +69,7 @@ from src.gateway.routing import (
 from src.gateway.task_replay import (
     persist_control_loop_step_events,
 )
+from src.gateway.control_supervisor import ControlLoopSupervisor
 from src.gateway.route_utils import normalize_constraints
 from src.gateway.task_routes import build_task_router
 from src.gateway.audit_routes import build_audit_router
@@ -301,6 +302,10 @@ class GatewayServer:
         self.task_store = get_task_store()
         self.transcript = get_transcript_store()
         self.tool_policy = get_tool_policy_engine()
+        self.control_supervisor = ControlLoopSupervisor(
+            run_control_loop_with_task=self._run_control_loop_with_task,
+            emit_session_event=self._emit_session_event,
+        )
         self._heartbeat_task: Optional[asyncio.Task] = None
         self.app = FastAPI(
             title="boiled-claw Gateway",
@@ -485,6 +490,7 @@ class GatewayServer:
         await scheduler.fire_system_event("startup")
 
     async def _shutdown_gateway(self) -> None:
+        await self.control_supervisor.shutdown()
         set_subagent_notifier(None)
         set_tool_event_notifier(None)
         self.tool_policy.set_notifier(None)
@@ -1460,6 +1466,7 @@ class GatewayServer:
         *,
         user_id: str,
         session_id: str,
+        owner_session_id: Optional[str] = None,
         goal: str,
         constraints: list[str],
         request_id: Optional[str],
@@ -1484,7 +1491,7 @@ class GatewayServer:
             kind="control_loop",
             title=goal,
             status="running",
-            owner_session_id=session_id,
+            owner_session_id=owner_session_id or session_id,
             owner_user_id=user_id,
             parent_task_id=parent_task_id,
             artifacts=artifacts,
@@ -3045,6 +3052,7 @@ class GatewayServer:
         source: str,
         preserve_control_ui_tab: bool,
         task_id: Optional[str] = None,
+        owner_session_id: Optional[str] = None,
         parent_task_id: Optional[str] = None,
         replay_of_task_id: Optional[str] = None,
         compare_to_task_id: Optional[str] = None,
@@ -3086,6 +3094,7 @@ class GatewayServer:
             task = self._create_control_loop_task_record(
                 user_id=user_id,
                 session_id=session_id,
+                owner_session_id=owner_session_id,
                 goal=goal,
                 constraints=effective_constraints,
                 request_id=request_id,
