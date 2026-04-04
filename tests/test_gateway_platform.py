@@ -2070,6 +2070,53 @@ def test_http_task_compare_endpoint_defaults_to_latest_replay(monkeypatch, tmp_p
     assert any("verification changed" in item for item in payload["summary"])
 
 
+def test_openapi_exposes_task_replay_and_compare_contracts(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    payload = response.json()
+    components = payload["components"]["schemas"]
+
+    replay_operation = payload["paths"]["/tasks/{task_id}/replay"]["post"]
+    replay_request_schema = replay_operation["requestBody"]["content"]["application/json"]["schema"]
+    assert replay_request_schema["anyOf"][0]["$ref"].endswith("/TaskReplayRequest")
+    assert replay_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TaskReplayAcceptedResponse"
+    )
+    assert "from_step" in components["TaskReplayRequest"]["properties"]
+
+    compare_operation = payload["paths"]["/tasks/{task_id}/compare"]["get"]
+    assert compare_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TaskCompareResponse"
+    )
+    assert components["TaskCompareResponse"]["properties"]["step_compare"]["$ref"].endswith(
+        "/StepComparePayload"
+    )
+
+
+def test_openapi_exposes_task_timeline_and_audit_contracts(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    payload = response.json()
+
+    timeline_operation = payload["paths"]["/tasks/{task_id}/timeline"]["get"]
+    assert timeline_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TaskTimelineResponse"
+    )
+
+    audit_operation = payload["paths"]["/audit"]["get"]
+    assert audit_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/AuditQueryResponse"
+    )
+
+
 def test_websocket_chat_abort_triggers_desktop_emergency_stop(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
     captured: dict[str, str] = {}

@@ -19,7 +19,7 @@ from datetime import datetime
 import uuid
 from typing import Any, Dict, Optional
 
-from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, HTTPException, Query, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -54,12 +54,11 @@ from src.gateway.protocol import (
     HTTP_ROUTE_SCHEMAS,
     PROTOCOL_VERSION,
     RUNTIME_SUBSTRATE_SCHEMA,
-    ev_connected, ev_chat_done, ev_chat_history, ev_system_event,
+    ev_chat_done, ev_system_event,
     ev_health_tick, ev_cron_update, ev_tools_approval_request,
     ev_control_approval_request,
     ev_tools_approval_update, ev_task_update, ev_audit_append,
     ev_tool_start, ev_tool_result,
-    normalize_client_event, validate_client_event,
 )
 from src.gateway.routing import (
     RoutingDecision,
@@ -68,11 +67,12 @@ from src.gateway.routing import (
     targets_user_browser,
 )
 from src.gateway.task_replay import (
-    build_partial_replay_seed,
-    build_task_compare_payload,
-    parse_task_replay_request,
     persist_control_loop_step_events,
 )
+from src.gateway.route_utils import normalize_constraints
+from src.gateway.task_routes import build_task_router
+from src.gateway.audit_routes import build_audit_router
+from src.gateway.ws_handler import build_websocket_router
 from src.runtime.tool_events import set_tool_event_notifier
 from src.runtime.session_service import create_session_service, describe_session_backend
 from src.runtime.state_keys import StateKeys
@@ -1925,7 +1925,7 @@ class GatewayServer:
             )
             goal = str(body.get("goal") or "").strip()
             session_id = body.get("session_id")
-            constraints = _normalize_constraints(body.get("constraints"))
+            constraints = normalize_constraints(body.get("constraints"))
 
             if not goal:
                 raise HTTPException(status_code=400, detail="goal is required")
@@ -2030,7 +2030,7 @@ class GatewayServer:
                     user_id=user_id,
                     session_id=session_id,
                     goal=resume_goal,
-                    constraints=_normalize_constraints(
+                    constraints=normalize_constraints(
                         (pending.get("plan") or {}).get("constraints")
                     ),
                     source="http",
@@ -2089,182 +2089,8 @@ class GatewayServer:
         async def subagents_list_endpoint(session_id: str):
             return await self.subagent_manager.list_runs(requester_session_id=session_id)
 
-        @self.app.get("/tasks")
-        async def task_list_endpoint(
-            session_id: Optional[str] = None,
-            kind: Optional[str] = None,
-            status: Optional[str] = None,
-            parent_task_id: Optional[str] = None,
-            q: Optional[str] = None,
-            page: int = 1,
-            page_size: Optional[int] = None,
-            limit: int = 20,
-        ):
-            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
-            return get_task_store().query(
-                owner_session_id=session_id,
-                kind=kind,
-                status=status,
-                parent_task_id=parent_task_id,
-                q=q,
-                page=page,
-                page_size=resolved_page_size,
-            )
-
-        @self.app.get("/tasks/{task_id}")
-        async def task_get_endpoint(task_id: str):
-            task = self.task_store.get(task_id)
-            if task is None:
-                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
-            return {"task": task}
-
-        @self.app.get("/tasks/{task_id}/timeline")
-        async def task_timeline_endpoint(
-            task_id: str,
-            page: int = 1,
-            page_size: Optional[int] = None,
-            limit: int = 50,
-        ):
-            task = self.task_store.get(task_id)
-            if task is None:
-                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
-            resolved_page_size = max(1, min(int(page_size or limit or 50), 200))
-            return self._build_task_timeline_payload(
-                task,
-                page=page,
-                page_size=resolved_page_size,
-            )
-
-        @self.app.post("/tasks/{task_id}/replay")
-        async def task_replay_endpoint(request: Request, task_id: str):
-            task = self.task_store.get(task_id)
-            if task is None:
-                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
-            if str(task.get("kind") or "") != "control_loop":
-                raise HTTPException(status_code=400, detail="task replay currently supports control_loop tasks only")
-            artifacts = task.get("artifacts")
-            artifacts = artifacts if isinstance(artifacts, dict) else {}
-            resume_context = artifacts.get("resume_context")
-            resume_context = resume_context if isinstance(resume_context, dict) else {}
-            goal = str(resume_context.get("goal") or task.get("title") or "").strip()
-            constraints = _normalize_constraints(resume_context.get("constraints"))
-            session_id = str(task.get("owner_session_id") or "").strip()
-            user_id = str(task.get("owner_user_id") or "").strip()
-            if not goal or not session_id or not user_id:
-                raise HTTPException(status_code=400, detail="task is missing replay context")
-            effective_user_id = self._resolve_http_user_id(
-                request,
-                user_id,
-                default_user_id=user_id,
-            )
-            if effective_user_id != user_id:
-                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
-            body: dict[str, Any] | object = {}
-            if request.headers.get("content-type", "").startswith("application/json"):
-                try:
-                    body = await request.json()
-                except Exception:
-                    body = {}
-            replay_request = parse_task_replay_request(body)
-            replay_from_step = str(replay_request.from_step or "").strip()
-            replay_mode = "tail" if replay_from_step else "full"
-            initial_state = None
-            if replay_from_step:
-                initial_state = build_partial_replay_seed(
-                    task,
-                    from_step=replay_from_step,
-                )
-
-            replay_task = self._create_control_loop_task_record(
-                user_id=user_id,
-                session_id=session_id,
-                goal=goal,
-                constraints=constraints,
-                request_id=None,
-                source="http",
-                parent_task_id=task_id,
-                replay_of_task_id=task_id,
-                compare_to_task_id=task_id,
-                replay_from_step=replay_from_step or None,
-                replay_mode=replay_mode,
-            )
-            replay_task_id = str(replay_task["task_id"])
-            await self._start_control_loop_run(
-                session_id=session_id,
-                user_id=user_id,
-                goal=goal,
-                constraints=constraints,
-                task_id=replay_task_id,
-                parent_task_id=task_id,
-                replay_of_task_id=task_id,
-                compare_to_task_id=task_id,
-                initial_state=initial_state,
-                reset_if_terminal=True,
-            )
-            return {
-                "accepted": True,
-                "task": replay_task,
-                "replay_of_task_id": task_id,
-                "compare_to_task_id": task_id,
-                "replay_from_step": replay_from_step or None,
-                "replay_mode": replay_mode,
-            }
-
-        @self.app.get("/tasks/{task_id}/compare")
-        async def task_compare_endpoint(task_id: str, other_task_id: Optional[str] = None):
-            left_task = self.task_store.get(task_id)
-            if left_task is None:
-                raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
-
-            candidate_task_id = str(other_task_id or "").strip()
-            if not candidate_task_id:
-                candidate_task_id = str(left_task.get("parent_task_id") or "").strip()
-            if not candidate_task_id:
-                children = self.task_store.query(
-                    owner_session_id=left_task.get("owner_session_id"),
-                    parent_task_id=left_task.get("task_id"),
-                    page=1,
-                    page_size=1,
-                )
-                child_tasks = children.get("tasks")
-                child_tasks = child_tasks if isinstance(child_tasks, list) else []
-                if child_tasks:
-                    candidate_task_id = str(child_tasks[0].get("task_id") or "").strip()
-            if not candidate_task_id:
-                raise HTTPException(status_code=400, detail="comparison task could not be determined")
-
-            right_task = self.task_store.get(candidate_task_id)
-            if right_task is None:
-                raise HTTPException(status_code=404, detail=f"comparison task not found: {candidate_task_id}")
-            return build_task_compare_payload(
-                left_task,
-                right_task,
-                build_task_timeline_payload=self._build_task_timeline_payload,
-            )
-
-        @self.app.get("/audit")
-        async def audit_list_endpoint(
-            actor_user_id: Optional[str] = None,
-            session_id: Optional[str] = None,
-            tool: Optional[str] = None,
-            source: Optional[str] = None,
-            result: Optional[str] = None,
-            q: Optional[str] = None,
-            page: int = 1,
-            page_size: Optional[int] = None,
-            limit: int = 20,
-        ):
-            resolved_page_size = max(1, min(int(page_size or limit or 20), 100))
-            return self.audit_logger.query_logs(
-                actor_user_id=actor_user_id,
-                session_id=session_id,
-                tool=tool,
-                source=source,
-                result=result,
-                q=q,
-                page=page,
-                page_size=resolved_page_size,
-            )
+        self.app.include_router(build_task_router(self))
+        self.app.include_router(build_audit_router(self))
 
         @self.app.post("/subagents/{run_id}/steer")
         async def subagents_steer_endpoint(run_id: str, payload: Dict[str, Any] | None = Body(default=None)):
@@ -2469,214 +2295,7 @@ class GatewayServer:
         async def chat_ui():
             return FileResponse(self.static_dir / "index.html")
 
-        # --- WebSocket ---
-
-        @self.app.websocket("/ws/{user_id}")
-        async def websocket_endpoint(
-            websocket: WebSocket,
-            user_id: str,
-            session_id: Optional[str] = Query(default=None),
-            token: Optional[str] = Query(default=None),
-        ):
-            if self.settings.gateway_api_key:
-                if token != self.settings.gateway_api_key:
-                    await websocket.close(code=4401, reason="Unauthorized")
-                    return
-            try:
-                user_id = self._resolve_websocket_user_id(
-                    websocket,
-                    user_id,
-                    default_user_id="web_user",
-                )
-            except HTTPException as exc:
-                await websocket.close(code=4401, reason=str(exc.detail))
-                return
-
-            session = await self._get_or_create_gateway_session(
-                user_id=user_id,
-                session_id=session_id,
-            )
-            session_id = session.id
-
-            await self.manager.connect(websocket, session_id, user_id)
-            self.audit_logger.log(
-                event_type=AuditEventType.SESSION_START,
-                user_id=user_id,
-                session_id=session_id,
-                action="connect",
-                result="success",
-            )
-
-            try:
-                # Send connected event with protocol version
-                await self.manager.send_json(session_id, ev_connected(session_id, user_id))
-                await self.manager.flush_pending(session_id)
-
-                # Fire connect system event for cron jobs
-                asyncio.create_task(
-                    get_scheduler().fire_system_event("connect", {
-                        "user_id": user_id, "session_id": session_id,
-                    }),
-                    name=f"sys:connect:{session_id}",
-                )
-
-                while True:
-                    raw_data = await websocket.receive_json()
-                    data = normalize_client_event(raw_data)
-                    validation_errors = validate_client_event(data)
-                    if validation_errors:
-                        await self._emit_session_event(
-                            session_id,
-                            source="protocol",
-                            status="error",
-                            message="; ".join(validation_errors),
-                            user_id=user_id,
-                        )
-                        continue
-                    event_name = data.get("event", "")
-
-                    if event_name == "chat.send":
-                        text = (data.get("text") or "").strip()
-                        request_id = data.get("request_id")
-                        if text:
-                            # Record user message in transcript
-                            self.transcript.append(
-                                session_id, "user", text,
-                                user_id=user_id,
-                                request_id=request_id,
-                            )
-                            await self._start_agent_run(session_id, user_id, text, request_id)
-
-                    elif event_name == "control.run":
-                        goal = (data.get("goal") or "").strip()
-                        constraints = _normalize_constraints(data.get("constraints"))
-                        request_id = data.get("request_id")
-                        if goal:
-                            self.transcript.append(
-                                session_id,
-                                "user",
-                                goal,
-                                user_id=user_id,
-                                request_id=request_id,
-                                metadata={
-                                    "type": "control_loop",
-                                    "constraints": constraints,
-                                },
-                            )
-                            await self._start_control_loop_run(
-                                session_id,
-                                user_id,
-                                goal,
-                                constraints,
-                                request_id,
-                            )
-
-                    elif event_name == "chat.inject":
-                        text = (data.get("text") or "").strip()
-                        role = data.get("role", "system")
-                        request_id = data.get("request_id")
-                        if text:
-                            self.transcript.append(
-                                session_id, "inject", text,
-                                user_id=user_id,
-                                request_id=request_id,
-                                metadata={"role": role},
-                            )
-                            await self._emit_session_event(
-                                session_id,
-                                source="inject",
-                                status="ok",
-                                message=f"Injected {role} message into transcript",
-                                user_id=user_id,
-                            )
-
-                    elif event_name == "chat.abort":
-                        request_id = data.get("request_id")
-                        aborted = await self.manager.abort(session_id)
-                        await self._desktop_emergency_stop(
-                            session_id=session_id,
-                            user_id=user_id,
-                            reason="Abort requested from Web UI",
-                        )
-                        if not aborted:
-                            await self.manager.send_json(
-                                session_id,
-                                ev_chat_done("", request_id, aborted=False),
-                            )
-
-                    elif event_name == "chat.history":
-                        request_id = data.get("request_id")
-                        target_session = data.get("session_id") or session_id
-                        if not self.transcript.has_session(target_session, user_id):
-                            await self._emit_session_event(
-                                session_id,
-                                source="protocol",
-                                status="error",
-                                message=f"session not found: {target_session}",
-                                user_id=user_id,
-                            )
-                            continue
-                        limit = min(int(data.get("limit") or 100), 500)
-                        before = data.get("before")
-                        entries = self.transcript.get_history(
-                            target_session, limit=limit, before=before,
-                        )
-                        await self.manager.send_json(
-                            session_id,
-                            ev_chat_history(
-                                [e.to_dict() for e in entries],
-                                target_session,
-                                request_id,
-                            ),
-                        )
-
-                    elif event_name == "presence.ping":
-                        await self.manager.send_json(
-                            session_id,
-                            ev_health_tick(len(self.manager.active_connections)),
-                        )
-
-                    elif event_name == "tools.approval":
-                        await self._resolve_tool_approval_request(
-                            request_id=data.get("request_id", ""),
-                            approved=bool(data.get("approved", False)),
-                            reason=str(data.get("reason") or ""),
-                            session_id=session_id,
-                            user_id=user_id,
-                            source="websocket",
-                            scope=data.get("scope"),
-                            tool_pattern=data.get("tool_pattern"),
-                            path_scope=data.get("path_scope"),
-                            expires_at=data.get("expires_at"),
-                            propagate_to_subagents=data.get("propagate_to_subagents"),
-                        )
-
-            except WebSocketDisconnect:
-                pass
-            except Exception as e:
-                self.audit_logger.log_error(
-                    error=str(e),
-                    user_id=user_id,
-                    session_id=session_id,
-                    context={"endpoint": "websocket"},
-                )
-            finally:
-                await self.manager.abort(session_id)
-                self.manager.disconnect(session_id)
-                self.audit_logger.log(
-                    event_type=AuditEventType.SESSION_END,
-                    user_id=user_id,
-                    session_id=session_id,
-                    action="disconnect",
-                    result="success",
-                )
-                # Fire disconnect system event for cron jobs
-                asyncio.create_task(
-                    get_scheduler().fire_system_event("disconnect", {
-                        "user_id": user_id, "session_id": session_id,
-                    }),
-                    name=f"sys:disconnect:{session_id}",
-                )
+        self.app.include_router(build_websocket_router(self))
 
     # ------------------------------------------------------------------
     # agent execution
@@ -3694,7 +3313,7 @@ class GatewayServer:
                     session_id=session_id,
                     user_id=user_id,
                     goal=resume_goal,
-                    constraints=_normalize_constraints(
+                    constraints=normalize_constraints(
                         (pending_control_request.get("plan") or {}).get("constraints")
                     ),
                 )
@@ -3989,13 +3608,5 @@ class GatewayServer:
             host=host or self.settings.gateway_host,
             port=port or self.settings.gateway_port,
         )
-
-
-def _normalize_constraints(raw: Any) -> list[str]:
-    if not isinstance(raw, list):
-        return []
-    return [str(item).strip() for item in raw if str(item).strip()]
-
-
 def create_gateway() -> GatewayServer:
     return GatewayServer()
