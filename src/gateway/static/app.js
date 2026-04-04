@@ -45,6 +45,8 @@ const dashboardTasksPrevBtn = document.getElementById("dashboardTasksPrevBtn");
 const dashboardTasksNextBtn = document.getElementById("dashboardTasksNextBtn");
 const dashboardDetailPanelEl = document.getElementById("dashboardDetailPanel");
 const dashboardDetailBadgeEl = document.getElementById("dashboardDetailBadge");
+const analyticsContentEl = document.getElementById("analyticsContent");
+const refreshAnalyticsBtn = document.getElementById("refreshAnalyticsBtn");
 const refreshAuditBtn = document.getElementById("refreshAuditBtn");
 const clearAuditFiltersBtn = document.getElementById("clearAuditFiltersBtn");
 const auditSearchInputEl = document.getElementById("auditSearchInput");
@@ -1898,6 +1900,85 @@ async function loadTaskComparison(taskId, otherTaskId = "") {
   }
 }
 
+function renderAnalytics(data) {
+  const overview = data.overview || {};
+  const rankingPayload = data.step_failure_ranking || {};
+  const ranking = Array.isArray(rankingPayload.steps) ? rankingPayload.steps : [];
+  const rankingTruncated = Boolean(rankingPayload.truncated);
+  const rankingSampled = Number(rankingPayload.sampled_events || 0);
+  const rankingTotal = Number(rankingPayload.total_events || 0);
+  const improvementPayload = data.replay_improvement || {};
+  const improvement = Array.isArray(improvementPayload.steps) ? improvementPayload.steps : [];
+  const improvementTruncated = Boolean(improvementPayload.truncated);
+  const byStatus = overview.by_status || {};
+  const statusEntries = Object.entries(byStatus)
+    .sort(([, a], [, b]) => b - a)
+    .map(([k, v]) => `<span class="tag">${escapeHtml(k)}: ${v}</span>`)
+    .join(" ");
+  const rankingRows = ranking.map((item) => [
+    `<tr>`,
+    `<td class="mono">${escapeHtml(item.step_id || "-")}</td>`,
+    `<td>${escapeHtml(item.title || "-")}</td>`,
+    `<td>${item.total}</td>`,
+    `<td>${item.succeeded}</td>`,
+    `<td>${item.failed}</td>`,
+    `<td class="${item.failure_rate > 0.5 ? "text-danger" : ""}">${(item.failure_rate * 100).toFixed(1)}%</td>`,
+    `<td>${item.task_count}</td>`,
+    `<td class="mono">${(item.top_failed_criteria || []).map((c) => `${escapeHtml(c.name)}(${c.count})`).join(", ") || "-"}</td>`,
+    `</tr>`,
+  ].join("")).join("");
+  const improvementRows = improvement.map((item) => [
+    `<tr>`,
+    `<td class="mono">${escapeHtml(item.step_id || "-")}</td>`,
+    `<td>${escapeHtml(item.title || "-")}</td>`,
+    `<td>${item.source_fail}</td>`,
+    `<td>${item.replay_pass}</td>`,
+    `<td>${item.replay_fail}</td>`,
+    `<td class="${item.improvement_rate > 0.5 ? "text-success" : ""}">${(item.improvement_rate * 100).toFixed(1)}%</td>`,
+    `</tr>`,
+  ].join("")).join("");
+  return [
+    `<div class="analytics-overview">`,
+    `<div class="summary-card"><div class="k">Control Loop Tasks</div><div class="summary-value">${overview.total_tasks || 0}</div></div>`,
+    `<div class="summary-card"><div class="k">Replays</div><div class="summary-value">${overview.total_replays || 0}</div></div>`,
+    `<div class="summary-card"><div class="k">Replay Success Rate</div><div class="summary-value">${((overview.replay_success_rate || 0) * 100).toFixed(1)}%</div></div>`,
+    `<div class="summary-card"><div class="k">Status Breakdown</div><div class="summary-value">${statusEntries || "-"}</div></div>`,
+    `</div>`,
+    ranking.length ? [
+      `<div class="analytics-section">`,
+      `<h4>Step Failure Ranking</h4>`,
+      rankingTruncated ? `<div class="muted">Showing ${rankingSampled} of ${rankingTotal} step events (sampled).</div>` : "",
+      `<div class="table-scroll"><table class="analytics-table"><thead><tr>`,
+      `<th>Step ID</th><th>Title</th><th>Total</th><th>Pass</th><th>Fail</th><th>Fail%</th><th>Tasks</th><th>Top Failed Criteria</th>`,
+      `</tr></thead><tbody>${rankingRows}</tbody></table></div>`,
+      `</div>`,
+    ].join("") : "",
+    improvement.length ? [
+      `<div class="analytics-section">`,
+      `<h4>Replay Improvement</h4>`,
+      improvementTruncated ? `<div class="muted">Replay task sample truncated — results may be incomplete.</div>` : "",
+      `<div class="table-scroll"><table class="analytics-table"><thead><tr>`,
+      `<th>Step ID</th><th>Title</th><th>Source Fail</th><th>Replay Pass</th><th>Replay Fail</th><th>Improvement%</th>`,
+      `</tr></thead><tbody>${improvementRows}</tbody></table></div>`,
+      `</div>`,
+    ].join("") : `<div class="muted">No replay pairs found yet.</div>`,
+  ].join("");
+}
+
+async function loadAnalytics() {
+  const base = toHttpBaseUrl(currentSettings());
+  try {
+    const data = await fetchJsonOrThrow(`${base}/tasks/analytics`);
+    if (analyticsContentEl) {
+      analyticsContentEl.innerHTML = renderAnalytics(data);
+    }
+  } catch (err) {
+    if (analyticsContentEl) {
+      analyticsContentEl.innerHTML = `<div class="muted">Analytics load error: ${escapeHtml(String(err))}</div>`;
+    }
+  }
+}
+
 function handleDashboardListSelectionClick(event) {
   const taskButton = event.target.closest("[data-task-id]");
   if (taskButton?.dataset.taskId) {
@@ -3075,6 +3156,7 @@ abortBtn.addEventListener("click", abortRun);
 saveSettingsBtn.addEventListener("click", persistSettings);
 resetSettingsBtn.addEventListener("click", resetSettings);
 refreshDashboardBtn.addEventListener("click", () => scheduleDashboardRefresh(0));
+refreshAnalyticsBtn?.addEventListener("click", () => void loadAnalytics());
 clearDashboardFiltersBtn?.addEventListener("click", () => {
   dashboardState.searchQuery = "";
   dashboardState.taskStatusFilter = "all";

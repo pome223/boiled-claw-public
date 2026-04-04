@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional
 from fastapi import APIRouter, Body, HTTPException, Request
 
 from src.gateway.api_schema import (
+    TaskAnalyticsResponse,
     TaskCompareResponse,
     TaskEnvelope,
     TaskQueryResponse,
@@ -12,6 +13,7 @@ from src.gateway.api_schema import (
     TaskReplayRequest,
     TaskTimelineResponse,
 )
+from src.gateway.task_analytics import compute_analytics
 from src.gateway.route_utils import normalize_constraints
 from src.gateway.task_replay import build_partial_replay_seed, build_task_compare_payload
 
@@ -42,6 +44,15 @@ def build_task_router(server: "GatewayServer") -> APIRouter:
             q=q,
             page=page,
             page_size=resolved_page_size,
+        )
+
+    @router.get("/tasks/analytics", response_model=TaskAnalyticsResponse)
+    async def task_analytics_endpoint(
+        user_id: Optional[str] = None,
+    ):
+        return compute_analytics(
+            server.task_store,
+            owner_user_id=user_id or None,
         )
 
     @router.get("/tasks/{task_id}", response_model=TaskEnvelope)

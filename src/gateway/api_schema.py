@@ -132,6 +132,75 @@ class TaskCompareResponse(BaseModel):
     step_compare: StepComparePayload
 
 
+class StepCriterionCount(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    count: int
+
+
+class StepFailureRankingEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    title: str
+    total: int
+    succeeded: int
+    failed: int
+    preserved: int
+    other: int
+    failure_rate: float
+    task_count: int
+    top_failed_criteria: list[StepCriterionCount] = Field(default_factory=list)
+
+
+class StepFailureRankingPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[StepFailureRankingEntry] = Field(default_factory=list)
+    total_events: int
+    sampled_events: int
+    truncated: bool
+
+
+class ReplayImprovementEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    title: str
+    source_fail: int
+    replay_pass: int
+    replay_fail: int
+    pair_count: int
+    improvement_rate: float
+
+
+class ReplayImprovementPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    steps: list[ReplayImprovementEntry] = Field(default_factory=list)
+    total_replay_tasks: int
+    sampled_replay_tasks: int
+    truncated: bool
+
+
+class TaskAnalyticsOverview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    total_tasks: int
+    by_status: dict[str, int] = Field(default_factory=dict)
+    total_replays: int
+    replay_success_rate: float
+
+
+class TaskAnalyticsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    overview: TaskAnalyticsOverview
+    step_failure_ranking: StepFailureRankingPayload
+    replay_improvement: ReplayImprovementPayload
+
+
 class AuditEntry(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -168,6 +237,7 @@ class AuditQueryResponse(BaseModel):
 
 __all__ = [
     "AuditQueryResponse",
+    "TaskAnalyticsResponse",
     "TaskCompareResponse",
     "TaskEnvelope",
     "TaskQueryResponse",
