@@ -750,6 +750,7 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 ### Key Gateway Endpoints
 
 - `GET /protocol` - Typed protocol schema
+- `GET /openapi.json` - FastAPI OpenAPI spec for typed HTTP routes
 - `GET /sessions/{user_id}` - Session list
 - `GET /sessions/{user_id}/{session_id}/history` - Transcript history
 - `GET /transcript/sessions?user_id=...` - Transcript-backed session summaries
