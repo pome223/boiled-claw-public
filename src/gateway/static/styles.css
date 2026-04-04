@@ -1114,3 +1114,51 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Analytics panel ───────────────────────────────────────────── */
+.analytics-panel {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(6, 12, 22, 0.56);
+  overflow: hidden;
+  margin-top: 16px;
+}
+.analytics-panel summary {
+  list-style: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px 14px;
+  font-weight: 700;
+}
+.analytics-panel summary::-webkit-details-marker { display: none; }
+.analytics-content { padding: 12px 14px; }
+.analytics-overview {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+.analytics-section { margin-bottom: 16px; }
+.analytics-section h4 { margin: 0 0 8px 0; }
+.table-scroll { overflow-x: auto; }
+.analytics-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+.analytics-table th,
+.analytics-table td {
+  padding: 6px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  white-space: nowrap;
+}
+.analytics-table th {
+  color: var(--muted);
+  font-weight: 600;
+}
+.text-danger { color: var(--err); }
+.text-success { color: var(--ok); }

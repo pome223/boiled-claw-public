@@ -534,6 +534,7 @@ The Control UI dashboard builds on top of that task layer:
 - follow `winner_task_id`, `loser_task_ids`, `approval_dependencies`, and child tasks without leaving the UI
 - inspect a merged task timeline that combines task state changes, approval lifecycle, and related audit events
 - inspect a per-step trace for control-loop runs, replay the whole run or resume from a later step, and compare the replay against the baseline task without leaving the panel
+- view cross-session step analytics: step failure ranking, replay improvement rates, and task overview stats
 - steer or kill active session-mode subagents directly from the panel
 - inspect approval history, scope, path scope, propagation flags, and resolve pending requests in-place
 - use session-exact, family, or desktop-pack quick approvals to collapse repeated desktop AX / screenshot / hotkey prompts into a single session-scoped action
@@ -757,6 +758,7 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `POST /cron` / `GET /cron` - Cron platform
 - `GET /tasks` / `GET /tasks/{task_id}` - Persistent workflow task objects
 - `GET /tasks/{task_id}/timeline` / `POST /tasks/{task_id}/replay` / `GET /tasks/{task_id}/compare` - Task timeline, replay, and comparison surfaces for control-loop runs (`POST /tasks/{task_id}/replay` accepts optional JSON `{ "from_step": "<step_id>" }` for tail replay; compare payload includes `step_compare.rows[]`)
+- `GET /tasks/analytics` - Cross-session step failure ranking, replay improvement rates, and task overview stats
 - `GET /runtime/resources` / `GET /runtime/resources/{resource_id}` - Runtime substrate resources
 - `GET /runtime/capabilities` / `POST /runtime/capabilities/invoke` - Canonical capability registry and invoke surface
 - `GET /tools/policy` - Tool policy list

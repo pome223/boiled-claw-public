@@ -2069,6 +2069,43 @@ def test_http_task_compare_endpoint_defaults_to_latest_replay(monkeypatch, tmp_p
     assert payload["step_compare"]["rows"][0]["step_id"] == "verify_visual_state"
     assert any("verification changed" in item for item in payload["summary"])
 
+def test_http_task_analytics_endpoint_returns_all_sections(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    store = server_module.get_task_store()
+    task = store.create(
+        kind="control_loop",
+        title="Desktop playback",
+        status="failed",
+        owner_session_id="sess-analytics",
+        owner_user_id="alice",
+    )
+    store.append_event(
+        task["task_id"],
+        event_type="step_plan",
+        title="verify_visual_state",
+        payload={
+            "summary": "evidence thin",
+            "step": {
+                "step_id": "verify_visual_state",
+                "title": "Verify visual state",
+                "step_type": "plan",
+                "status": "failed",
+                "failed_criteria": ["music_playing"],
+            },
+        },
+    )
+
+    with TestClient(gateway.app) as client:
+        response = client.get("/tasks/analytics")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["overview"]["total_tasks"] >= 1
+    assert len(payload["step_failure_ranking"]["steps"]) >= 1
+    assert payload["step_failure_ranking"]["steps"][0]["step_id"] == "verify_visual_state"
+    assert payload["step_failure_ranking"]["truncated"] is False
+    assert "replay_improvement" in payload
+
 
 def test_openapi_exposes_task_replay_and_compare_contracts(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
@@ -2094,6 +2131,11 @@ def test_openapi_exposes_task_replay_and_compare_contracts(monkeypatch, tmp_path
     )
     assert components["TaskCompareResponse"]["properties"]["step_compare"]["$ref"].endswith(
         "/StepComparePayload"
+    )
+
+    analytics_operation = payload["paths"]["/tasks/analytics"]["get"]
+    assert analytics_operation["responses"]["200"]["content"]["application/json"]["schema"]["$ref"].endswith(
+        "/TaskAnalyticsResponse"
     )
 
 

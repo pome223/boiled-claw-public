@@ -936,6 +936,154 @@ class TaskStore:
         self._notify(event_payload)
         return updated_task
 
+    def aggregate_status_counts(
+        self,
+        *,
+        kind: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+    ) -> dict[str, int]:
+        conditions: list[str] = []
+        params: list[Any] = []
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        if owner_user_id:
+            conditions.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT status, COUNT(*) FROM tasks {where} GROUP BY status",
+                tuple(params),
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def aggregate_replay_counts(
+        self,
+        *,
+        kind: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+    ) -> dict[str, int]:
+        conditions = [
+            "json_extract(metadata_json, '$.replay_of_task_id') IS NOT NULL",
+            "json_extract(metadata_json, '$.replay_of_task_id') != ''",
+        ]
+        params: list[Any] = []
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        if owner_user_id:
+            conditions.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        where = f"WHERE {' AND '.join(conditions)}"
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT status, COUNT(*) FROM tasks {where} GROUP BY status",
+                tuple(params),
+            )
+            return {row[0]: row[1] for row in cursor.fetchall()}
+
+    def query_replay_tasks(
+        self,
+        *,
+        kind: Optional[str] = None,
+        owner_user_id: Optional[str] = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        conditions = [
+            "json_extract(metadata_json, '$.replay_of_task_id') IS NOT NULL",
+            "json_extract(metadata_json, '$.replay_of_task_id') != ''",
+        ]
+        params: list[Any] = []
+        if kind:
+            conditions.append("kind = ?")
+            params.append(kind)
+        if owner_user_id:
+            conditions.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        where = f"WHERE {' AND '.join(conditions)}"
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT task_id, kind, title, status, owner_session_id, owner_user_id,
+                       parent_task_id, run_id, winner_task_id, loser_task_ids_json,
+                       approval_dependencies_json, artifacts_json, metadata_json,
+                       artifacts_search_text, metadata_search_text, error, created_at,
+                       updated_at, started_at, ended_at
+                FROM tasks
+                {where}
+                ORDER BY updated_at DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            )
+            rows = cursor.fetchall()
+        return [self._row_to_task(row) for row in rows]
+
+    def count_step_events(
+        self,
+        *,
+        owner_user_id: Optional[str] = None,
+        kind: Optional[str] = None,
+        event_type_prefix: str = "step_",
+    ) -> int:
+        conditions = ["event_type LIKE ?"]
+        params: list[Any] = [f"{event_type_prefix}%"]
+        if owner_user_id:
+            conditions.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        if kind:
+            conditions.append(
+                "task_id IN (SELECT task_id FROM tasks WHERE kind = ?)"
+            )
+            params.append(kind)
+        where = f"WHERE {' AND '.join(conditions)}"
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"SELECT COUNT(*) FROM task_events {where}",
+                tuple(params),
+            )
+            return int(cursor.fetchone()[0] or 0)
+
+    def query_step_events(
+        self,
+        *,
+        owner_user_id: Optional[str] = None,
+        kind: Optional[str] = None,
+        event_type_prefix: str = "step_",
+        limit: int = 2000,
+    ) -> list[dict[str, Any]]:
+        conditions = ["event_type LIKE ?"]
+        params: list[Any] = [f"{event_type_prefix}%"]
+        if owner_user_id:
+            conditions.append("owner_user_id = ?")
+            params.append(owner_user_id)
+        if kind:
+            conditions.append(
+                "task_id IN (SELECT task_id FROM tasks WHERE kind = ?)"
+            )
+            params.append(kind)
+        where = f"WHERE {' AND '.join(conditions)}"
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"""
+                SELECT event_id, task_id, owner_session_id, owner_user_id, run_id,
+                       timestamp, event_type, status, title, error, payload_json
+                FROM task_events
+                {where}
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (*params, limit),
+            )
+            rows = cursor.fetchall()
+        return [self._row_to_task_event(row) for row in rows]
+
     def query_timeline(
         self,
         task_id: str,
