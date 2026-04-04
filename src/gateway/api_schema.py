@@ -105,6 +105,39 @@ class TaskReplayAcceptedResponse(BaseModel):
     replay_mode: Literal["full", "tail"]
 
 
+class ControlSupervisorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    user_id: str | None = None
+    session_id: str | None = None
+    goal: str = Field(min_length=1)
+    constraints: list[str] = Field(default_factory=list)
+    duration_seconds: int = Field(default=3600, ge=60, le=86_400)
+    interval_seconds: int = Field(default=60, ge=5, le=3_600)
+    maintenance_goal: str | None = None
+
+
+class ControlSupervisorAcceptedResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+    task: TaskRecord
+    control_session_id: str
+    duration_seconds: int
+    interval_seconds: int
+    max_iterations: int
+    ends_at: float
+    next_run_at: float
+
+
+class TaskCancelResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    accepted: bool
+    task: TaskRecord
+    message: str
+
+
 class TimelineSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

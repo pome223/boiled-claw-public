@@ -9,6 +9,7 @@ from google.genai import types
 import pytest
 
 from src.control_loop.root_workflow import ExecutionResult
+from src.gateway.control_supervisor import SupervisorStartResult
 import src.gateway.server as server_module
 import src.gateway.transcript as transcript_module
 import src.memory_lifecycle.adk_memory_service as adk_memory_module
@@ -216,6 +217,84 @@ def test_runtime_substrate_http_surfaces(monkeypatch, tmp_path):
         assert invoke.status_code == 200
         assert invoke.json()["capability"] == "shell.run"
         assert '"command": "pwd"' in invoke.json()["result"]["params_json"]
+
+
+def test_start_control_supervisor_endpoint_returns_task(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_start(**kwargs):
+        return SupervisorStartResult(
+            task={
+                "task_id": "task-supervisor",
+                "kind": "control_supervisor",
+                "title": kwargs["objective"],
+                "status": "running",
+                "owner_session_id": kwargs["owner_session_id"],
+                "owner_user_id": kwargs["user_id"],
+                "parent_task_id": None,
+                "run_id": None,
+                "winner_task_id": None,
+                "loser_task_ids": [],
+                "approval_dependencies": [],
+                "artifacts": {},
+                "metadata": {},
+                "error": None,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "started_at": time.time(),
+                "ended_at": None,
+            },
+            control_session_id="ctrlsup_demo",
+            max_iterations=60,
+            ends_at=time.time() + 3600,
+            next_run_at=time.time(),
+        )
+
+    monkeypatch.setattr(gateway.control_supervisor, "start", _fake_start)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/tasks/supervisors/control-loop",
+            json={
+                "user_id": "alice",
+                "goal": "Keep the session healthy",
+                "duration_seconds": 3600,
+                "interval_seconds": 60,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["task"]["task_id"] == "task-supervisor"
+    assert payload["control_session_id"] == "ctrlsup_demo"
+
+
+def test_cancel_control_supervisor_endpoint_requires_running_handle(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    task = gateway.task_store.create(
+        kind="control_supervisor",
+        title="Keep the session healthy",
+        status="running",
+        owner_session_id="sess-1",
+        owner_user_id="alice",
+    )
+
+    async def _fake_request_stop(task_id: str):
+        return gateway.task_store.update(
+            task_id,
+            artifacts={"progress": {"stop_requested": True}},
+        )
+
+    monkeypatch.setattr(gateway.control_supervisor, "request_stop", _fake_request_stop)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(f"/tasks/{task['task_id']}/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["accepted"] is True
+    assert payload["task"]["artifacts"]["progress"]["stop_requested"] is True
 
 
 def test_runtime_capability_invoke_rejects_approval_required_http_calls(monkeypatch, tmp_path):

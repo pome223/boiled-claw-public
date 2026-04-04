@@ -5,7 +5,10 @@ from typing import TYPE_CHECKING, Optional
 from fastapi import APIRouter, Body, HTTPException, Request
 
 from src.gateway.api_schema import (
+    ControlSupervisorAcceptedResponse,
+    ControlSupervisorRequest,
     TaskAnalyticsResponse,
+    TaskCancelResponse,
     TaskCompareResponse,
     TaskEnvelope,
     TaskQueryResponse,
@@ -14,6 +17,7 @@ from src.gateway.api_schema import (
     TaskTimelineResponse,
 )
 from src.gateway.task_analytics import compute_analytics
+from src.gateway.control_supervisor import SupervisorStartResult
 from src.gateway.route_utils import normalize_constraints
 from src.gateway.task_replay import build_partial_replay_seed, build_task_compare_payload
 
@@ -183,5 +187,69 @@ def build_task_router(server: "GatewayServer") -> APIRouter:
             right_task,
             build_task_timeline_payload=server._build_task_timeline_payload,
         )
+
+    @router.post(
+        "/tasks/supervisors/control-loop",
+        response_model=ControlSupervisorAcceptedResponse,
+    )
+    async def start_control_supervisor_endpoint(
+        request: Request,
+        payload: ControlSupervisorRequest,
+    ):
+        requested_user_id = str(payload.user_id or "api_user")
+        user_id = server._resolve_http_user_id(
+            request,
+            requested_user_id,
+            default_user_id="api_user",
+        )
+        session = await server._get_or_create_gateway_session(
+            user_id=user_id,
+            session_id=str(payload.session_id) if payload.session_id else None,
+        )
+        result: SupervisorStartResult = await server.control_supervisor.start(
+            user_id=user_id,
+            owner_session_id=session.id,
+            objective=str(payload.goal or "").strip(),
+            constraints=normalize_constraints(payload.constraints),
+            duration_seconds=payload.duration_seconds,
+            interval_seconds=payload.interval_seconds,
+            source="http",
+            maintenance_goal=str(payload.maintenance_goal or "").strip() or None,
+            request_id=None,
+        )
+        return {
+            "accepted": True,
+            "task": result.task,
+            "control_session_id": result.control_session_id,
+            "duration_seconds": payload.duration_seconds,
+            "interval_seconds": payload.interval_seconds,
+            "max_iterations": result.max_iterations,
+            "ends_at": result.ends_at,
+            "next_run_at": result.next_run_at,
+        }
+
+    @router.post("/tasks/{task_id}/cancel", response_model=TaskCancelResponse)
+    async def cancel_task_endpoint(request: Request, task_id: str):
+        task = server.task_store.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+        user_id = str(task.get("owner_user_id") or "").strip()
+        effective_user_id = server._resolve_http_user_id(
+            request,
+            user_id,
+            default_user_id=user_id or "api_user",
+        )
+        if user_id and effective_user_id != user_id:
+            raise HTTPException(status_code=404, detail=f"task not found: {task_id}")
+        if str(task.get("kind") or "") != "control_supervisor":
+            raise HTTPException(status_code=400, detail="task cancel currently supports control_supervisor tasks only")
+        updated = await server.control_supervisor.request_stop(task_id)
+        if updated is None:
+            raise HTTPException(status_code=409, detail="task is not currently running")
+        return {
+            "accepted": True,
+            "task": updated,
+            "message": "Graceful stop requested; the supervisor will stop after the current iteration.",
+        }
 
     return router
