@@ -2909,7 +2909,7 @@ def test_heartbeat_loop_sweeps_approval_expiry(monkeypatch, tmp_path):
         # Simulate one heartbeat tick: the loop sleeps then sweeps.
         gateway.tool_policy.cleanup_expired()
 
-    asyncio.get_event_loop().run_until_complete(_run_one_heartbeat())
+    asyncio.run(_run_one_heartbeat())
     assert sweep_count["n"] >= 1
 
 
