@@ -50,6 +50,21 @@ If you want the shortest path from clone to a working session, start here:
 
 The Web UI is the easiest way to understand the system. The CLI hits the same Gateway and is useful for quick smoke tests or scripted runs.
 
+## Startup Patterns
+
+Use the startup path that matches what you are trying to do:
+
+| What you want | Command | Notes |
+| --- | --- | --- |
+| Try chat / search / task UI only | `docker compose up -d --build boiled-claw-gateway` | Starts the Gateway only. This is the shortest path for the Control UI and CLI. |
+| Use desktop or host-side computer control too | `bash scripts/bridge_runtime.sh start` | Starts the host-side Host Bridge and Desktop Bridge processes outside Docker. This is the supported wrapper around commands such as `python -m src.main bridge desktop`. |
+| Reflect Python source changes quickly | `bash scripts/deploy_runtime.sh sync` | Starts bridges if needed, copies `src/` into the running container, and restarts the Gateway without a full rebuild. |
+| Rebuild the runtime image and restart | `bash scripts/deploy_runtime.sh build` | Starts bridges if needed, rebuilds the Gateway image, and recreates the container. |
+| Let the script choose rebuild or hot-sync | `bash scripts/deploy_runtime.sh deploy` | Normal deploy path. It prefers a Docker rebuild and falls back to `sync` when rebuild is not possible. |
+| Check what is already running | `bash scripts/deploy_runtime.sh status` | Prints bridge and Gateway status. |
+
+If you want browser / desktop automation, do not stop at the Quickstart alone: those capabilities require the host-side bridges in addition to the Dockerized Gateway.
+
 ## Control UI
 
 The Gateway ships a browser-based chat, task dashboard, audit explorer, detail / intervention panel, task timeline, and event stream so you can see routing, approvals, tool results, recovery, and operator actions in one place.
