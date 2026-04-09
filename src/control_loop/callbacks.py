@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import uuid
 import logging
+import re
 from datetime import datetime, timezone
 from typing import AbstractSet, Optional
 
@@ -24,6 +25,8 @@ from src.runtime.state_keys import StateKeys
 from src.runtime.task_keywords import (
     CURRENT_BROWSER_KEYWORDS,
     SPREADSHEET_KEYWORDS,
+    TEXT_ENTRY_KEYWORDS,
+    prefers_isolated_browser_for_goal,
 )
 from src.tools.context import resolve_callback_context
 
@@ -50,24 +53,6 @@ _HUMAN_REQUIRED_CAPS: set[str] = {
 
 # 常に拒否する capability
 _ALWAYS_DENIED_CAPS: set[str] = {"admin"}
-
-_TEXT_ENTRY_KEYWORDS: set[str] = {
-    "入力",
-    "記入",
-    "書いて",
-    "書き込",
-    "貼り付",
-    "ペースト",
-    "まとめて",
-    "まとめる",
-    "追加",
-    "更新",
-    "fill",
-    "enter",
-    "paste",
-    "type",
-    "write",
-}
 
 _HOTKEY_HINT_KEYWORDS: set[str] = {
     "hotkey",
@@ -114,27 +99,79 @@ _PLAYBACK_ACTION_STEP_KEYWORDS: set[str] = {
     "スタート",
 }
 
+_CURRENT_BROWSER_NAVIGATION_HINT_KEYWORDS: set[str] = {
+    "search",
+    "search results",
+    "navigate",
+    "address bar",
+    "url",
+    "google sheets",
+    "google spreadsheet",
+    "sheets.google.com",
+    "sheets.new",
+    "検索",
+    "検索結果",
+    "移動",
+    "遷移",
+    "アドレスバー",
+}
+_CURRENT_BROWSER_SPREADSHEET_NAVIGATION_HINT_KEYWORDS: set[str] = (
+    set(SPREADSHEET_KEYWORDS)
+    | {
+        "google sheets",
+        "google spreadsheet",
+        "sheets.google.com",
+        "sheets.new",
+        "docs.google.com/spreadsheets",
+    }
+)
+_CURRENT_BROWSER_NEW_TAB_STEP_KEYWORDS: set[str] = {
+    "new tab",
+    "another new tab",
+    "empty tab",
+    "新しいタブ",
+    "新規タブ",
+    "空のタブ",
+}
+_CURRENT_BROWSER_SPREADSHEET_ENTRY_HINT_KEYWORDS: set[str] = set(
+    TEXT_ENTRY_KEYWORDS
+    | {
+        "cell",
+        "cells",
+        "grid",
+        "grid cell",
+        "a1",
+        "セル",
+        "編集グリッド",
+    }
+)
+_CURRENT_BROWSER_SPREADSHEET_OPEN_ACTION_KEYWORDS: set[str] = {
+    "open",
+    "launch",
+    "access",
+    "create",
+    "navigate",
+    "go to",
+    "開く",
+    "起動",
+    "アクセス",
+    "作成",
+    "新規シート",
+}
+
 _VISUAL_EVIDENCE_KEYWORDS: set[str] = {
     "waveform",
     "indicator",
-    "visual",
-    "visually",
-    "visible",
-    "screen",
-    "screenshot",
     "playing",
     "playback",
     "wave form",
     "波形",
     "インジケーター",
-    "視覚",
-    "画面",
-    "スクリーンショット",
     "再生中",
     "動いている",
 }
 
-_DESKTOP_MODE_BY_CAPABILITY: dict[str, str] = {
+_CAPABILITY_MODE_BY_NAME: dict[str, str] = {
     "desktop.view.windows": "read",
     "desktop.view.frontmost_app": "read",
     "desktop.view.screenshot": "read",
@@ -149,19 +186,38 @@ _DESKTOP_MODE_BY_CAPABILITY: dict[str, str] = {
     "desktop.control.hotkey": "execute",
     "desktop.control.scroll": "execute",
     "desktop.control.drag": "execute",
+    "current_tab.info": "read",
+    "current_tab.extract_text": "read",
+    "current_tab.navigate": "read",
+    "current_tab.click": "execute",
+    "current_tab.fill": "execute",
 }
+
+_CURRENT_BROWSER_GOOGLE_SHEETS_CREATE_URL = (
+    "https://docs.google.com/spreadsheets/create"
+)
+
+
+def _text_contains_keyword(text: str, keyword: str) -> bool:
+    normalized_keyword = keyword.strip().lower()
+    if not normalized_keyword:
+        return False
+    if re.fullmatch(r"[a-z0-9 ]+", normalized_keyword):
+        pattern = r"(?<![a-z0-9])" + re.escape(normalized_keyword) + r"(?![a-z0-9])"
+        return re.search(pattern, text) is not None
+    return normalized_keyword in text
 
 
 def _contains_any(text: str, keywords: AbstractSet[str]) -> bool:
-    return any(keyword in text for keyword in keywords)
+    return any(_text_contains_keyword(text, keyword) for keyword in keywords)
 
 
 def _targets_current_browser(goal: str) -> bool:
-    return _contains_any(goal, CURRENT_BROWSER_KEYWORDS)
+    return _contains_any(goal, CURRENT_BROWSER_KEYWORDS | SPREADSHEET_KEYWORDS) and not prefers_isolated_browser_for_goal(goal)
 
 
 def _needs_text_entry(goal: str) -> bool:
-    return _contains_any(goal, SPREADSHEET_KEYWORDS | _TEXT_ENTRY_KEYWORDS)
+    return _contains_any(goal, SPREADSHEET_KEYWORDS | TEXT_ENTRY_KEYWORDS)
 
 
 def _ensure_capability(
@@ -173,7 +229,7 @@ def _ensure_capability(
     required_caps.append(
         {
             "name": capability_name,
-            "mode": _DESKTOP_MODE_BY_CAPABILITY.get(capability_name, "execute"),
+            "mode": _CAPABILITY_MODE_BY_NAME.get(capability_name, "execute"),
         }
     )
 
@@ -203,9 +259,23 @@ def _ensure_step_capability(step: dict[str, object], capability_name: str) -> No
     capabilities.append(
         {
             "name": capability_name,
-            "mode": _DESKTOP_MODE_BY_CAPABILITY.get(capability_name, "execute"),
+            "mode": _CAPABILITY_MODE_BY_NAME.get(capability_name, "execute"),
         }
     )
+
+
+def _remove_step_capability(step: dict[str, object], capability_name: str) -> None:
+    capabilities = step.get("capabilities")
+    if not isinstance(capabilities, list):
+        return
+    step["capabilities"] = [
+        capability
+        for capability in capabilities
+        if not (
+            isinstance(capability, dict)
+            and str(capability.get("name", "")).strip() == capability_name
+        )
+    ]
 
 
 def _step_capability_names(plan: dict) -> set[str]:
@@ -229,6 +299,46 @@ def _next_step_id(existing_ids: set[str], base: str) -> str:
     while f"{base}_{index}" in existing_ids:
         index += 1
     return f"{base}_{index}"
+
+
+def _normalized_step_dependencies(step: dict[str, object]) -> list[str]:
+    depends_on = step.get("depends_on", [])
+    if not isinstance(depends_on, list):
+        return []
+    normalized: list[str] = []
+    for dependency in depends_on:
+        dependency_id = str(dependency or "").strip()
+        if dependency_id and dependency_id not in normalized:
+            normalized.append(dependency_id)
+    return normalized
+
+
+def _replace_step_dependency(
+    step: dict[str, object],
+    removed_step_id: str,
+    replacement_step_ids: list[str],
+) -> None:
+    normalized = _normalized_step_dependencies(step)
+    if removed_step_id not in normalized:
+        return
+    updated: list[str] = []
+    for dependency_id in normalized:
+        if dependency_id == removed_step_id:
+            for replacement_step_id in replacement_step_ids:
+                if replacement_step_id and replacement_step_id not in updated:
+                    updated.append(replacement_step_id)
+            continue
+        if dependency_id not in updated:
+            updated.append(dependency_id)
+    step["depends_on"] = updated
+
+
+def _step_text_haystack(step: dict[str, object]) -> str:
+    chunks = [str(step.get("title") or ""), str(step.get("description") or "")]
+    expected = step.get("expected_outputs", [])
+    if isinstance(expected, list):
+        chunks.extend(str(item) for item in expected)
+    return " ".join(chunks).lower()
 
 
 def _normalize_desktop_plan_steps(plan: dict, goal: str) -> None:
@@ -402,7 +512,184 @@ def _normalize_desktop_plan_steps(plan: dict, goal: str) -> None:
                 )
             break
 
+    normalized_goal = (goal or "").strip().lower()
+    if (
+        _targets_current_browser(normalized_goal)
+        and not prefers_isolated_browser_for_goal(normalized_goal)
+        and _needs_text_entry(normalized_goal)
+    ):
+        for step in list(steps):
+            if not _step_is_current_browser_new_tab_step(step):
+                continue
+            step_id = str(step.get("step_id") or "").strip()
+            if not step_id:
+                continue
+            replacement_dependencies = _normalized_step_dependencies(step)
+            for candidate_step in steps:
+                if candidate_step is step:
+                    continue
+                _replace_step_dependency(
+                    candidate_step,
+                    step_id,
+                    replacement_dependencies,
+                )
+            steps = [candidate_step for candidate_step in steps if candidate_step is not step]
+
+        for step in steps:
+            if not _step_has_any_capability(
+                step,
+                {
+                    "desktop.control.hotkey",
+                    "desktop.control.type",
+                    "current_tab.navigate",
+                },
+            ):
+                continue
+            if not _step_needs_current_browser_navigation_rewrite(step):
+                continue
+            _ensure_step_capability(step, "current_tab.navigate")
+            _remove_step_capability(step, "desktop.control.type")
+            _remove_step_capability(step, "desktop.control.hotkey")
+            _rewrite_current_browser_navigation_description(step)
+
+        for step in steps:
+            if not _step_has_any_capability(
+                step,
+                {"desktop.control.click", "desktop.control.type"},
+            ):
+                continue
+            if _step_needs_current_browser_navigation_rewrite(step):
+                continue
+            if not _step_has_current_browser_spreadsheet_entry_hint(step):
+                continue
+            _ensure_step_capability(step, "desktop.control.click")
+            _ensure_step_capability(step, "desktop.ax.find")
+            _ensure_step_capability(step, "desktop.wait.element")
+            _rewrite_current_browser_spreadsheet_entry_description(step)
+
+        has_current_tab_capture = any(
+            _step_has_capability(step, "current_tab.info") for step in steps
+        )
+        if not has_current_tab_capture:
+            dependency_step_id = str(steps[-1].get("step_id") or "").strip()
+            capture_step_id = _next_step_id(existing_ids, "capture_current_tab_state")
+            capture_step = {
+                "step_id": capture_step_id,
+                "title": "現在のタブ状態を記録",
+                "description": (
+                    "入力後に現在のブラウザタブのURLとタイトルを取得し、"
+                    "必要ならページテキストとスクリーンショットで入力先を確認する。"
+                ),
+                "depends_on": [dependency_step_id] if dependency_step_id else [],
+                "capabilities": [
+                    {"name": "current_tab.info", "mode": "read"},
+                    {"name": "current_tab.extract_text", "mode": "read"},
+                    {"name": "desktop.view.screenshot", "mode": "read"},
+                ],
+                "expected_outputs": [
+                    "現在のタブURLとタイトルが取得でき、入力後のページ状態の証拠が残っていること"
+                ],
+                "retryable": True,
+            }
+            steps.append(capture_step)
+
+    if not prefers_isolated_browser_for_goal(normalized_goal):
+        for step in steps:
+            if not _step_needs_spreadsheet_navigation_rewrite(step):
+                continue
+            _ensure_step_capability(step, "current_tab.navigate")
+            _remove_step_capability(step, "desktop.control.type")
+            _remove_step_capability(step, "desktop.control.hotkey")
+            _rewrite_current_browser_navigation_description(step)
+
     plan["steps"] = steps
+
+
+_ISOLATED_BROWSER_REWRITE_CAPS: set[str] = {
+    "current_tab.info",
+    "current_tab.extract_text",
+    "current_tab.navigate",
+    "current_tab.click",
+    "current_tab.fill",
+    "desktop.view.windows",
+    "desktop.view.frontmost_app",
+    "desktop.view.screenshot",
+    "desktop.wait.window",
+    "desktop.ax.find",
+    "desktop.wait.element",
+    "desktop.ax.snapshot",
+    "desktop.control.click",
+    "desktop.control.type",
+    "desktop.control.launch_app",
+    "desktop.control.focus_window",
+    "desktop.control.hotkey",
+    "desktop.control.scroll",
+    "desktop.control.drag",
+}
+
+
+def _normalize_isolated_browser_steps(plan: dict, goal: str) -> None:
+    normalized_goal = (goal or plan.get("goal") or "").strip().lower()
+    if not prefers_isolated_browser_for_goal(normalized_goal):
+        return
+    steps = plan.get("steps", [])
+    if not isinstance(steps, list):
+        return
+
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        capabilities = step.get("capabilities")
+        if not isinstance(capabilities, list):
+            continue
+
+        rewritten_capabilities: list[dict[str, object]] = []
+        saw_rewritten_capability = False
+        saw_browser_capability = False
+        for capability in capabilities:
+            if not isinstance(capability, dict):
+                continue
+            name = str(capability.get("name", "")).strip()
+            if not name:
+                continue
+            if name == "browser.navigate":
+                saw_browser_capability = True
+                rewritten_capabilities.append(capability)
+                continue
+            if name in _ISOLATED_BROWSER_REWRITE_CAPS:
+                saw_rewritten_capability = True
+                continue
+            rewritten_capabilities.append(capability)
+
+        if saw_rewritten_capability and not saw_browser_capability:
+            rewritten_capabilities.append(
+                {"name": "browser.navigate", "mode": "network"}
+            )
+
+        if rewritten_capabilities:
+            step["capabilities"] = rewritten_capabilities
+
+        title = str(step.get("title") or "")
+        description = str(step.get("description") or "")
+        step["title"] = (
+            title.replace("現在のタブ", "隔離ブラウザのページ")
+            .replace("Current Tab", "Isolated Browser Page")
+            .replace("Google Spreadsheet", "Google Spreadsheet (Isolated Browser)")
+        )
+        step["description"] = (
+            description.replace("現在のブラウザ", "隔離ブラウザ")
+            .replace("今開いているブラウザ", "隔離ブラウザ")
+            .replace("現在のタブ", "隔離ブラウザのページ")
+            .replace("existing browser window", "isolated browser session")
+        )
+        expected_outputs = step.get("expected_outputs")
+        if isinstance(expected_outputs, list):
+            step["expected_outputs"] = [
+                str(item)
+                .replace("現在のブラウザ", "隔離ブラウザ")
+                .replace("現在のタブ", "隔離ブラウザのページ")
+                for item in expected_outputs
+            ]
 
 
 def _plan_text_chunks(plan: dict, goal: str) -> list[str]:
@@ -437,54 +724,216 @@ def _plan_text_has_playback_hint(plan: dict, goal: str) -> bool:
 def _plan_needs_visual_evidence_capture(plan: dict, goal: str) -> bool:
     chunks = _plan_text_chunks(plan, goal)
     haystack = " ".join(chunks).lower()
-    if _contains_any(haystack, _VISUAL_EVIDENCE_KEYWORDS | _PLAYBACK_HINT_KEYWORDS):
-        return True
-    for criterion in plan.get("success_criteria", []):
-        if not isinstance(criterion, dict):
-            continue
-        if str(criterion.get("criterion_type") or "") in {"evidence", "custom"}:
-            return True
-    return False
+    return _contains_any(haystack, _VISUAL_EVIDENCE_KEYWORDS | _PLAYBACK_HINT_KEYWORDS)
 
 
 def _step_has_playback_hint(step: dict[str, object]) -> bool:
-    chunks = [str(step.get("title") or ""), str(step.get("description") or "")]
-    expected = step.get("expected_outputs", [])
-    if isinstance(expected, list):
-        chunks.extend(str(item) for item in expected)
-    haystack = " ".join(chunks).lower()
+    haystack = _step_text_haystack(step)
     return _contains_any(haystack, _PLAYBACK_HINT_KEYWORDS)
 
 
 def _step_is_playback_action_step(step: dict[str, object]) -> bool:
-    chunks = [str(step.get("title") or ""), str(step.get("description") or "")]
-    expected = step.get("expected_outputs", [])
-    if isinstance(expected, list):
-        chunks.extend(str(item) for item in expected)
-    haystack = " ".join(chunks).lower()
+    haystack = _step_text_haystack(step)
     return _contains_any(haystack, _PLAYBACK_ACTION_STEP_KEYWORDS)
+
+
+def _step_has_current_browser_navigation_hint(step: dict[str, object]) -> bool:
+    haystack = _step_text_haystack(step)
+    return _contains_any(haystack, _CURRENT_BROWSER_NAVIGATION_HINT_KEYWORDS)
+
+
+def _step_has_current_browser_spreadsheet_navigation_hint(
+    step: dict[str, object],
+) -> bool:
+    haystack = _step_text_haystack(step)
+    return _contains_any(haystack, _CURRENT_BROWSER_SPREADSHEET_NAVIGATION_HINT_KEYWORDS)
+
+
+def _step_has_current_browser_spreadsheet_entry_hint(
+    step: dict[str, object],
+) -> bool:
+    haystack = _step_text_haystack(step)
+    return _contains_any(
+        haystack, _CURRENT_BROWSER_SPREADSHEET_NAVIGATION_HINT_KEYWORDS
+    ) and _contains_any(haystack, _CURRENT_BROWSER_SPREADSHEET_ENTRY_HINT_KEYWORDS)
+
+
+def _step_is_current_browser_new_tab_step(step: dict[str, object]) -> bool:
+    capability_names = {
+        str(capability.get("name", "")).strip()
+        for capability in step.get("capabilities", [])
+        if isinstance(capability, dict)
+    }
+    if capability_names != {"desktop.control.hotkey"}:
+        return False
+    haystack = _step_text_haystack(step)
+    return _contains_any(haystack, _CURRENT_BROWSER_NEW_TAB_STEP_KEYWORDS)
+
+
+def _step_needs_current_browser_navigation_rewrite(
+    step: dict[str, object],
+) -> bool:
+    if _step_has_current_browser_spreadsheet_entry_hint(step):
+        return False
+    if _step_has_current_browser_navigation_hint(step):
+        return True
+    return _step_has_current_browser_spreadsheet_navigation_hint(step) and _step_has_any_capability(
+        step,
+        {"desktop.control.hotkey", "current_tab.navigate"},
+    )
+
+
+def _step_needs_spreadsheet_navigation_rewrite(
+    step: dict[str, object],
+) -> bool:
+    return _step_has_current_browser_spreadsheet_navigation_hint(step) and _contains_any(
+        _step_text_haystack(step),
+        _CURRENT_BROWSER_SPREADSHEET_OPEN_ACTION_KEYWORDS,
+    ) and _step_has_any_capability(
+        step,
+        {
+            "desktop.control.hotkey",
+            "desktop.control.type",
+            "desktop.view.frontmost_app",
+            "current_tab.navigate",
+        },
+    )
+
+
+def _rewrite_current_browser_navigation_description(
+    step: dict[str, object],
+) -> None:
+    description = str(step.get("description") or "").strip()
+    for pattern, replacement in (
+        (
+            r"(?i)\busing\s+(?:cmd|ctrl)\s*/\s*(?:cmd|ctrl)\s*\+\s*t\s*(?:and\s+)?",
+            "",
+        ),
+        (
+            r"(?i)\busing\s+(?:cmd|ctrl|cmd/control|ctrl/cmd)\s*\+\s*t\s*(?:and\s+)?",
+            "",
+        ),
+        (
+            r"(?i)^\(\s*(?:cmd|ctrl)\s*/\s*(?:cmd|ctrl)\s*\+\s*t\s*\)\s*(?:,\s*|and\s+)?",
+            "",
+        ),
+        (
+            r"(?i)^\(\s*(?:cmd|ctrl)\s*/\s*(?:cmd|ctrl)\s*\+\s*t\s*\),?\s*",
+            "",
+        ),
+        (
+            r"(?i)\b(?:cmd|ctrl)\s*\+\s*t\s*\(\s*(?:cmd|ctrl)\s*\+\s*t\s*\)\s*を?使用して\s*",
+            "",
+        ),
+        (
+            r"(?i)\b(?:cmd|ctrl)\s*/\s*(?:cmd|ctrl)\s*\+\s*t\s*で\s*",
+            "",
+        ),
+        (r"(?i)\b(?:cmd|ctrl|cmd/control|ctrl/cmd)\+t\b[^。.]*[、,]\s*", ""),
+        (r"(?i)\b(?:cmd|ctrl|cmd/control|ctrl/cmd)\+tで\s*", ""),
+        (r"(?i)\bopen another new tab and\s*", ""),
+        (r"(?i)\bopen a new tab and\s*", ""),
+        (r"(?i)\bopen a new tab,?\s*", ""),
+        (r"(?i)\bin another new tab\b,?\s*", ""),
+        (r"(?i)\bin a new tab\b,?\s*", ""),
+        (r"新しいタブを開き、?", ""),
+        (r"新規タブを開き、?", ""),
+    ):
+        description = re.sub(pattern, replacement, description).strip()
+    description = re.sub(r"^[,、)\]\s]+", "", description).strip()
+    if _step_has_current_browser_spreadsheet_navigation_hint(step):
+        description = re.sub(
+            r"(?i)\bsheets\.new\b",
+            _CURRENT_BROWSER_GOOGLE_SHEETS_CREATE_URL,
+            description,
+        )
+        description = re.sub(
+            r"(?i)\bsheets\.google\.com\b",
+            _CURRENT_BROWSER_GOOGLE_SHEETS_CREATE_URL,
+            description,
+        )
+        guidance = (
+            "Google Sheets はテンプレート一覧ではなく、"
+            f"current_tab.navigate で {_CURRENT_BROWSER_GOOGLE_SHEETS_CREATE_URL} "
+            "に直接遷移して新規スプレッドシートを開く。"
+        )
+    else:
+        guidance = (
+            "検索やページ遷移は、未送信の文字入力に頼らず、"
+            "current_tab.navigate で完全なURLまたはGoogle検索URLを使って確実に遷移する。"
+        )
+    if guidance not in description:
+        description = f"{description} {guidance}".strip()
+    step["description"] = description
+
+
+def _rewrite_current_browser_spreadsheet_entry_description(
+    step: dict[str, object],
+) -> None:
+    description = str(step.get("description") or "").strip()
+    guidance = (
+        "Google Sheets の編集グリッドが表示されたら、最初の入力セル"
+        "（例: A1）を desktop.wait.element と desktop.ax.find で特定して"
+        "クリックし、セルにフォーカスが入ったことを確認してから結果を入力する。"
+        " ツールバーやダイアログには入力しない。"
+    )
+    if guidance not in description:
+        description = f"{description} {guidance}".strip()
+    step["description"] = description
 
 
 def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
     _normalize_desktop_plan_steps(plan, goal)
+    _normalize_isolated_browser_steps(plan, goal)
+    steps = plan.get("steps", [])
+    step_capability_names = _step_capability_names(plan)
+    has_current_browser_navigation_steps = isinstance(steps, list) and any(
+        isinstance(step, dict)
+        and _step_has_current_browser_navigation_hint(step)
+        and _step_has_any_capability(step, {"desktop.control.hotkey", "current_tab.navigate"})
+        for step in steps
+    )
     required_caps = [
         cap if isinstance(cap, dict) else {"name": str(cap)}
         for cap in plan.get("required_capabilities", [])
     ]
-    for step_capability_name in _step_capability_names(plan):
+    for step_capability_name in step_capability_names:
         _ensure_capability(required_caps, step_capability_name)
     normalized_goal = (goal or plan.get("goal") or "").strip().lower()
     is_current_browser_goal = _targets_current_browser(normalized_goal)
+    prefers_isolated_browser = prefers_isolated_browser_for_goal(normalized_goal)
 
-    if is_current_browser_goal:
+    if is_current_browser_goal and not prefers_isolated_browser:
         required_caps = [
             cap
             for cap in required_caps
             if str(cap.get("name", "")) != "desktop.control.launch_app"
         ]
+        if "desktop.control.type" not in step_capability_names:
+            required_caps = [
+                cap
+                for cap in required_caps
+                if str(cap.get("name", "")) != "desktop.control.type"
+            ]
+        if (
+            has_current_browser_navigation_steps
+            and "desktop.control.hotkey" not in step_capability_names
+        ):
+            required_caps = [
+                cap
+                for cap in required_caps
+                if str(cap.get("name", "")) != "desktop.control.hotkey"
+            ]
     cap_names = {str(cap.get("name", "")) for cap in required_caps}
 
-    if is_current_browser_goal:
+    if prefers_isolated_browser:
+        required_caps = [
+            cap
+            for cap in required_caps
+            if str(cap.get("name", "")) not in _ISOLATED_BROWSER_REWRITE_CAPS
+        ]
+        _ensure_capability(required_caps, "browser.navigate")
+    elif is_current_browser_goal:
         # Current-browser tasks should reuse the browser the user already has
         # open, so we remove launch-app and expand the read/focus capabilities
         # needed to verify and steer that existing window safely.
@@ -499,14 +948,22 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
                 "desktop.wait.element",
                 "desktop.control.click",
                 "desktop.control.type",
+                "desktop.control.hotkey",
+                "current_tab.navigate",
             }
         )
         if has_desktop_browser_plan or "browser.navigate" in cap_names:
+            _ensure_capability(required_caps, "current_tab.navigate")
+            _ensure_capability(required_caps, "current_tab.info")
             _ensure_capability(required_caps, "desktop.view.windows")
             _ensure_capability(required_caps, "desktop.view.frontmost_app")
             _ensure_capability(required_caps, "desktop.control.focus_window")
             _ensure_capability(required_caps, "desktop.control.click")
-            _ensure_capability(required_caps, "desktop.control.hotkey")
+            if (
+                "desktop.control.hotkey" in step_capability_names
+                or not has_current_browser_navigation_steps
+            ):
+                _ensure_capability(required_caps, "desktop.control.hotkey")
             _ensure_capability(required_caps, "desktop.control.scroll")
             _ensure_capability(required_caps, "desktop.ax.find")
             _ensure_capability(required_caps, "desktop.wait.element")
@@ -514,7 +971,9 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
             _ensure_capability(required_caps, "desktop.ax.snapshot")
 
             if _needs_text_entry(normalized_goal):
-                _ensure_capability(required_caps, "desktop.control.type")
+                _ensure_capability(required_caps, "current_tab.extract_text")
+                if "desktop.control.type" in step_capability_names:
+                    _ensure_capability(required_caps, "desktop.control.type")
     else:
         has_desktop_ui_plan = bool(
             cap_names

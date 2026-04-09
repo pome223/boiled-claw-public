@@ -78,7 +78,13 @@ from src.control_loop.guarded_tools import (
 from src.control_loop.planner_agent import planner_agent
 from src.runtime.session_service import create_session_service
 from src.control_loop.verifier_agent import verifier_agent
+from src.runtime.replay_schema import ReplayContext
 from src.runtime.state_keys import StateKeys
+from src.runtime.task_keywords import (
+    CURRENT_BROWSER_KEYWORDS,
+    SPREADSHEET_KEYWORDS,
+    prefers_isolated_browser_for_goal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +96,45 @@ _CONTROL_LOOP_AUTHOR = "control_loop"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PLAYBACK_SCREENSHOT_DIFF_RATIO_THRESHOLD = 0.002
 _PLAYBACK_SCREENSHOT_DELTA_THRESHOLD = 0.0005
+_TEXT_ENTRY_KEYWORDS = SPREADSHEET_KEYWORDS | frozenset(
+    {
+        "入力",
+        "記入",
+        "書いて",
+        "書き込",
+        "貼り付",
+        "ペースト",
+        "まとめて",
+        "まとめる",
+        "追加",
+        "更新",
+        "fill",
+        "enter",
+        "paste",
+        "type",
+        "write",
+    }
+)
+_CURRENT_TAB_INFO_RESPONSE_NAMES = frozenset(
+    {
+        "guarded_current_tab_info",
+        "current_tab.info",
+        "current_tab_info",
+        "host.current_tab.info",
+        "guarded_current_tab_navigate",
+        "current_tab.navigate",
+        "current_tab_navigate",
+        "host.current_tab.navigate",
+    }
+)
+_CURRENT_TAB_EXTRACT_TEXT_RESPONSE_NAMES = frozenset(
+    {
+        "guarded_current_tab_extract_text",
+        "current_tab.extract_text",
+        "current_tab_extract_text",
+        "host.current_tab.extract_text",
+    }
+)
 
 
 # ── Callback helpers ───────────────────────────────────────────────────────
@@ -110,6 +155,26 @@ def _chain_after_callbacks(
             cb(resolved_ctx)
         return
     return chained
+
+
+def _contains_any(text: str, keywords: set[str] | frozenset[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def _targets_current_browser_goal(goal: str) -> bool:
+    normalized = (goal or "").strip().lower()
+    return (
+        _contains_any(normalized, CURRENT_BROWSER_KEYWORDS)
+        or _contains_any(normalized, SPREADSHEET_KEYWORDS)
+    ) and not prefers_isolated_browser_for_goal(normalized)
+
+
+def _goal_needs_text_entry(goal: str) -> bool:
+    return _contains_any((goal or "").strip().lower(), _TEXT_ENTRY_KEYWORDS)
+
+
+def _response_succeeded(response: dict[str, Any]) -> bool:
+    return bool(response.get("success") or response.get("ok"))
 
 
 # ── Agents with callbacks ──────────────────────────────────────────────────
@@ -274,10 +339,13 @@ class ControlLoop:
             has_approved_plan = bool(state.get(StateKeys.PLAN_APPROVED))
             replay_context = _parse_replay_context(state.get(StateKeys.REPLAY_CONTEXT))
             approved_plan = _parse_json(state.get(StateKeys.PLAN_APPROVED)) or {}
-            resume_existing_plan = (
-                attempt == 0
-                and has_approved_plan
-                and approval in _APPROVED_STATUSES
+            repair_patch = _parse_json(state.get(StateKeys.TEMP_REPAIR_PATCH)) or {}
+            resume_existing_plan = _should_resume_existing_plan(
+                attempt=attempt,
+                has_approved_plan=has_approved_plan,
+                approval=approval,
+                replay_context=replay_context,
+                repair_patch=repair_patch,
             )
 
             if not resume_existing_plan:
@@ -328,6 +396,7 @@ class ControlLoop:
 
             # ── Step 2: Executor ───────────────────────────────────────────
             executor_message = _build_executor_message(
+                approved_plan=approved_plan,
                 replay_context=replay_context,
             )
             await self._run_agent(
@@ -349,11 +418,21 @@ class ControlLoop:
                     "Structured verification inputs:\n"
                     f"{json.dumps(verification_inputs, ensure_ascii=False, indent=2)}"
                 )
+            screenshot_paths: list[str] = []
+            if verification_inputs:
+                desktop_vi = verification_inputs.get("desktop") or {}
+                raw_paths = desktop_vi.get("screenshot_paths") or []
+                screenshot_paths = [
+                    path
+                    for path in raw_paths
+                    if isinstance(path, str) and Path(path).is_file()
+                ]
             await self._run_agent(
                 verifier_with_hooks,
                 session_id=session_id,
                 user_id=user_id,
                 message=verification_message,
+                image_paths=screenshot_paths or None,
             )
 
             # verify:last_report を確認
@@ -369,6 +448,22 @@ class ControlLoop:
             if promoted_report is not None:
                 report = promoted_report
                 state = await self._get_state(user_id, session_id)
+            if _should_demote_browser_text_entry_report(
+                report=report,
+                verification_inputs=verification_inputs or {},
+            ):
+                report = _demote_browser_text_entry_report(
+                    report=report,
+                    verification_inputs=verification_inputs or {},
+                )
+            elif _should_retarget_browser_text_entry_repair(
+                report=report,
+                verification_inputs=verification_inputs or {},
+            ):
+                report = _retarget_browser_text_entry_repair(
+                    report=report,
+                    verification_inputs=verification_inputs or {},
+                )
             verify_status = report.get("status", "error")
 
             result.repair_count = state.get(StateKeys.REPAIR_COUNT, 0)
@@ -389,6 +484,14 @@ class ControlLoop:
                     result.metadata["artifact_refs"] = [
                         str(ref) for ref in artifact_refs if str(ref).strip()
                     ]
+                output_location = _output_location_from_verification_inputs(
+                    verification_inputs
+                )
+                if output_location:
+                    result.metadata["output_location"] = output_location
+                current_tab_inputs = verification_inputs.get("current_tab")
+                if isinstance(current_tab_inputs, dict):
+                    result.metadata["current_tab"] = current_tab_inputs
             candidate_ids = state.get(StateKeys.MEMORY_LAST_CANDIDATE_IDS, [])
             if candidate_ids:
                 result.metadata["memory_candidate_ids"] = candidate_ids
@@ -406,6 +509,41 @@ class ControlLoop:
                 )
                 if tail_replay_from_step:
                     result.metadata["tail_replay_from_step_id"] = tail_replay_from_step
+
+            normalized_state_delta: dict[str, Any] = {}
+            if report != (_parse_json(raw_report) or {}):
+                normalized_state_delta[StateKeys.VERIFY_LAST_REPORT] = report
+                normalized_state_delta[StateKeys.TEMP_REPAIR_PATCH] = _build_repair_patch_from_report(
+                    report=report,
+                    state=state,
+                )
+            tail_replay_from_step = str(
+                result.metadata.get("tail_replay_from_step_id") or ""
+            ).strip()
+            if verify_status != "pass" and tail_replay_from_step and step_trace:
+                normalized_state_delta[StateKeys.REPLAY_SOURCE_TASK_ID] = request_id
+                normalized_state_delta[StateKeys.REPLAY_FROM_STEP] = tail_replay_from_step
+                normalized_state_delta[StateKeys.REPLAY_CONTEXT] = _build_replay_context_payload(
+                    source_task_id=request_id,
+                    from_step=tail_replay_from_step,
+                    report=report,
+                    step_trace=step_trace,
+                )
+            elif verify_status == "pass":
+                normalized_state_delta[StateKeys.REPLAY_SOURCE_TASK_ID] = None
+                normalized_state_delta[StateKeys.REPLAY_FROM_STEP] = None
+                normalized_state_delta[StateKeys.REPLAY_CONTEXT] = None
+
+            if normalized_state_delta:
+                session = await self._get_session(user_id, session_id)
+                if session is not None:
+                    await self._append_state_delta(
+                        session=session,
+                        author=_CONTROL_LOOP_AUTHOR,
+                        invocation_prefix="repair_normalization",
+                        state_delta=normalized_state_delta,
+                    )
+                    state = await self._get_state(user_id, session_id)
 
             if verify_status == "pass":
                 result.promoted_memory_ids = await self._promote_memories(
@@ -439,6 +577,7 @@ class ControlLoop:
         session_id: str,
         user_id: str,
         message: str,
+        image_paths: list[str] | None = None,
     ) -> None:
         """指定 agent を Runner 経由で一度実行する。"""
         runner = Runner(
@@ -447,7 +586,22 @@ class ControlLoop:
             session_service=self._session_service,
             memory_service=self._memory_service,
         )
-        user_content = Content(role="user", parts=[Part(text=message)])
+        parts: list[Part] = [Part(text=message)]
+        for image_path in image_paths or []:
+            try:
+                image_bytes = Path(image_path).read_bytes()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Could not attach screenshot %s: %s", image_path, exc)
+                continue
+            parts.append(
+                Part(
+                    inline_data={
+                        "mime_type": "image/png",
+                        "data": image_bytes,
+                    }
+                )
+            )
+        user_content = Content(role="user", parts=parts)
         async for _event in runner.run_async(
             user_id=user_id,
             session_id=session_id,
@@ -617,6 +771,10 @@ class ControlLoop:
             executor_outputs=executor_outputs,
             tool_responses=tool_responses,
         )
+        if _verification_needs_current_tab_backfill(verification_inputs):
+            verification_inputs = await _backfill_current_tab_verification_inputs(
+                verification_inputs
+            )
 
         state_delta: dict[str, Any] = {}
         if executor_outputs is not None:
@@ -965,6 +1123,74 @@ def _compute_png_visual_change(
     }
 
 
+def _verification_needs_current_tab_backfill(
+    verification_inputs: dict[str, Any],
+) -> bool:
+    if not verification_inputs.get("current_browser_goal"):
+        return False
+    current_tab = verification_inputs.get("current_tab")
+    if not isinstance(current_tab, dict):
+        return True
+    has_location = bool(
+        str(current_tab.get("url") or "").strip()
+        and str(current_tab.get("title") or "").strip()
+    )
+    has_text = bool(
+        current_tab.get("extract_text_succeeded")
+        and int(current_tab.get("text_length") or 0) > 0
+    )
+    if not current_tab.get("info_succeeded") or not has_location:
+        return True
+    if verification_inputs.get("text_entry_goal") and not has_text:
+        return True
+    return False
+
+
+async def _backfill_current_tab_verification_inputs(
+    verification_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    from src.tools.current_tab import current_tab_extract_text, current_tab_info
+
+    current_tab = verification_inputs.setdefault("current_tab", {})
+    try:
+        info_result = await current_tab_info()
+    except Exception:
+        logger.exception("verification backfill: current_tab.info failed")
+    else:
+        if isinstance(info_result, dict):
+            if _response_succeeded(info_result):
+                current_tab["info_succeeded"] = True
+            url = str(info_result.get("url") or "").strip()
+            title = str(info_result.get("title") or "").strip()
+            if url:
+                current_tab["url"] = url
+            if title:
+                current_tab["title"] = title
+            if info_result.get("tab_id") is not None:
+                current_tab["tab_id"] = info_result.get("tab_id")
+            if info_result.get("window_id") is not None:
+                current_tab["window_id"] = info_result.get("window_id")
+
+    if verification_inputs.get("text_entry_goal"):
+        try:
+            text_result = await current_tab_extract_text()
+        except Exception:
+            logger.exception("verification backfill: current_tab.extract_text failed")
+        else:
+            if isinstance(text_result, dict):
+                text = str(text_result.get("text") or "")
+                if _response_succeeded(text_result):
+                    current_tab["extract_text_succeeded"] = True
+                if text:
+                    current_tab["text_excerpt"] = text[:500]
+                current_tab["text_length"] = max(
+                    int(current_tab.get("text_length") or 0),
+                    int(text_result.get("length") or len(text) or 0),
+                )
+
+    return verification_inputs
+
+
 def _build_verification_inputs(
     *,
     plan: dict[str, Any],
@@ -991,6 +1217,14 @@ def _build_verification_inputs(
     click_succeeded = False
     ax_node_count = 0
     window_titles: list[str] = []
+    current_tab_url = ""
+    current_tab_title = ""
+    current_tab_tab_id: int | None = None
+    current_tab_window_id: int | None = None
+    current_tab_info_succeeded = False
+    current_tab_text = ""
+    current_tab_text_length = 0
+    current_tab_extract_succeeded = False
 
     for item in tool_responses:
         name = str(item.get("name") or "")
@@ -1007,13 +1241,13 @@ def _build_verification_inputs(
             root = tree.get("root") if isinstance(tree, dict) else {}
             ax_node_count = max(ax_node_count, _count_ax_nodes(root))
         elif name == "guarded_desktop_control_launch_app":
-            launch_succeeded = launch_succeeded or not response.get("error")
+            launch_succeeded = launch_succeeded or _response_succeeded(response) or not response.get("error")
         elif name == "guarded_desktop_control_focus_window":
-            focus_succeeded = focus_succeeded or bool(response.get("success"))
+            focus_succeeded = focus_succeeded or _response_succeeded(response)
         elif name == "guarded_desktop_control_hotkey":
-            hotkey_succeeded = hotkey_succeeded or bool(response.get("success"))
+            hotkey_succeeded = hotkey_succeeded or _response_succeeded(response)
         elif name == "guarded_desktop_control_click":
-            click_succeeded = click_succeeded or bool(response.get("success"))
+            click_succeeded = click_succeeded or _response_succeeded(response)
         elif name == "guarded_desktop_view_windows":
             windows = response.get("windows", [])
             if isinstance(windows, list):
@@ -1024,6 +1258,29 @@ def _build_verification_inputs(
                     app_name = str(window.get("app_name") or "").strip()
                     if title or app_name:
                         window_titles.append(f"{app_name}::{title}".strip(":"))
+        elif name in _CURRENT_TAB_INFO_RESPONSE_NAMES:
+            url = str(response.get("url") or "").strip()
+            title = str(response.get("title") or "").strip()
+            if url:
+                current_tab_url = url
+            if title:
+                current_tab_title = title
+            if response.get("tab_id") is not None:
+                current_tab_tab_id = response.get("tab_id")
+            if response.get("window_id") is not None:
+                current_tab_window_id = response.get("window_id")
+            current_tab_info_succeeded = current_tab_info_succeeded or _response_succeeded(
+                response
+            )
+        elif name in _CURRENT_TAB_EXTRACT_TEXT_RESPONSE_NAMES:
+            current_tab_text = str(response.get("text") or "")
+            current_tab_text_length = max(
+                current_tab_text_length,
+                int(response.get("length") or len(current_tab_text) or 0),
+            )
+            current_tab_extract_succeeded = current_tab_extract_succeeded or _response_succeeded(
+                response
+            )
 
     visual_change = None
     if len(screenshot_paths) >= 2:
@@ -1036,8 +1293,20 @@ def _build_verification_inputs(
     return {
         "goal": goal,
         "playback_goal": _plan_text_has_playback_hint(plan, goal),
+        "current_browser_goal": _targets_current_browser_goal(goal),
+        "text_entry_goal": _goal_needs_text_entry(goal),
         "executor_outputs_present": executor_outputs is not None,
         "artifact_refs": unique_artifacts,
+        "current_tab": {
+            "info_succeeded": current_tab_info_succeeded,
+            "url": current_tab_url,
+            "title": current_tab_title,
+            "tab_id": current_tab_tab_id,
+            "window_id": current_tab_window_id,
+            "extract_text_succeeded": current_tab_extract_succeeded,
+            "text_excerpt": current_tab_text[:500],
+            "text_length": current_tab_text_length,
+        },
         "desktop": {
             "launch_succeeded": launch_succeeded,
             "focus_succeeded": focus_succeeded,
@@ -1050,6 +1319,32 @@ def _build_verification_inputs(
             "visual_change": visual_change,
         },
     }
+
+
+def _output_location_from_verification_inputs(
+    verification_inputs: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(verification_inputs, dict):
+        return None
+    current_tab = verification_inputs.get("current_tab")
+    if not isinstance(current_tab, dict):
+        return None
+    url = str(current_tab.get("url") or "").strip()
+    title = str(current_tab.get("title") or "").strip()
+    if not url and not title:
+        return None
+    payload: dict[str, Any] = {}
+    if url:
+        payload["url"] = url
+    if title:
+        payload["title"] = title
+    tab_id = current_tab.get("tab_id")
+    window_id = current_tab.get("window_id")
+    if tab_id is not None:
+        payload["tab_id"] = tab_id
+    if window_id is not None:
+        payload["window_id"] = window_id
+    return payload
 
 
 def _should_promote_visual_playback_report(
@@ -1076,6 +1371,177 @@ def _should_promote_visual_playback_report(
     if not (desktop_inputs.get("launch_succeeded") or desktop_inputs.get("focus_succeeded")):
         return False
     return True
+
+
+def _should_demote_browser_text_entry_report(
+    *,
+    report: dict[str, Any],
+    verification_inputs: dict[str, Any],
+) -> bool:
+    if not report or report.get("status") != "pass":
+        return False
+    if not verification_inputs.get("current_browser_goal"):
+        return False
+    if not verification_inputs.get("text_entry_goal"):
+        return False
+
+    current_tab = verification_inputs.get("current_tab")
+    desktop = verification_inputs.get("desktop")
+    if not isinstance(current_tab, dict) or not isinstance(desktop, dict):
+        return True
+
+    has_destination = bool(
+        str(current_tab.get("url") or "").strip()
+        or str(current_tab.get("title") or "").strip()
+    )
+    has_post_action_evidence = bool(
+        current_tab.get("extract_text_succeeded")
+        and int(current_tab.get("text_length") or 0) > 0
+    ) or bool(desktop.get("screenshot_paths"))
+
+    return not (has_destination and has_post_action_evidence)
+
+
+def _demote_browser_text_entry_report(
+    *,
+    report: dict[str, Any],
+    verification_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    demoted = json.loads(json.dumps(report))
+    current_tab = verification_inputs.get("current_tab")
+    current_tab = current_tab if isinstance(current_tab, dict) else {}
+    missing_evidence: list[str] = []
+    if not str(current_tab.get("url") or "").strip():
+        missing_evidence.append("current_tab.url")
+    if not str(current_tab.get("title") or "").strip():
+        missing_evidence.append("current_tab.title")
+    if not (
+        current_tab.get("extract_text_succeeded")
+        and int(current_tab.get("text_length") or 0) > 0
+    ):
+        missing_evidence.append("post-action text/screenshot evidence")
+
+    explanation = (
+        "現在のブラウザでの入力タスクですが、入力先のタブURL/titleや入力後の証拠が不足しているため、"
+        "成功判定を維持できません。欠けている evidence: "
+        + ", ".join(missing_evidence)
+    )
+
+    for criterion in demoted.get("criterion_results", []) or []:
+        if not isinstance(criterion, dict):
+            continue
+        criterion["passed"] = False
+        criterion["score"] = min(float(criterion.get("score") or 0.0), 0.35)
+        criterion["explanation"] = explanation
+
+    demoted["status"] = "fail"
+    demoted["overall_score"] = min(float(demoted.get("overall_score") or 1.0), 0.35)
+    demoted["confidence"] = min(float(demoted.get("confidence") or 1.0), 0.45)
+    demoted["failure_type"] = "insufficient_evidence"
+    demoted["summary"] = explanation
+    demoted["repair_actions"] = [
+        {
+            "action_id": "gather_browser_destination_evidence",
+            "action_type": "gather_more_evidence",
+            "description": "Capture the current tab URL/title and post-entry evidence before marking the spreadsheet/text-entry task as complete.",
+            "target_step_ids": ["capture_current_tab_state"],
+            "priority": 1,
+        }
+    ]
+    return demoted
+
+
+def _should_retarget_browser_text_entry_repair(
+    *,
+    report: dict[str, Any],
+    verification_inputs: dict[str, Any],
+) -> bool:
+    if not report or report.get("status") not in {"fail", "partial_pass"}:
+        return False
+    if str(report.get("failure_type") or "") != "insufficient_evidence":
+        return False
+    if not verification_inputs.get("current_browser_goal"):
+        return False
+    if not verification_inputs.get("text_entry_goal"):
+        return False
+
+    current_tab = verification_inputs.get("current_tab")
+    current_tab = current_tab if isinstance(current_tab, dict) else {}
+    has_destination = bool(
+        str(current_tab.get("url") or "").strip()
+        or str(current_tab.get("title") or "").strip()
+    )
+    has_text_evidence = bool(
+        current_tab.get("extract_text_succeeded")
+        and int(current_tab.get("text_length") or 0) > 0
+    )
+    return not (has_destination and has_text_evidence)
+
+
+def _retarget_browser_text_entry_repair(
+    *,
+    report: dict[str, Any],
+    verification_inputs: dict[str, Any],
+) -> dict[str, Any]:
+    retargeted = json.loads(json.dumps(report))
+    current_tab = verification_inputs.get("current_tab")
+    current_tab = current_tab if isinstance(current_tab, dict) else {}
+
+    missing_evidence: list[str] = []
+    if not str(current_tab.get("url") or "").strip():
+        missing_evidence.append("current_tab.url")
+    if not str(current_tab.get("title") or "").strip():
+        missing_evidence.append("current_tab.title")
+    if not (
+        current_tab.get("extract_text_succeeded")
+        and int(current_tab.get("text_length") or 0) > 0
+    ):
+        missing_evidence.append("current_tab.extract_text")
+
+    summary = (
+        "現在のブラウザでの入力タスクは証拠不足です。入力先タブの URL/title と入力後のページ証拠を"
+        " `capture_current_tab_state` で再取得する必要があります。欠けている evidence: "
+        + ", ".join(missing_evidence)
+    )
+
+    repair_actions = retargeted.get("repair_actions")
+    repair_actions = repair_actions if isinstance(repair_actions, list) else []
+    normalized_actions: list[dict[str, Any]] = []
+    replaced = False
+    for action in repair_actions:
+        if not isinstance(action, dict):
+            continue
+        copied = json.loads(json.dumps(action))
+        target_step_ids = copied.get("target_step_ids")
+        target_step_ids = target_step_ids if isinstance(target_step_ids, list) else []
+        normalized_target_ids = [str(step_id or "").strip() for step_id in target_step_ids]
+        normalized_target_ids = [step_id for step_id in normalized_target_ids if step_id]
+        if "capture_current_tab_state" not in normalized_target_ids:
+            copied["target_step_ids"] = ["capture_current_tab_state"]
+            copied["description"] = (
+                "Gather current-tab URL/title and post-entry page evidence before retrying spreadsheet verification."
+            )
+            copied["action_type"] = "gather_more_evidence"
+            copied["priority"] = 1
+            replaced = True
+        normalized_actions.append(copied)
+
+    if not normalized_actions:
+        normalized_actions = [
+            {
+                "action_id": "gather_browser_destination_evidence",
+                "action_type": "gather_more_evidence",
+                "description": "Gather current-tab URL/title and post-entry page evidence before retrying spreadsheet verification.",
+                "target_step_ids": ["capture_current_tab_state"],
+                "priority": 1,
+            }
+        ]
+        replaced = True
+
+    if replaced:
+        retargeted["repair_actions"] = normalized_actions
+    retargeted["summary"] = summary
+    return retargeted
 
 
 def _promote_visual_playback_report(
@@ -1126,15 +1592,77 @@ def _promote_visual_playback_report(
     return promoted
 
 
+def _build_repair_patch_from_report(
+    *,
+    report: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any] | None:
+    status = str(report.get("status") or "").strip()
+    if status == "pass":
+        return None
+
+    failed_criteria = [
+        str(item.get("name") or "").strip()
+        for item in report.get("criterion_results", []) or []
+        if isinstance(item, dict) and not item.get("passed")
+    ]
+    repair_actions = report.get("repair_actions")
+    repair_actions = repair_actions if isinstance(repair_actions, list) else []
+    repair_count = int(state.get(StateKeys.REPAIR_COUNT) or 0)
+    approved_plan = _parse_json(state.get(StateKeys.PLAN_APPROVED)) or {}
+    previous_plan_id = str(report.get("plan_id") or approved_plan.get("plan_id") or "").strip()
+    return {
+        "note": (
+            f"Re-plan required. Failed criteria: {failed_criteria}. "
+            f"Repair attempt {repair_count}/{_MAX_REPAIR_ATTEMPTS}."
+        ),
+        "failed_criteria": failed_criteria,
+        "repair_actions": repair_actions,
+        "previous_plan_id": previous_plan_id,
+    }
+
+
+def _build_replay_context_payload(
+    *,
+    source_task_id: str,
+    from_step: str,
+    report: dict[str, Any],
+    step_trace: list[dict[str, Any]],
+) -> dict[str, Any]:
+    replay_context = ReplayContext(
+        source_task_id=source_task_id,
+        from_step=from_step,
+        mode="tail",
+        previous_verification_status=str(report.get("status") or "") or None,
+        previous_failed_criteria=[
+            str(item.get("name") or "").strip()
+            for item in report.get("criterion_results", []) or []
+            if isinstance(item, dict) and not item.get("passed")
+        ],
+        step_trace=step_trace,
+    )
+    return replay_context.model_dump(mode="json")
+
+
 def _build_final_text(state: dict, report: dict) -> str:
     goal = state.get(StateKeys.TASK_GOAL, "")
     score = report.get("overall_score", 0.0)
     summary = report.get("summary", "")
-    return (
-        f"Task completed: {goal}\n"
-        f"Score: {score:.2f}\n"
-        f"{summary}"
-    ).strip()
+    lines = [
+        f"Task completed: {goal}",
+        f"Score: {score:.2f}",
+        f"{summary}",
+    ]
+    verification_inputs = _parse_json(state.get(StateKeys.TEMP_VERIFICATION_INPUTS)) or {}
+    output_location = _output_location_from_verification_inputs(verification_inputs)
+    if output_location:
+        url = str(output_location.get("url") or "").strip()
+        title = str(output_location.get("title") or "").strip()
+        if url:
+            lines.append(f"Location: {url}")
+        if title:
+            lines.append(f"Page: {title}")
+    return "\n".join(line for line in lines if line).strip()
 
 
 def _workflow_is_terminal(state: dict[str, Any]) -> bool:
@@ -1145,6 +1673,25 @@ def _workflow_is_terminal(state: dict[str, Any]) -> bool:
         return True
     report = _parse_json(state.get(StateKeys.VERIFY_LAST_REPORT)) or {}
     return report.get("status") in _TERMINAL_VERIFY_STATUSES
+
+
+def _should_resume_existing_plan(
+    *,
+    attempt: int,
+    has_approved_plan: bool,
+    approval: str,
+    replay_context: dict[str, Any] | None,
+    repair_patch: dict[str, Any] | None,
+) -> bool:
+    if not has_approved_plan or approval not in _APPROVED_STATUSES:
+        return False
+    if attempt == 0:
+        return True
+    if replay_context:
+        return True
+    if repair_patch:
+        return True
+    return False
 
 
 def _build_next_goal_state(init_state: dict[str, Any]) -> dict[str, Any]:
@@ -1170,6 +1717,8 @@ def _build_next_goal_state(init_state: dict[str, Any]) -> dict[str, Any]:
         StateKeys.TEMP_ARTIFACT_REFS: None,
         StateKeys.TEMP_VERIFICATION_INPUTS: None,
         StateKeys.TEMP_REPAIR_PATCH: None,
+        StateKeys.TEMP_CURRENT_BROWSER_NEW_TAB_COUNT: None,
+        StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS: None,
     }
     state_delta.update(init_state)
     return state_delta

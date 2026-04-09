@@ -72,3 +72,43 @@ COMPUTER_USE_KEYWORDS: frozenset[str] = frozenset(
         "目で見て操作",
     }
 )
+
+TEXT_ENTRY_KEYWORDS: frozenset[str] = frozenset(
+    {
+        "入力",
+        "記入",
+        "書いて",
+        "書き込",
+        "貼り付",
+        "ペースト",
+        "まとめて",
+        "まとめる",
+        "追加",
+        "更新",
+        "fill",
+        "enter",
+        "paste",
+        "type",
+        "write",
+        "form",
+        "フォーム",
+    }
+)
+
+
+def _contains_any(text: str, keywords: frozenset[str]) -> bool:
+    return any(keyword in text for keyword in keywords)
+
+
+def prefers_isolated_browser_for_goal(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized:
+        return False
+    has_current_browser = _contains_any(normalized, CURRENT_BROWSER_KEYWORDS)
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
+    needs_visible_text_entry = _contains_any(normalized, TEXT_ENTRY_KEYWORDS)
+    # Current-browser spreadsheet requests often depend on the user's existing
+    # authenticated web session (for example Google Sheets). Keep those tasks in
+    # the user's browser and reserve isolated browsers for generic form/text
+    # entry where session carry-over is not required.
+    return has_current_browser and needs_visible_text_entry and not has_spreadsheet

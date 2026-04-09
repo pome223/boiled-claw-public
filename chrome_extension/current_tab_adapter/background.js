@@ -57,6 +57,24 @@ async function getActiveTab() {
   return tabs[0];
 }
 
+async function getTargetTab(targetTabId) {
+  if (!targetTabId) {
+    return getActiveTab();
+  }
+  return chrome.tabs.get(targetTabId);
+}
+
+function isControlUiTab(tab) {
+  const url = String(tab?.url || "").toLowerCase();
+  const title = String(tab?.title || "").toLowerCase();
+  return url.includes("localhost:18789/chat") || title.includes("boiled-claw control ui");
+}
+
+function isExternalNavigationTarget(url) {
+  const lowered = String(url || "").toLowerCase();
+  return !!lowered && !lowered.includes("localhost:18789/chat");
+}
+
 function waitForTabComplete(tabId, timeoutMs) {
   return new Promise((resolve, reject) => {
     const deadline = Date.now() + timeoutMs;
@@ -169,12 +187,43 @@ async function handleRequest(message) {
   }
 
   if (action === "navigate") {
-    const tab = await getActiveTab();
+    const tab = await getTargetTab(payload.target_tab_id || null);
+    const shouldOpenNewTab =
+      Boolean(payload.new_tab) ||
+      (isControlUiTab(tab) && isExternalNavigationTarget(payload.url));
+    if (shouldOpenNewTab) {
+      // Open in a new tab to preserve the relay host tab (e.g. Control UI).
+      const created = await chrome.tabs.create({ url: payload.url, active: true });
+      const completed = await waitForTabComplete(created.id, payload.timeout_ms || 15000);
+      return {
+        tab_id: completed.id,
+        window_id: completed.windowId,
+        url: completed.url || "",
+        title: completed.title || "",
+        new_tab: true
+      };
+    }
     if (!tab.id) {
       throw new Error("Active tab is missing an id");
     }
-    await chrome.tabs.update(tab.id, { url: payload.url });
+    await chrome.tabs.update(tab.id, { url: payload.url, active: true });
     const updated = await waitForTabComplete(tab.id, payload.timeout_ms || 15000);
+    return {
+      tab_id: updated.id,
+      window_id: updated.windowId,
+      url: updated.url || "",
+      title: updated.title || ""
+    };
+  }
+
+  if (action === "activate_tab") {
+    if (!payload.tab_id) {
+      throw new Error("tab_id is required");
+    }
+    const updated = await chrome.tabs.update(payload.tab_id, { active: true });
+    if (updated.windowId) {
+      await chrome.windows.update(updated.windowId, { focused: true });
+    }
     return {
       tab_id: updated.id,
       window_id: updated.windowId,
@@ -194,7 +243,22 @@ async function handleRequest(message) {
   }
 
   if (action === "extract_text") {
-    const { value } = await executeInActiveTab(selectorExtractText, [payload.selector || null]);
+    const targetTab = await getTargetTab(payload.target_tab_id || null);
+    if (!targetTab.id) {
+      throw new Error("Active tab is missing an id");
+    }
+    const [result] = await chrome.scripting.executeScript({
+      target: { tabId: targetTab.id },
+      func: selectorExtractText,
+      args: [payload.selector || null]
+    });
+    if (!result) {
+      throw new Error("Script execution returned no result");
+    }
+    if (result.result && result.result.__boiledClawError) {
+      throw new Error(result.result.__boiledClawError);
+    }
+    const value = result.result;
     return value;
   }
 
