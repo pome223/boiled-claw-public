@@ -32,8 +32,12 @@ class StateKeys:
 
     # ── Temporary (invocation-scoped) ─────────────────────────────────────
     TEMP_RETRIEVAL_BUNDLE = "temp:retrieval_bundle"
-    TEMP_PLANNER_DRAFT = "temp:planner_draft"
+    TEMP_PLANNER_DRAFT = "plan:draft"  # not temp: so after_agent_callback can read it
     TEMP_EXECUTOR_OUTPUTS = "temp:executor_outputs"
     TEMP_ARTIFACT_REFS = "temp:artifact_refs"
     TEMP_VERIFICATION_INPUTS = "temp:verification_inputs"
     TEMP_REPAIR_PATCH = "temp:repair_patch"
+    TEMP_CURRENT_BROWSER_NEW_TAB_COUNT = "temp:current_browser_new_tab_count"
+    TEMP_CURRENT_BROWSER_OPENED_TAB_IDS = "temp:current_browser_opened_tab_ids"
+    TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID = "temp:current_browser_active_tab_id"
+    TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET = "temp:current_browser_spreadsheet_target"

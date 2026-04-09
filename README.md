@@ -378,6 +378,8 @@ Loading the Chrome extension:
 
 This extension requires `<all_urls>` host permission because it uses `chrome.scripting` on the active tab. This is necessary to perform selector click / fill / text extraction on "whichever tab the user is currently viewing" regardless of the site. Communication itself is limited to the local relay only, restricted by loopback bind, origin check, and an optional token.
 
+When a current-browser task starts from the Control UI and needs to leave that page, the adapter preserves the Control UI tab, opens or reuses a task tab for the external destination, and can reactivate that task tab for later extraction or verification steps.
+
 The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 
 - Get active tab info

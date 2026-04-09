@@ -9,29 +9,31 @@ Executor agent にアタッチし、approved plan の範囲外の実行を防ぐ
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, urlsplit
 
 from google.adk.tools import ToolContext
 
 from src.gateway.routing import targets_user_browser
 from src.runtime.state_keys import StateKeys
+from src.runtime.task_keywords import (
+    SPREADSHEET_KEYWORDS,
+    prefers_isolated_browser_for_goal,
+)
 
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
 _IMPLICIT_PLAN_CAPABILITIES = {
     "desktop.view.windows": {
-        "desktop.control.launch_app",
         "desktop.control.focus_window",
         "desktop.wait.window",
     },
     "desktop.view.frontmost_app": {
-        "desktop.control.launch_app",
         "desktop.control.focus_window",
         "desktop.wait.window",
     },
     "desktop.wait.window": {
-        "desktop.control.launch_app",
         "desktop.control.focus_window",
     },
     "desktop.ax.find": {
@@ -85,9 +87,23 @@ _KNOWN_BROWSER_APPS = {
 }
 _PRESERVE_CONTROL_UI_MARKER = "preserve that tab and open a new tab in the same browser window"
 _CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY = "temp:current_browser_address_bar_focused"
+_CURRENT_BROWSER_NEW_TAB_COUNT_LIMIT = 1
+_CURRENT_BROWSER_NEW_TAB_COUNT_LIMIT_MAX = 2
+_CURRENT_BROWSER_NEW_TAB_VERIFY_ATTEMPTS = 5
+_CURRENT_BROWSER_NEW_TAB_VERIFY_DELAY_SECONDS = 0.4
+_CURRENT_BROWSER_NEW_TAB_STEP_MARKERS = (
+    "new tab",
+    "another new tab",
+    "新しいタブ",
+    "新規タブ",
+)
 _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS = (
     "boiled-claw Control UI",
     "boiled-claw",
+)
+_CURRENT_BROWSER_CONTROL_UI_URL_MARKERS = (
+    "localhost:18789/chat",
+    "127.0.0.1:18789/chat",
 )
 _ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS = 120
 _CURRENT_BROWSER_SEARCH_KEYWORDS = {
@@ -104,6 +120,12 @@ _CURRENT_BROWSER_SEARCH_KEYWORDS = {
     "天気",
     "最新",
 }
+_CURRENT_BROWSER_SAFE_SEARCH_HOST_MARKERS = (
+    "google.com/search",
+    "www.google.com/search",
+    "google.co.jp/search",
+    "www.google.co.jp/search",
+)
 _PLAYBACK_TASK_KEYWORDS = {
     "djay",
     "spotify",
@@ -184,7 +206,21 @@ def _is_current_browser_task(tool_context: ToolContext | None) -> bool:
     if tool_context is None:
         return False
     goal = tool_context.state.get(StateKeys.TASK_GOAL, "")
-    return isinstance(goal, str) and targets_user_browser(goal)
+    if (
+        isinstance(goal, str)
+        and targets_user_browser(goal)
+        and not prefers_isolated_browser_for_goal(goal)
+    ):
+        return True
+    plan = _approved_plan(tool_context)
+    if not isinstance(plan, dict):
+        return False
+    required = {
+        str(cap.get("name", "")).strip()
+        for cap in plan.get("required_capabilities", [])
+        if isinstance(cap, dict)
+    }
+    return "current_tab.navigate" in required
 
 
 def _approved_plan(tool_context: ToolContext | None) -> dict[str, Any] | None:
@@ -213,6 +249,139 @@ def _plan_allows_capability(
     }
     implied_by = _IMPLICIT_PLAN_CAPABILITIES.get(capability_name, set())
     return capability_name in required or bool(required & implied_by)
+
+
+def _current_browser_new_tab_count(tool_context: ToolContext | None) -> int:
+    if tool_context is None:
+        return 0
+    raw = tool_context.state.get(StateKeys.TEMP_CURRENT_BROWSER_NEW_TAB_COUNT, 0)
+    try:
+        return int(raw or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _current_browser_new_tab_limit(tool_context: ToolContext | None) -> int:
+    plan = _approved_plan(tool_context)
+    if not isinstance(plan, dict):
+        return _CURRENT_BROWSER_NEW_TAB_COUNT_LIMIT
+    steps = plan.get("steps", [])
+    if not isinstance(steps, list):
+        return _CURRENT_BROWSER_NEW_TAB_COUNT_LIMIT
+
+    explicit_new_tab_steps = 0
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        chunks: list[str] = []
+        for key in ("title", "description"):
+            value = step.get(key)
+            if isinstance(value, str):
+                chunks.append(value.lower())
+        haystack = " ".join(chunks)
+        if any(marker in haystack for marker in _CURRENT_BROWSER_NEW_TAB_STEP_MARKERS):
+            explicit_new_tab_steps += 1
+
+    if explicit_new_tab_steps <= 0:
+        return _CURRENT_BROWSER_NEW_TAB_COUNT_LIMIT
+    return max(
+        _CURRENT_BROWSER_NEW_TAB_COUNT_LIMIT,
+        min(explicit_new_tab_steps, _CURRENT_BROWSER_NEW_TAB_COUNT_LIMIT_MAX),
+    )
+
+
+def _current_browser_opened_tab_ids(tool_context: ToolContext | None) -> set[int]:
+    if tool_context is None:
+        return set()
+    raw = tool_context.state.get(StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS, [])
+    if not isinstance(raw, list):
+        return set()
+    tab_ids: set[int] = set()
+    for item in raw:
+        try:
+            tab_ids.add(int(item))
+        except (TypeError, ValueError):
+            continue
+    return tab_ids
+
+
+def _current_browser_opened_tab_order(tool_context: ToolContext | None) -> list[int]:
+    if tool_context is None:
+        return []
+    raw = tool_context.state.get(StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS, [])
+    if not isinstance(raw, list):
+        return []
+    ordered: list[int] = []
+    seen: set[int] = set()
+    for item in raw:
+        try:
+            normalized = int(item)
+        except (TypeError, ValueError):
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return ordered
+
+
+def _current_browser_preferred_tab_id(tool_context: ToolContext | None) -> int | None:
+    ordered = _current_browser_opened_tab_order(tool_context)
+    if not ordered:
+        return None
+    return ordered[-1]
+
+
+def _remember_current_browser_opened_tab(
+    tool_context: ToolContext | None,
+    tab_id: Any,
+) -> None:
+    if tool_context is None:
+        return
+    try:
+        normalized = int(tab_id)
+    except (TypeError, ValueError):
+        return
+    current = [item for item in _current_browser_opened_tab_order(tool_context) if item != normalized]
+    current.append(normalized)
+    tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS] = current
+    tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID] = normalized
+
+
+async def _wait_for_current_browser_tab_verification(
+    tool_context: ToolContext | None,
+    previous_tab_id: Any | None = None,
+) -> dict[str, Any]:
+    from src.tools.current_tab import current_tab_info
+
+    try:
+        expected_previous_tab_id = int(previous_tab_id)
+    except (TypeError, ValueError):
+        expected_previous_tab_id = None
+
+    last_info: dict[str, Any] = {}
+    for attempt in range(_CURRENT_BROWSER_NEW_TAB_VERIFY_ATTEMPTS):
+        info = await current_tab_info(tool_context=tool_context)
+        if isinstance(info, dict):
+            last_info = info
+            if info.get("success"):
+                try:
+                    current_tab_id = int(info.get("tab_id"))
+                except (TypeError, ValueError):
+                    current_tab_id = None
+                if (
+                    expected_previous_tab_id is None
+                    or current_tab_id is None
+                    or current_tab_id != expected_previous_tab_id
+                ):
+                    return info
+            else:
+                error_text = str(info.get("error") or "").lower()
+                if "disconnected" not in error_text:
+                    return info
+        if attempt + 1 < _CURRENT_BROWSER_NEW_TAB_VERIFY_ATTEMPTS:
+            await asyncio.sleep(_CURRENT_BROWSER_NEW_TAB_VERIFY_DELAY_SECONDS)
+    return last_info
 
 
 def _is_desktop_playback_task(tool_context: ToolContext | None) -> bool:
@@ -301,6 +470,119 @@ def _is_current_browser_search_task(tool_context: ToolContext | None) -> bool:
     return any(keyword in goal for keyword in _CURRENT_BROWSER_SEARCH_KEYWORDS)
 
 
+def _is_current_browser_spreadsheet_task(tool_context: ToolContext | None) -> bool:
+    goal = _current_browser_goal_text(tool_context).lower()
+    return any(keyword in goal for keyword in SPREADSHEET_KEYWORDS)
+
+
+def _remember_current_browser_spreadsheet_target(
+    tool_context: ToolContext | None,
+    target: Any,
+) -> None:
+    if tool_context is None or not _is_current_browser_spreadsheet_task(tool_context):
+        return
+    if not isinstance(target, dict):
+        return
+    normalized: dict[str, Any] = {}
+    for key in ("app_name", "window_id", "role", "title", "identifier"):
+        value = str(target.get(key) or "").strip()
+        if value:
+            normalized[key] = value
+    if normalized:
+        tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET] = normalized
+
+
+def _current_browser_spreadsheet_target(
+    tool_context: ToolContext | None,
+) -> dict[str, Any] | None:
+    if tool_context is None:
+        return None
+    raw = tool_context.state.get(StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET)
+    if not isinstance(raw, dict):
+        return None
+    normalized: dict[str, Any] = {}
+    for key in ("app_name", "window_id", "role", "title", "identifier"):
+        value = str(raw.get(key) or "").strip()
+        if value:
+            normalized[key] = value
+    return normalized or None
+
+
+def _is_safe_current_browser_destination(
+    *,
+    tool_context: ToolContext | None,
+    url: str,
+    title: str,
+) -> bool:
+    lowered_url = url.lower()
+    lowered_title = title.lower()
+    if _is_current_browser_spreadsheet_task(tool_context):
+        parsed = urlsplit(url)
+        host = parsed.netloc.lower()
+        path = parsed.path.lower()
+        if host == "sheets.new":
+            return True
+        if host != "docs.google.com":
+            return False
+        if path.startswith("/spreadsheets/create"):
+            return True
+        return path.startswith("/spreadsheets/d/") or (
+            path.startswith("/spreadsheets/u/") and "/d/" in path
+        )
+    if _is_current_browser_search_task(tool_context):
+        return (
+            any(marker in lowered_url for marker in _CURRENT_BROWSER_SAFE_SEARCH_HOST_MARKERS)
+            or lowered_url.rstrip("/") in {"https://www.google.com", "https://google.com", "https://www.google.co.jp", "https://google.co.jp"}
+            or "google" in lowered_title
+        )
+    return True
+
+
+async def _assert_safe_current_browser_target(
+    tool_context: ToolContext | None,
+) -> None:
+    if tool_context is None or not _is_current_browser_task(tool_context):
+        return
+    if not (
+        _is_current_browser_search_task(tool_context)
+        or _is_current_browser_spreadsheet_task(tool_context)
+    ):
+        return
+
+    from src.tools.current_tab import current_tab_info
+
+    await _activate_current_browser_task_tab(tool_context)
+
+    info = await current_tab_info(tool_context=tool_context)
+    if not isinstance(info, dict) or not info.get("success"):
+        raise PermissionError(
+            "Current-browser text/click actions require current_tab.info to verify the "
+            "destination tab before interacting with page forms."
+        )
+    tab_id = info.get("tab_id")
+    opened_tab_ids = _current_browser_opened_tab_ids(tool_context)
+    try:
+        normalized_tab_id = int(tab_id)
+    except (TypeError, ValueError):
+        normalized_tab_id = None
+    if normalized_tab_id is None or normalized_tab_id not in opened_tab_ids:
+        raise PermissionError(
+            "Blocked current-browser interaction because the active tab was not "
+            "opened by this task."
+        )
+    url = str(info.get("url") or "").strip()
+    title = str(info.get("title") or "").strip()
+    if not _is_safe_current_browser_destination(
+        tool_context=tool_context,
+        url=url,
+        title=title,
+    ):
+        raise PermissionError(
+            "Blocked current-browser interaction because the active tab does not match "
+            f"the expected search/spreadsheet destination. url={url or '-'} title={title or '-'}"
+        )
+
+
 def _looks_like_url(text: str) -> bool:
     lowered = text.lower()
     return lowered.startswith(("http://", "https://")) or "://" in lowered
@@ -343,6 +625,89 @@ async def _focus_control_ui_browser_window(
         if result.get("success") or result.get("ok"):
             return result
     return None
+
+
+def _is_current_browser_control_ui_tab(url: str, title: str) -> bool:
+    lowered_url = url.lower()
+    lowered_title = title.lower()
+    return any(marker in lowered_url for marker in _CURRENT_BROWSER_CONTROL_UI_URL_MARKERS) or any(
+        hint.lower() in lowered_title for hint in _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS
+    )
+
+
+async def _activate_current_browser_task_tab(
+    tool_context: ToolContext | None,
+) -> dict[str, Any] | None:
+    if tool_context is None or not _is_current_browser_task(tool_context):
+        return None
+    target_tab_id = _current_browser_preferred_tab_id(tool_context)
+    if target_tab_id is None:
+        return None
+
+    from src.tools.current_tab import current_tab_activate, current_tab_info
+
+    current_info = await current_tab_info(tool_context=tool_context)
+    if isinstance(current_info, dict) and current_info.get("success"):
+        try:
+            current_tab_id = int(current_info.get("tab_id"))
+        except (TypeError, ValueError):
+            current_tab_id = None
+        if current_tab_id == target_tab_id:
+            tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID] = target_tab_id
+            return current_info
+        current_url = str(current_info.get("url") or "").strip()
+        current_title = str(current_info.get("title") or "").strip()
+        if current_tab_id in _current_browser_opened_tab_ids(tool_context):
+            tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID] = current_tab_id
+            return current_info
+        if not _is_current_browser_control_ui_tab(current_url, current_title):
+            return current_info
+
+    activated = await current_tab_activate(target_tab_id, tool_context=tool_context)
+    if isinstance(activated, dict) and activated.get("success"):
+        tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID] = target_tab_id
+        return activated
+    return activated if isinstance(activated, dict) else None
+
+
+async def _should_open_current_browser_task_tab(
+    tool_context: ToolContext | None,
+) -> bool:
+    if tool_context is None:
+        return False
+    if not _plan_allows_capability(tool_context, _CURRENT_TAB_CAPABILITY):
+        return False
+
+    from src.tools.current_tab import current_tab_info
+
+    current_info = await current_tab_info(tool_context=tool_context)
+    if not isinstance(current_info, dict) or not current_info.get("success"):
+        return False
+
+    try:
+        current_tab_id = int(current_info.get("tab_id"))
+    except (TypeError, ValueError):
+        current_tab_id = None
+
+    if current_tab_id is not None and current_tab_id in _current_browser_opened_tab_ids(
+        tool_context
+    ):
+        return False
+
+    current_url = str(current_info.get("url") or "").strip()
+    current_title = str(current_info.get("title") or "").strip()
+    if not _is_current_browser_control_ui_tab(current_url, current_title):
+        return False
+
+    new_tab_count = _current_browser_new_tab_count(tool_context)
+    new_tab_limit = _current_browser_new_tab_limit(tool_context)
+    if new_tab_count >= new_tab_limit:
+        quantity = "one" if new_tab_limit == 1 else str(new_tab_limit)
+        noun = "tab is" if new_tab_limit == 1 else "tabs are"
+        raise PermissionError(
+            f"Only {quantity} preserved-browser {noun} allowed for this task."
+        )
+    return True
 
 
 # ── Guarded tool implementations ──────────────────────────────────────────
@@ -429,6 +794,11 @@ async def guarded_browser_navigate(
     tool_context: ToolContext,
 ) -> dict:
     """browser.navigate capability が承認済みの場合のみブラウザを操作する。"""
+    if _is_current_browser_task(tool_context) and _plan_allows_capability(
+        tool_context, _CURRENT_TAB_CAPABILITY
+    ):
+        return await guarded_current_tab_navigate(url, tool_context=tool_context)
+
     _check_approval(tool_context, "browser.navigate")
     _check_capability_in_plan(tool_context, "browser.navigate")
 
@@ -444,7 +814,7 @@ async def guarded_current_tab_info(
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_info
-    return await current_tab_info()
+    return await current_tab_info(tool_context=tool_context)
 
 
 async def guarded_current_tab_navigate(
@@ -452,12 +822,27 @@ async def guarded_current_tab_navigate(
     timeout_ms: int = 15000,
     tool_context: ToolContext | None = None,
 ) -> dict:
+    open_new_tab = False
     if tool_context is not None:
         _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
+        await _activate_current_browser_task_tab(tool_context)
+        open_new_tab = await _should_open_current_browser_task_tab(tool_context)
 
     from src.tools.current_tab import current_tab_navigate
-    return await current_tab_navigate(url, timeout_ms=timeout_ms)
+    result = await current_tab_navigate(
+        url,
+        timeout_ms=timeout_ms,
+        new_tab=open_new_tab,
+        tool_context=tool_context,
+    )
+    if tool_context is not None and isinstance(result, dict) and result.get("success"):
+        if open_new_tab:
+            tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_NEW_TAB_COUNT] = (
+                _current_browser_new_tab_count(tool_context) + 1
+            )
+        _remember_current_browser_opened_tab(tool_context, result.get("tab_id"))
+    return result
 
 
 async def guarded_current_tab_extract_text(
@@ -467,9 +852,10 @@ async def guarded_current_tab_extract_text(
     if tool_context is not None:
         _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
+        await _activate_current_browser_task_tab(tool_context)
 
     from src.tools.current_tab import current_tab_extract_text
-    return await current_tab_extract_text(selector=selector)
+    return await current_tab_extract_text(selector=selector, tool_context=tool_context)
 
 
 async def guarded_current_tab_click(
@@ -477,6 +863,8 @@ async def guarded_current_tab_click(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            await _assert_safe_current_browser_target(tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -486,7 +874,7 @@ async def guarded_current_tab_click(
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_click
-    return await current_tab_click(selector)
+    return await current_tab_click(selector, tool_context=tool_context)
 
 
 async def guarded_current_tab_fill(
@@ -495,6 +883,8 @@ async def guarded_current_tab_fill(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            await _assert_safe_current_browser_target(tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -504,7 +894,7 @@ async def guarded_current_tab_fill(
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
 
     from src.tools.current_tab import current_tab_fill
-    return await current_tab_fill(selector, text)
+    return await current_tab_fill(selector, text, tool_context=tool_context)
 
 
 async def guarded_browser_extract_text(
@@ -641,7 +1031,7 @@ async def guarded_desktop_ax_find(
         _check_capability_in_plan(tool_context, "desktop.ax.find")
 
     from src.tools.desktop import desktop_ax_find
-    return await desktop_ax_find(
+    result = await desktop_ax_find(
         app_name=app_name,
         window_id=window_id,
         role=role,
@@ -650,6 +1040,9 @@ async def guarded_desktop_ax_find(
         value_contains=value_contains,
         index=index,
     )
+    if isinstance(result, dict) and result.get("matched"):
+        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+    return result
 
 
 async def guarded_desktop_wait_element(
@@ -669,7 +1062,7 @@ async def guarded_desktop_wait_element(
         _check_capability_in_plan(tool_context, "desktop.wait.element")
 
     from src.tools.desktop import desktop_wait_element
-    return await desktop_wait_element(
+    result = await desktop_wait_element(
         app_name=app_name,
         window_id=window_id,
         role=role,
@@ -680,6 +1073,9 @@ async def guarded_desktop_wait_element(
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
+    if isinstance(result, dict) and result.get("matched"):
+        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+    return result
 
 
 async def guarded_desktop_ax_snapshot(
@@ -715,6 +1111,8 @@ async def guarded_desktop_control_click(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_task(tool_context):
+            await _assert_safe_current_browser_target(tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -724,7 +1122,7 @@ async def guarded_desktop_control_click(
         _check_capability_in_plan(tool_context, "desktop.control.click")
 
     from src.tools.desktop import desktop_control_click
-    return await desktop_control_click(
+    result = await desktop_control_click(
         x=x,
         y=y,
         button=button,
@@ -737,6 +1135,9 @@ async def guarded_desktop_control_click(
         value_contains=value_contains,
         index=index,
     )
+    if isinstance(result, dict) and result.get("success"):
+        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+    return result
 
 
 async def guarded_desktop_control_type(
@@ -751,11 +1152,21 @@ async def guarded_desktop_control_type(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        if _is_current_browser_spreadsheet_task(tool_context):
+            remembered_target = _current_browser_spreadsheet_target(tool_context)
+            if remembered_target and not any((app_name, window_id, role, title, identifier, value_contains)):
+                app_name = remembered_target.get("app_name") or app_name
+                window_id = remembered_target.get("window_id") or window_id
+                role = remembered_target.get("role") or role
+                title = remembered_target.get("title") or title
+                identifier = remembered_target.get("identifier") or identifier
         if (
             _is_current_browser_task(tool_context)
             and not any((app_name, window_id, role, title, identifier, value_contains))
         ):
             text = _rewrite_current_browser_address_bar_text(text, tool_context)
+        elif _is_current_browser_task(tool_context):
+            await _assert_safe_current_browser_target(tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -765,7 +1176,7 @@ async def guarded_desktop_control_type(
         _check_capability_in_plan(tool_context, "desktop.control.type")
 
     from src.tools.desktop import desktop_control_type
-    return await desktop_control_type(
+    result = await desktop_control_type(
         text=text,
         app_name=app_name,
         window_id=window_id,
@@ -775,6 +1186,9 @@ async def guarded_desktop_control_type(
         value_contains=value_contains,
         index=index,
     )
+    if isinstance(result, dict) and result.get("success"):
+        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+    return result
 
 
 async def guarded_desktop_control_launch_app(
@@ -887,6 +1301,9 @@ async def guarded_desktop_control_hotkey(
     tool_context: ToolContext | None = None,
 ) -> dict:
     effective_keys = keys
+    verify_new_tab_after_hotkey = False
+    previous_tab_id: int | None = None
+    new_tab_count = 0
     if tool_context is not None:
         if _is_current_browser_task(tool_context):
             effective_keys = _rewrite_current_browser_hotkeys(keys)
@@ -903,6 +1320,19 @@ async def guarded_desktop_control_hotkey(
                     "Only focus-address-bar or submit hotkeys are allowed for "
                     f"current-browser tasks. attempted={normalized_keys}"
                 )
+            if normalized_keys in _CURRENT_BROWSER_NEW_TAB_HOTKEYS:
+                new_tab_count = _current_browser_new_tab_count(tool_context)
+                new_tab_limit = _current_browser_new_tab_limit(tool_context)
+                if new_tab_count >= new_tab_limit:
+                    quantity = "one" if new_tab_limit == 1 else str(new_tab_limit)
+                    noun = "hotkey is" if new_tab_limit == 1 else "hotkeys are"
+                    raise PermissionError(
+                        f"Only {quantity} new-tab {noun} allowed for a current-browser "
+                        "task. Reuse the existing browser tab/window state for "
+                        "retries instead of opening more tabs than the approved "
+                        "plan requires."
+                    )
+                verify_new_tab_after_hotkey = True
             if (
                 normalized_keys in _CURRENT_BROWSER_ALLOWED_HOTKEYS
                 or normalized_keys in _CURRENT_BROWSER_NEW_TAB_HOTKEYS
@@ -918,8 +1348,47 @@ async def guarded_desktop_control_hotkey(
             )
         _check_capability_in_plan(tool_context, "desktop.control.hotkey")
 
+        if verify_new_tab_after_hotkey:
+            from src.tools.current_tab import current_tab_info
+
+            previous_info = await current_tab_info(tool_context=tool_context)
+            if isinstance(previous_info, dict) and previous_info.get("success"):
+                try:
+                    previous_tab_id = int(previous_info.get("tab_id"))
+                except (TypeError, ValueError):
+                    previous_tab_id = None
+
     from src.tools.desktop import desktop_control_hotkey
-    return await desktop_control_hotkey(keys=effective_keys)
+    result = await desktop_control_hotkey(keys=effective_keys)
+
+    if verify_new_tab_after_hotkey and isinstance(result, dict) and (
+        result.get("success") or result.get("ok")
+    ):
+        info = await _wait_for_current_browser_tab_verification(
+            tool_context,
+            previous_tab_id=previous_tab_id,
+        )
+        if not isinstance(info, dict) or not info.get("success"):
+            raise PermissionError(
+                "Failed to verify the newly opened browser tab. Refusing to "
+                "continue interacting with an unverified tab."
+            )
+        try:
+            verified_tab_id = int(info.get("tab_id"))
+        except (TypeError, ValueError):
+            verified_tab_id = None
+        if previous_tab_id is not None and verified_tab_id == previous_tab_id:
+            raise PermissionError(
+                "Failed to confirm that the newly opened browser tab became active. "
+                "Refusing to continue interacting with an unverified tab."
+            )
+        if tool_context is not None:
+            tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_NEW_TAB_COUNT] = (
+                new_tab_count + 1
+            )
+        _remember_current_browser_opened_tab(tool_context, info.get("tab_id"))
+
+    return result
 
 
 async def guarded_desktop_control_scroll(
