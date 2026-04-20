@@ -1,4 +1,7 @@
-from src.browser.current_tab_bridge import _origin_is_allowed
+from src.browser.current_tab_bridge import (
+    _normalize_current_tab_bridge_host,
+    _origin_is_allowed,
+)
 from src.security.network import enforce_loopback_bind, is_loopback_host
 
 
@@ -34,3 +37,8 @@ def test_current_tab_origin_only_allows_chrome_extensions():
     assert _origin_is_allowed("chrome-extension://abcdefghijklmnop") is True
     assert _origin_is_allowed("http://localhost:18789") is False
     assert _origin_is_allowed("https://example.com") is False
+
+
+def test_normalize_current_tab_bridge_host_maps_host_docker_internal_to_loopback():
+    assert _normalize_current_tab_bridge_host("host.docker.internal") == "127.0.0.1"
+    assert _normalize_current_tab_bridge_host("127.0.0.1") == "127.0.0.1"

@@ -46,6 +46,8 @@ class TestHostBridgeTools:
             "host.control_ui_chat.send_message",
             "host.current_tab.info",
             "host.current_tab.navigate",
+            "host.current_tab.list_tabs",
+            "host.current_tab.activate",
             "host.current_tab.click",
             "host.current_tab.fill",
             "host.current_tab.extract_text",
@@ -75,6 +77,7 @@ class TestHostBridgeTools:
         assert "host.control_ui_chat.send_message" in text
         assert "host.current_tab.info" in text
         assert "host.current_tab.navigate" in text
+        assert "host.current_tab.activate" in text
         assert "host.current_tab.click" in text
         assert "host.current_tab.fill" in text
         assert "host.current_tab.extract_text" in text
@@ -95,6 +98,15 @@ class TestHostBridgeTools:
         mcp = create_server(host="0.0.0.0")
         assert mcp.settings.host == "0.0.0.0"
         assert mcp.settings.transport_security.enable_dns_rebinding_protection is False
+
+    def test_create_server_allows_host_docker_internal_for_loopback_sse(self):
+        from src.mcp_servers.host_bridge_server import create_server
+
+        mcp = create_server(host="127.0.0.1")
+        security = mcp.settings.transport_security
+        assert security.enable_dns_rebinding_protection is True
+        assert "host.docker.internal:*" in security.allowed_hosts
+        assert "http://host.docker.internal:*" in security.allowed_origins
 
     @pytest.mark.asyncio
     async def test_create_server_starts_current_tab_relay_on_sse_startup(self, monkeypatch):
@@ -604,6 +616,8 @@ async def test_stdio_tools_list():
         "host.control_ui_chat.send_message",
         "host.current_tab.info",
         "host.current_tab.navigate",
+        "host.current_tab.list_tabs",
+        "host.current_tab.activate",
         "host.current_tab.click",
         "host.current_tab.fill",
         "host.current_tab.extract_text",

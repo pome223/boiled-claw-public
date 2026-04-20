@@ -16,12 +16,16 @@ from urllib.parse import quote_plus, urlsplit
 
 from google.adk.tools import ToolContext
 
+from src.config.settings import get_settings
 from src.gateway.routing import targets_user_browser
 from src.runtime.state_keys import StateKeys
 from src.runtime.task_keywords import (
     SPREADSHEET_KEYWORDS,
     prefers_isolated_browser_for_goal,
 )
+from src.security.audit import AuditEventType, get_audit_logger
+from src.security.network import is_loopback_host
+from src.tools.context import resolve_tool_context
 
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
 _IMPLICIT_PLAN_CAPABILITIES = {
@@ -100,10 +104,6 @@ _CURRENT_BROWSER_NEW_TAB_STEP_MARKERS = (
 _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS = (
     "boiled-claw Control UI",
     "boiled-claw",
-)
-_CURRENT_BROWSER_CONTROL_UI_URL_MARKERS = (
-    "localhost:18789/chat",
-    "127.0.0.1:18789/chat",
 )
 _ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS = 120
 _CURRENT_BROWSER_SEARCH_KEYWORDS = {
@@ -611,6 +611,59 @@ def _rewrite_current_browser_address_bar_text(
     return f"https://www.google.com/search?q={quote_plus(stripped)}"
 
 
+def _matches_gateway_control_ui_url(url: str) -> bool:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").strip()
+    path = parsed.path.rstrip("/") or "/"
+    if not host or path != "/chat":
+        return False
+
+    settings = get_settings()
+    expected_host = (settings.gateway_host or "").strip().lower()
+    expected_port = int(settings.gateway_port)
+    actual_host = host.lower()
+    actual_port = parsed.port
+    if actual_port is None:
+        actual_port = 443 if parsed.scheme == "https" else 80
+
+    if actual_host == expected_host and actual_port == expected_port:
+        return True
+    if is_loopback_host(host) and is_loopback_host(settings.gateway_host):
+        return actual_port == expected_port
+    return False
+
+
+def _is_loopback_control_ui_chat_url(url: str) -> bool:
+    parsed = urlsplit(url)
+    host = (parsed.hostname or "").strip()
+    path = parsed.path.rstrip("/") or "/"
+    return bool(host) and path == "/chat" and is_loopback_host(host)
+
+
+def _audit_current_browser_navigation_redirect(
+    *,
+    tool_context: ToolContext | None,
+    url: str,
+    result: str,
+    metadata: dict[str, Any] | None = None,
+) -> None:
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    get_audit_logger().log(
+        event_type=AuditEventType.BROWSER_NAVIGATE,
+        user_id=ctx.get("user_id") or None,
+        session_id=ctx.get("session_id") or None,
+        action="redirect_to_current_tab",
+        resource=url,
+        result=result,
+        metadata={
+            "requested_tool": "browser.navigate",
+            "effective_tool": "current_tab.navigate",
+            "reason": "current_browser_task",
+            **(metadata or {}),
+        },
+    )
+
+
 async def _focus_control_ui_browser_window(
     *,
     app_name: str,
@@ -628,10 +681,12 @@ async def _focus_control_ui_browser_window(
 
 
 def _is_current_browser_control_ui_tab(url: str, title: str) -> bool:
-    lowered_url = url.lower()
     lowered_title = title.lower()
-    return any(marker in lowered_url for marker in _CURRENT_BROWSER_CONTROL_UI_URL_MARKERS) or any(
-        hint.lower() in lowered_title for hint in _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS
+    if _matches_gateway_control_ui_url(url) or _is_loopback_control_ui_chat_url(url):
+        return True
+    return any(
+        hint.lower() in lowered_title
+        for hint in _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS
     )
 
 
@@ -797,7 +852,28 @@ async def guarded_browser_navigate(
     if _is_current_browser_task(tool_context) and _plan_allows_capability(
         tool_context, _CURRENT_TAB_CAPABILITY
     ):
-        return await guarded_current_tab_navigate(url, tool_context=tool_context)
+        try:
+            result = await guarded_current_tab_navigate(url, tool_context=tool_context)
+        except PermissionError as exc:
+            _audit_current_browser_navigation_redirect(
+                tool_context=tool_context,
+                url=url,
+                result="blocked",
+                metadata={"error": str(exc)},
+            )
+            raise
+        _audit_current_browser_navigation_redirect(
+            tool_context=tool_context,
+            url=url,
+            result="redirected" if result.get("success") else "failed",
+            metadata={
+                "current_tab_success": bool(result.get("success")),
+                "tab_id": result.get("tab_id"),
+                "window_id": result.get("window_id"),
+                **({"error": result.get("error")} if result.get("error") else {}),
+            },
+        )
+        return result
 
     _check_approval(tool_context, "browser.navigate")
     _check_capability_in_plan(tool_context, "browser.navigate")

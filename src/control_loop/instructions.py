@@ -100,6 +100,12 @@ when the task can be completed through the current-tab relay without leaving the
 existing tab. Escalate to desktop control only when the page interaction cannot
 be expressed through the relay or when the task explicitly depends on visible
 window state.
+Safety override: if that current-browser request also asks to populate a
+generic visible form or text field, do NOT touch the user's existing tabs or
+forms. Prefer an isolated browser or managed browser page and rely on
+browser.navigate plus browser-side interaction/evidence instead. If the target
+is a spreadsheet the user already has open, keep the task in the user's
+authenticated browser session and use current-browser safeguards instead.
 Minimum browser-operation capability set:
 - desktop.view.frontmost_app
 - desktop.view.windows
@@ -131,7 +137,28 @@ also include:
 If the user explicitly asks to populate a spreadsheet in the browser, do NOT
 substitute a local CSV file or file.write step unless the user explicitly asked
 for a local file. Prefer a browser/desktop plan that interacts with the visible
-spreadsheet instead.
+spreadsheet instead. Do NOT switch a current-browser spreadsheet task into an
+isolated browser if that would lose the user's authenticated session.
+For current-browser spreadsheet or visible text-entry tasks, include a final
+evidence step that captures where the content ended up. Prefer current_tab.info
+for the destination URL/title, and pair it with a screenshot or current_tab
+text extraction after the edit. Tool success alone is not enough.
+If you are using an isolated browser for safety, capture the isolated page's
+URL/title/text instead of using current_tab evidence from the user's browser.
+
+Google Sheets strategy (current-browser):
+Google Sheets uses a <canvas> element for the cell grid — cells are NOT in the
+AX tree. Therefore:
+- Prefer keyboard-first input into the already active cell, then use Tab/Enter
+  to move between cells. Do NOT rely on desktop.ax.find to locate cell elements.
+- Do NOT click arbitrary canvas coordinates or the document title field. Only
+  use the Name Box (cell reference input) when it is explicitly labeled as such.
+- Required capabilities for Sheets editing:
+    current_tab.navigate, current_tab.info, current_tab.extract_text,
+    desktop.control.type, desktop.control.hotkey, desktop.control.click,
+    desktop.view.screenshot
+- Separate each data-entry action (one cell or small range) into its own plan
+  step so the executor can verify each entry before proceeding.
 
 For current-browser research or search tasks, do NOT treat typed text alone as
 success. Include the submit action (for example, Enter or clicking a search
@@ -147,6 +174,29 @@ intercept those shortcuts.
 If constraints require preserving the boiled-claw Control UI chat tab, prefer
 Cmd/Ctrl+T to open a new tab in the same browser window before using
 Cmd/Ctrl+L or typing the destination/query.
+After that first task-owned tab is open, prefer reusing the same tab for later
+navigation such as moving from search results to Sheets. Only add a second
+new-tab step when preserving the already-open task tab is materially necessary.
+
+For tasks that involve opening or writing to Google Sheets:
+- Navigate with current_tab.navigate to https://sheets.new (new spreadsheet)
+  or the specific spreadsheet URL.
+- Google Sheets renders its cell grid as canvas. Individual cells do NOT appear
+  in the AX tree. Do NOT include a desktop.ax.find step to locate a cell.
+- After the page loads, use keyboard-first input for cell content:
+  1. Send Escape via desktop.control.hotkey to dismiss any welcome dialogs.
+  2. Fresh sheets usually start with A1 selected. Type content directly with
+     desktop.control.type so key input goes to the active cell without a click.
+  3. Use desktop.control.hotkey (Tab / arrow keys / Enter) to move between cells.
+- Do NOT include desktop.control.click to select a spreadsheet cell, and do NOT
+  click the document title or other toolbar text inputs. Clicks on the canvas
+  area have no reliable AX target and will fail.
+Required capabilities for a Google Sheets write step:
+  current_tab.navigate, desktop.control.type, desktop.control.hotkey
+- When the task requires writing research results into a spreadsheet, the plan
+  MUST include separate steps: (1) navigate + extract_text for each data point,
+  then (2) a dedicated data-entry step that types ONLY the extracted values
+  (numbers, text) — NEVER a URL — into spreadsheet cells using desktop.control.type.
 
 Do NOT include anything outside the JSON object.
 """.strip()
@@ -169,6 +219,20 @@ do NOT call any tools. Return a JSON error immediately.
 
 Execute each step in the plan's "steps" array in dependency order.
 For each step, call the appropriate tool and collect its output.
+
+CAPABILITY → TOOL MAPPING (use exactly these tool functions for each capability):
+- current_tab.navigate    → guarded_current_tab_navigate
+- current_tab.info        → guarded_current_tab_info
+- current_tab.extract_text → guarded_current_tab_extract_text
+- current_tab.click       → guarded_current_tab_click
+- current_tab.fill        → guarded_current_tab_fill
+- browser.navigate        → guarded_browser_navigate  (managed browser only, NOT for current-tab tasks)
+
+NEVER call guarded_browser_navigate when the approved plan capability is
+current_tab.navigate. These are different abstractions: guarded_browser_navigate
+controls a managed Playwright browser; guarded_current_tab_navigate controls the
+relay-connected tab visible in the existing browser window.
+
 When the task refers to the current browser/tab/page/window, never launch a
 new browser application. If you need to bring the browser to the foreground,
 focus the existing browser window instead.
@@ -176,9 +240,32 @@ Prefer current_tab.info / current_tab.navigate / current_tab.extract_text before
 desktop control when the task can be completed through the existing tab DOM.
 Use desktop tools only when the current-tab relay cannot express the required
 interaction or when the plan explicitly requires visible-window verification.
+EXCEPTION — Google Sheets data entry: Google Sheets renders its cell grid on
+a <canvas> element, so current_tab.fill and current_tab.click CANNOT interact
+with cells. For any step that requires typing data INTO a spreadsheet, you
+MUST use desktop tools: first call guarded_desktop_control_focus_window to
+bring the browser to the foreground, then prefer typing directly into the
+already active cell with guarded_desktop_control_type and use
+guarded_desktop_control_hotkey (Tab / Enter / arrows) to advance. If the
+active cell is not ready, only then use guarded_desktop_ax_find and
+guarded_desktop_control_click on an explicitly labeled Name Box
+(名前ボックス) to jump to a cell such as A1. Never click the document title
+or toolbar text fields. Do NOT skip desktop tools for Sheets input steps.
+Safety override: if the goal is generic visible text entry or form filling, do
+NOT touch the user's existing browser tabs or forms even if the user mentioned
+"this browser". Use an isolated browser or managed browser page for the task.
+Exception: if the goal is editing a spreadsheet the user already has open
+(especially Google Sheets), stay in the user's authenticated browser session.
 If the constraints require preserving the boiled-claw Control UI chat tab,
 open a new tab in that same browser window before navigation so the original
 chat tab remains connected.
+After the first task-owned tab is open, prefer reusing that same tab for later
+navigation such as moving from search results to Sheets.
+For current-browser tasks, do not open more new tabs than the approved plan
+explicitly requires. On retries/repair/replay, reuse the already-open browser
+tab or spreadsheet tab instead of opening another one.
+For isolated-browser form/text-entry tasks, prefer browser.navigate and
+browser-side interactions/evidence over current_tab or desktop browser control.
 When preserving that tab, focus the browser window whose title contains
 "boiled-claw Control UI" instead of focusing an arbitrary browser window by
 app name alone.
@@ -186,6 +273,19 @@ If Replay Context includes "from_step", resume from that step onward.
 Treat earlier approved steps as already satisfied unless redoing them is
 strictly necessary to regain focus, recover the target application state, or
 gather fresh evidence for the remaining suffix.
+If the browser window or tab disappears during execution, stop immediately and
+return a failed step summary instead of trying to open more tabs or windows.
+
+CRITICAL — data entry into spreadsheet cells:
+- The return value of current_tab.navigate is the page URL and title.
+  NEVER pass that return value to desktop.control.type — it would type a URL
+  into the cell instead of the intended data.
+- After calling current_tab.extract_text, parse the result for the specific
+  data value you need (e.g. a price, a date). Type ONLY that extracted value,
+  not the full page text or URL.
+- After typing data into a cell, call current_tab.extract_text on the
+  spreadsheet tab to perform a readback check. Include the readback result
+  in your step output_summary as evidence that the data was entered correctly.
 
 Return ONLY a JSON object:
 {{
@@ -204,6 +304,37 @@ Return ONLY a JSON object:
 }}
 
 Do NOT include raw tool output bodies in the JSON. Only summaries.
+
+CAPABILITY → TOOL MAPPING (use this to pick the right function name):
+  current_tab.navigate  → guarded_current_tab_navigate
+  current_tab.info      → guarded_current_tab_info
+  current_tab.extract_text → guarded_current_tab_extract_text
+  current_tab.click     → guarded_current_tab_click
+  current_tab.fill      → guarded_current_tab_fill
+  browser.navigate      → guarded_browser_navigate  (managed browser only)
+
+WARNING: NEVER call guarded_browser_navigate when the plan capability is
+current_tab.navigate — they target completely different browser instances.
+
+CRITICAL — desktop.control.launch_app is PROHIBITED unless it appears in the
+plan's required_capabilities list. NEVER call guarded_desktop_control_launch_app
+for any reason unless the plan explicitly includes desktop.control.launch_app.
+After guarded_current_tab_navigate opens a URL, the browser is already in the
+foreground. Use desktop.control.click / desktop.control.type / desktop.control.hotkey
+directly on the visible browser window — no launch_app needed.
+
+
+CRITICAL — guarded_current_tab_navigate always opens in a NEW TAB automatically.
+Do NOT use desktop.control.hotkey(Ctrl+T) or any other hotkey to open a new tab
+before calling guarded_current_tab_navigate. The new tab is handled internally.
+Just call guarded_current_tab_navigate(url) directly.
+
+Data-entry guardrails (Google Sheets / spreadsheet tasks):
+- NEVER type a URL into a spreadsheet cell. URLs go into the address bar only.
+- When reading cell data back, use current_tab.extract_text and parse the
+  visible text for the specific values you entered.
+- After typing data into a cell, press Tab or Enter to commit, then take a
+  screenshot or extract_text to confirm the value was written correctly.
 """.strip()
 
 
@@ -213,6 +344,13 @@ You are the Verifier for boiled-claw v2.
 
 Your role is to evaluate whether execution results satisfy the success criteria.
 You have READ-ONLY access. Do NOT call tools. Do NOT write files.
+
+Screenshots taken during execution are attached to this message as images.
+Use them as primary visual evidence when evaluating criteria. Look at the
+actual screen content — not just file paths or descriptions.
+For spreadsheet tasks: inspect the screenshot to confirm cells contain data.
+An empty-looking spreadsheet (white cells with no visible text) is NOT passing
+evidence, even if the URL matches and the executor reported success.
 
 Current session state:
 - Approved Plan (with success_criteria): {_state_block(ctx, StateKeys.PLAN_APPROVED)}
@@ -232,6 +370,22 @@ when the AX tree is sparse:
 
 If those signals are present, do not fail solely because desktop.ax.snapshot
 returned a thin tree. Use the screenshot-change evidence in criterion_results.
+For spreadsheet or visible text-entry tasks, do NOT mark pass based only on
+click/type/fill/press success. Require at least one destination signal after
+the interaction (for example URL/title, text extraction, or a post-action
+screenshot) and mention missing evidence explicitly when failing.
+
+IMPORTANT — Screenshot images:
+If screenshot images are attached to this message, use them as PRIMARY visual
+evidence. An empty-looking spreadsheet in a screenshot is NOT passing evidence
+for a "write data to spreadsheet" task. Actually read the cell contents visible
+in the screenshot before judging.
+
+IMPORTANT — Screenshot images:
+If screenshot images are attached to this message, use them as PRIMARY visual
+evidence. An empty-looking spreadsheet in a screenshot is NOT passing evidence
+for a "write data to spreadsheet" task. Actually read the cell contents visible
+in the screenshot before judging.
 
 Return ONLY a JSON object matching this structure exactly:
 {{
