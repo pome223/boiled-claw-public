@@ -374,11 +374,11 @@ Loading the Chrome extension:
 1. Open `chrome://extensions` in Chrome
 2. Enable `Developer mode`
 3. Click `Load unpacked` and select `chrome_extension/current_tab_adapter`
-4. Open the extension's `Options` page to configure the relay URL and token
+4. Open the extension's `Options` page to configure the relay URL, optional token, and optional Control UI origin
 
 This extension requires `<all_urls>` host permission because it uses `chrome.scripting` on the active tab. This is necessary to perform selector click / fill / text extraction on "whichever tab the user is currently viewing" regardless of the site. Communication itself is limited to the local relay only, restricted by loopback bind, origin check, and an optional token.
 
-When a current-browser task starts from the Control UI and needs to leave that page, the adapter preserves the Control UI tab, opens or reuses a task tab for the external destination, and can reactivate that task tab for later extraction or verification steps.
+Current-browser spreadsheet plans normalize navigation through `current_tab.navigate` instead of relying on a Desktop `Cmd/Ctrl+T` hotkey. When the active tab is the boiled-claw Control UI chat, the runtime preserves that chat tab by opening a separate task tab before navigating. Spreadsheet entry steps also now locate and click a real grid cell such as `A1` before typing so writes land in the sheet instead of the browser chrome or Sheets toolbar. If an executor reaches for `browser.navigate` during a current-browser task, the runtime redirects that call to `current_tab.navigate` and records the redirect in the audit log.
 
 The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 

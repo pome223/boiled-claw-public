@@ -1,5 +1,6 @@
 const DEFAULT_RELAY_URL = "ws://127.0.0.1:8768";
 const DEFAULT_RELAY_TOKEN = "";
+const DEFAULT_CONTROL_UI_ORIGIN = "";
 const RECONNECT_DELAY_MS = 2000;
 const KEEPALIVE_INTERVAL_MS = 20000;
 
@@ -8,17 +9,20 @@ let reconnectTimer = null;
 let keepaliveTimer = null;
 let relayConfig = {
   relayUrl: DEFAULT_RELAY_URL,
-  relayToken: DEFAULT_RELAY_TOKEN
+  relayToken: DEFAULT_RELAY_TOKEN,
+  controlUiOrigin: DEFAULT_CONTROL_UI_ORIGIN
 };
 
 async function loadRelayConfig() {
   const stored = await chrome.storage.local.get({
     relayUrl: DEFAULT_RELAY_URL,
-    relayToken: DEFAULT_RELAY_TOKEN
+    relayToken: DEFAULT_RELAY_TOKEN,
+    controlUiOrigin: DEFAULT_CONTROL_UI_ORIGIN
   });
   relayConfig = {
     relayUrl: String(stored.relayUrl || DEFAULT_RELAY_URL),
-    relayToken: String(stored.relayToken || DEFAULT_RELAY_TOKEN)
+    relayToken: String(stored.relayToken || DEFAULT_RELAY_TOKEN),
+    controlUiOrigin: String(stored.controlUiOrigin || DEFAULT_CONTROL_UI_ORIGIN).trim()
   };
   return relayConfig;
 }
@@ -64,15 +68,63 @@ async function getTargetTab(targetTabId) {
   return chrome.tabs.get(targetTabId);
 }
 
+function normalizeConfiguredOrigin(origin) {
+  const value = String(origin || "").trim();
+  if (!value) {
+    return "";
+  }
+  try {
+    const parsed = new URL(value);
+    return `${parsed.protocol}//${parsed.host}`;
+  } catch (_error) {
+    return value.replace(/\/+$/, "");
+  }
+}
+
+function isLoopbackHost(hostname) {
+  const lowered = String(hostname || "").toLowerCase();
+  return lowered === "localhost" || lowered === "127.0.0.1" || lowered === "::1" || lowered === "[::1]";
+}
+
+function isLoopbackChatUrl(url) {
+  try {
+    const parsed = new URL(String(url || ""));
+    return isLoopbackHost(parsed.hostname) && parsed.pathname.replace(/\/+$/, "") === "/chat";
+  } catch (_error) {
+    return false;
+  }
+}
+
+function matchesConfiguredControlUiOrigin(url, configuredOrigin) {
+  const normalizedOrigin = normalizeConfiguredOrigin(configuredOrigin);
+  if (!normalizedOrigin) {
+    return false;
+  }
+  try {
+    const parsed = new URL(String(url || ""));
+    const candidateOrigin = `${parsed.protocol}//${parsed.host}`;
+    return (
+      candidateOrigin === normalizedOrigin &&
+      parsed.pathname.replace(/\/+$/, "") === "/chat"
+    );
+  } catch (_error) {
+    return false;
+  }
+}
+
 function isControlUiTab(tab) {
   const url = String(tab?.url || "").toLowerCase();
   const title = String(tab?.title || "").toLowerCase();
-  return url.includes("localhost:18789/chat") || title.includes("boiled-claw control ui");
+  return (
+    matchesConfiguredControlUiOrigin(url, relayConfig.controlUiOrigin) ||
+    isLoopbackChatUrl(url) ||
+    title.includes("boiled-claw control ui")
+  );
 }
 
 function isExternalNavigationTarget(url) {
-  const lowered = String(url || "").toLowerCase();
-  return !!lowered && !lowered.includes("localhost:18789/chat");
+  const value = String(url || "");
+  return Boolean(value) && !isControlUiTab({ url: value, title: "" });
 }
 
 function waitForTabComplete(tabId, timeoutMs) {
@@ -352,7 +404,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") {
     return;
   }
-  if (!changes.relayUrl && !changes.relayToken) {
+  if (!changes.relayUrl && !changes.relayToken && !changes.controlUiOrigin) {
     return;
   }
   if (socket) {

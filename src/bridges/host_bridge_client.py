@@ -33,6 +33,10 @@ from src.bridges.host_bridge_schema import (
     HostFileWriteResult,
     HostCurrentTabClickRequest,
     HostCurrentTabClickResult,
+    HostCurrentTabActivateRequest,
+    HostCurrentTabActivateResult,
+    HostCurrentTabListTabsRequest,
+    HostCurrentTabListTabsResult,
     HostCurrentTabExtractTextRequest,
     HostCurrentTabExtractTextResult,
     HostCurrentTabFillRequest,
@@ -97,6 +101,16 @@ class HostBridgeClient:
                 result = await session.call_tool(name, arguments or {})
 
         if getattr(result, "isError", False):
+            # Surface the MCP tool's error text so diagnostics don't get swallowed.
+            # Without this the caller only ever sees "Host Bridge tool call failed: <name>",
+            # which hides the underlying reason (e.g. "No tab with id: N", validation errors).
+            detail = ""
+            try:
+                detail = _text_content_to_string(getattr(result, "content", []) or []).strip()
+            except Exception:  # noqa: BLE001 — diagnostics, never fail extraction
+                detail = ""
+            if detail:
+                raise HostBridgeError(f"Host Bridge tool call failed: {name}: {detail}")
             raise HostBridgeError(f"Host Bridge tool call failed: {name}")
         return _decode_tool_payload(result)
 
@@ -169,6 +183,20 @@ class HostBridgeClient:
     ) -> HostCurrentTabNavigateResult:
         payload = await self._call_tool("host.current_tab.navigate", request.model_dump())
         return HostCurrentTabNavigateResult.model_validate(payload)
+
+    async def current_tab_list_tabs(
+        self,
+        request: HostCurrentTabListTabsRequest,
+    ) -> HostCurrentTabListTabsResult:
+        payload = await self._call_tool("host.current_tab.list_tabs", request.model_dump())
+        return HostCurrentTabListTabsResult.model_validate(payload)
+
+    async def current_tab_activate(
+        self,
+        request: HostCurrentTabActivateRequest,
+    ) -> HostCurrentTabActivateResult:
+        payload = await self._call_tool("host.current_tab.activate", request.model_dump())
+        return HostCurrentTabActivateResult.model_validate(payload)
 
     async def current_tab_click(self, request: HostCurrentTabClickRequest) -> HostCurrentTabClickResult:
         payload = await self._call_tool("host.current_tab.click", request.model_dump())

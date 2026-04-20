@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Mapping
 from typing import Any, Optional
 
 from google.adk.agents.context import Context as ToolContext
@@ -11,12 +12,14 @@ from src.bridges.host_bridge_client import get_host_bridge_client
 from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import (
     HostCurrentTabClickRequest,
+    HostCurrentTabActivateRequest,
     HostCurrentTabExtractTextRequest,
     HostCurrentTabFillRequest,
     HostCurrentTabInfoRequest,
     HostCurrentTabNavigateRequest,
 )
 from src.config.settings import get_settings
+from src.runtime.state_keys import StateKeys
 from src.security.tool_policy import get_tool_policy_engine
 from src.tools.context import resolve_tool_context
 
@@ -42,8 +45,16 @@ async def _check_current_tab_policy(
 ) -> tuple[Optional[str], Optional[str]]:
     if tool_context is None:
         return None, None
-
     ctx = resolve_tool_context(tool_context)
+    state = getattr(tool_context, "state", None)
+    approval_status = str(_state_get(state, StateKeys.APPROVAL_STATUS, "")).strip()
+    approved_plan = _state_get(state, StateKeys.PLAN_APPROVED)
+    if approved_plan and (
+        approval_status in {"policy_approved", "human_approved", "auto_approved"}
+        or ctx.get("agent_name") == "executor"
+    ):
+        return None, None
+
     engine = get_tool_policy_engine()
     action, reason = engine.evaluate(ctx["agent_name"], tool_name)
     if action == "allow":
@@ -69,6 +80,40 @@ def _host_bridge_unavailable_error() -> str:
     if not settings.host_bridge_enabled:
         return "Current Tab browser control requires Host Bridge to reach the host browser."
     return "Host Bridge is enabled but the Current Tab extension relay is unavailable."
+
+
+def _tool_context_state_value(
+    tool_context: Optional[ToolContext],
+    key: str,
+) -> Any:
+    state = getattr(tool_context, "state", None)
+    return _state_get(state, key)
+
+
+def _state_get(
+    state: Any,
+    key: str,
+    default: Any = None,
+) -> Any:
+    if isinstance(state, Mapping):
+        return state.get(key, default)
+    getter = getattr(state, "get", None)
+    if callable(getter):
+        try:
+            return getter(key, default)
+        except TypeError:
+            try:
+                return getter(key)
+            except Exception:
+                return default
+    return default
+
+
+def _optional_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 async def current_tab_info(
@@ -119,6 +164,7 @@ async def current_tab_info(
 async def current_tab_navigate(
     url: str,
     timeout_ms: int = 15000,
+    new_tab: bool = False,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     approval_error, approval_token = await _check_current_tab_policy(
@@ -148,15 +194,73 @@ async def current_tab_navigate(
         approval_token=approval_token,
         url=url,
         timeout_ms=timeout_ms,
+        new_tab=new_tab,
+        target_tab_id=_optional_int(
+            _tool_context_state_value(
+                tool_context,
+                StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID,
+            )
+        ),
     )
     result, payload = await execute_host_bridge_call(
         request=request,
         tool_name="host.current_tab.navigate",
-        args={"url": request.url, "timeout_ms": request.timeout_ms},
+        args={
+            "url": request.url,
+            "timeout_ms": request.timeout_ms,
+            "new_tab": request.new_tab,
+        },
         get_client=get_host_bridge_client,
         invoke=lambda client, req: client.current_tab_navigate(req),
         ok_getter=lambda response: response.ok,
         error_payload=lambda error: _current_tab_error_payload(error, url=url),
+        metadata={"executor": "host_bridge"},
+    )
+    if result is None:
+        return payload
+    return {
+        "tab_id": result.tab_id,
+        "window_id": result.window_id,
+        "url": result.url,
+        "title": result.title,
+        "success": result.ok,
+        **({"error": result.error} if result.error else {}),
+    }
+
+
+async def current_tab_activate(
+    tab_id: int,
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    approval_error, approval_token = await _check_current_tab_policy(
+        "current_tab_activate",
+        {"tab_id": tab_id},
+        tool_context,
+    )
+    if approval_error:
+        return _current_tab_error_payload(approval_error)
+
+    settings = get_settings()
+    if not settings.host_bridge_enabled:
+        return _current_tab_error_payload(_host_bridge_unavailable_error())
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = HostCurrentTabActivateRequest(
+        request_id=f"host-current-tab-activate-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+        tab_id=tab_id,
+    )
+    result, payload = await execute_host_bridge_call(
+        request=request,
+        tool_name="host.current_tab.activate",
+        args={"tab_id": request.tab_id},
+        get_client=get_host_bridge_client,
+        invoke=lambda client, req: client.current_tab_activate(req),
+        ok_getter=lambda response: response.ok,
+        error_payload=lambda error: _current_tab_error_payload(error),
         metadata={"executor": "host_bridge"},
     )
     if result is None:
@@ -286,6 +390,12 @@ async def current_tab_extract_text(
         agent_name=ctx.get("agent_name") or "unknown_agent",
         approval_token=approval_token,
         selector=selector,
+        target_tab_id=_optional_int(
+            _tool_context_state_value(
+                tool_context,
+                StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID,
+            )
+        ),
     )
     result, payload = await execute_host_bridge_call(
         request=request,

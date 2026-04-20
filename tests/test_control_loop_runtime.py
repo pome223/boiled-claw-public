@@ -3538,6 +3538,245 @@ async def test_guarded_browser_navigate_redirects_to_current_tab_for_current_bro
 
 
 @pytest.mark.asyncio
+async def test_guarded_browser_navigate_redirect_audits_current_tab_redirect(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザで石油の一週間の値動きを調べて google spreadsheet に記載して",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "current_tab.navigate"}],
+            },
+        }
+    )
+    audit_calls: list[dict[str, object]] = []
+
+    async def fake_current_tab_navigate(url, timeout_ms=15000, new_tab=False, tool_context=None):
+        return {
+            "success": True,
+            "tab_id": 55,
+            "window_id": 9,
+            "url": url,
+            "title": "Google Sheets",
+        }
+
+    class _FakeAuditLogger:
+        def log(self, **kwargs):
+            audit_calls.append(kwargs)
+            return kwargs
+
+    monkeypatch.setattr("src.tools.current_tab.current_tab_navigate", fake_current_tab_navigate)
+    monkeypatch.setattr(
+        guarded_tools_module,
+        "get_audit_logger",
+        lambda: _FakeAuditLogger(),
+    )
+
+    result = await guarded_tools_module.guarded_browser_navigate(
+        url="https://docs.google.com/spreadsheets/create",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert len(audit_calls) == 1
+    assert audit_calls[0]["action"] == "redirect_to_current_tab"
+    assert audit_calls[0]["result"] == "redirected"
+    assert audit_calls[0]["metadata"]["requested_tool"] == "browser.navigate"
+    assert audit_calls[0]["metadata"]["effective_tool"] == "current_tab.navigate"
+    assert audit_calls[0]["metadata"]["tab_id"] == 55
+
+
+@pytest.mark.asyncio
+async def test_current_browser_spreadsheet_flow_preserves_control_ui_and_reuses_task_tab(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザで石油の一週間の値動きを調べて google spreadsheet に記載して",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [
+                    {"name": "current_tab.navigate"},
+                    {"name": "desktop.ax.find"},
+                    {"name": "desktop.control.click"},
+                    {"name": "desktop.control.type"},
+                ],
+            },
+        }
+    )
+    navigate_calls: list[dict[str, object]] = []
+    activate_calls: list[int] = []
+    type_calls: list[dict[str, object]] = []
+    info_responses = iter(
+        [
+            {
+                "success": True,
+                "tab_id": 10,
+                "url": "http://127.0.0.1:29999/chat",
+                "title": "boiled-claw Control UI",
+            },
+            {
+                "success": True,
+                "tab_id": 10,
+                "url": "http://127.0.0.1:29999/chat",
+                "title": "boiled-claw Control UI",
+            },
+            {
+                "success": True,
+                "tab_id": 71,
+                "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
+                "title": "Untitled spreadsheet - Google Sheets",
+            },
+            {
+                "success": True,
+                "tab_id": 71,
+                "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
+                "title": "Untitled spreadsheet - Google Sheets",
+            },
+            {
+                "success": True,
+                "tab_id": 71,
+                "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
+                "title": "Untitled spreadsheet - Google Sheets",
+            },
+            {
+                "success": True,
+                "tab_id": 10,
+                "url": "http://127.0.0.1:29999/chat",
+                "title": "boiled-claw Control UI",
+            },
+        ]
+    )
+
+    async def fake_current_tab_info(tool_context=None):
+        return next(info_responses)
+
+    async def fake_current_tab_navigate(url, timeout_ms=15000, new_tab=False, tool_context=None):
+        navigate_calls.append({"url": url, "new_tab": new_tab})
+        return {
+            "success": True,
+            "tab_id": 71,
+            "window_id": 1,
+            "url": url,
+            "title": "Untitled spreadsheet - Google Sheets",
+        }
+
+    async def fake_current_tab_activate(tab_id, tool_context=None):
+        activate_calls.append(tab_id)
+        return {
+            "success": True,
+            "tab_id": tab_id,
+            "window_id": 1,
+            "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+        }
+
+    async def fake_current_tab_extract_text(selector=None, tool_context=None):
+        return {
+            "success": True,
+            "selector": selector or "body",
+            "text": "日付\t終値\n2026/04/09\t100.72",
+            "length": 22,
+        }
+
+    async def fake_desktop_ax_find(**kwargs):
+        return {
+            "matched": True,
+            "target": {
+                "app_name": "Google Chrome",
+                "window_id": "1",
+                "role": "AXCell",
+                "title": "Sheet1",
+                "identifier": "A1",
+            },
+        }
+
+    async def fake_desktop_control_click(**kwargs):
+        return {
+            "success": True,
+            "target": {
+                "app_name": "Google Chrome",
+                "window_id": "1",
+                "role": "AXCell",
+                "title": "Sheet1",
+                "identifier": "A1",
+            },
+        }
+
+    async def fake_desktop_control_type(**kwargs):
+        type_calls.append(kwargs)
+        return {
+            "success": True,
+            "target": {
+                "app_name": kwargs.get("app_name"),
+                "window_id": kwargs.get("window_id"),
+                "role": kwargs.get("role"),
+                "title": kwargs.get("title"),
+                "identifier": kwargs.get("identifier"),
+            },
+        }
+
+    monkeypatch.setattr("src.tools.current_tab.current_tab_info", fake_current_tab_info)
+    monkeypatch.setattr("src.tools.current_tab.current_tab_navigate", fake_current_tab_navigate)
+    monkeypatch.setattr("src.tools.current_tab.current_tab_activate", fake_current_tab_activate)
+    monkeypatch.setattr(
+        "src.tools.current_tab.current_tab_extract_text",
+        fake_current_tab_extract_text,
+    )
+    monkeypatch.setattr("src.tools.desktop.desktop_ax_find", fake_desktop_ax_find)
+    monkeypatch.setattr("src.tools.desktop.desktop_control_click", fake_desktop_control_click)
+    monkeypatch.setattr("src.tools.desktop.desktop_control_type", fake_desktop_control_type)
+
+    navigate_result = await guarded_tools_module.guarded_browser_navigate(
+        url="https://docs.google.com/spreadsheets/create",
+        tool_context=tool_context,
+    )
+    find_result = await guarded_tools_module.guarded_desktop_ax_find(
+        role="AXCell",
+        identifier="A1",
+        tool_context=tool_context,
+    )
+    click_result = await guarded_tools_module.guarded_desktop_control_click(
+        tool_context=tool_context,
+    )
+    type_result = await guarded_tools_module.guarded_desktop_control_type(
+        text="日付\t終値\n2026/04/09\t100.72",
+        tool_context=tool_context,
+    )
+    extract_result = await guarded_tools_module.guarded_current_tab_extract_text(
+        selector="body",
+        tool_context=tool_context,
+    )
+
+    assert navigate_result["success"] is True
+    assert find_result["matched"] is True
+    assert click_result["success"] is True
+    assert type_result["success"] is True
+    assert extract_result["success"] is True
+    assert navigate_calls == [
+        {
+            "url": "https://docs.google.com/spreadsheets/create",
+            "new_tab": True,
+        }
+    ]
+    assert activate_calls == [71, 71]
+    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS] == [71]
+    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID] == 71
+    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET] == {
+        "app_name": "Google Chrome",
+        "window_id": "1",
+        "role": "AXCell",
+        "title": "Sheet1",
+        "identifier": "A1",
+    }
+    assert len(type_calls) == 1
+    assert type_calls[0]["app_name"] == "Google Chrome"
+    assert type_calls[0]["identifier"] == "A1"
+    assert "2026/04/09" in extract_result["text"]
+
+
+@pytest.mark.asyncio
 async def test_control_loop_resumes_after_human_approval(monkeypatch, tmp_path):
     session_service = InMemorySessionService()
     candidate_store = CandidateStore(

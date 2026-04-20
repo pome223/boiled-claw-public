@@ -52,6 +52,10 @@ from src.bridges.host_bridge_schema import (
     HostFileWriteResult,
     HostCurrentTabClickRequest,
     HostCurrentTabClickResult,
+    HostCurrentTabActivateRequest,
+    HostCurrentTabActivateResult,
+    HostCurrentTabListTabsRequest,
+    HostCurrentTabListTabsResult,
     HostCurrentTabExtractTextRequest,
     HostCurrentTabExtractTextResult,
     HostCurrentTabFillRequest,
@@ -120,7 +124,12 @@ async def _current_tab_navigate_payload(request: HostCurrentTabNavigateRequest) 
     bridge = get_current_tab_extension_bridge()
     payload = await bridge.call(
         "navigate",
-        {"url": request.url, "timeout_ms": request.timeout_ms},
+        {
+            "url": request.url,
+            "timeout_ms": request.timeout_ms,
+            "new_tab": request.new_tab,
+            "target_tab_id": request.target_tab_id,
+        },
         timeout_seconds=max(5.0, request.timeout_ms / 1000 + 2.0),
     )
     return {
@@ -130,6 +139,49 @@ async def _current_tab_navigate_payload(request: HostCurrentTabNavigateRequest) 
         "url": payload.get("url", ""),
         "title": payload.get("title", ""),
     }
+
+
+async def _current_tab_list_tabs_payload(
+    request: HostCurrentTabListTabsRequest,
+) -> dict[str, object]:
+    await _ensure_current_tab_bridge_ready()
+    bridge = get_current_tab_extension_bridge()
+    payload = await bridge.call("list_tabs", {})
+    raw_tabs = payload.get("tabs") or []
+    tabs: list[dict[str, object]] = []
+    for entry in raw_tabs:
+        if not isinstance(entry, dict):
+            continue
+        tabs.append(
+            {
+                "tab_id": entry.get("tab_id"),
+                "window_id": entry.get("window_id"),
+                "url": entry.get("url", ""),
+                "title": entry.get("title", ""),
+                "active": bool(entry.get("active", False)),
+                "index": entry.get("index"),
+            }
+        )
+    return {"ok": True, "tabs": tabs}
+
+
+async def _current_tab_activate_payload(
+    request: HostCurrentTabActivateRequest,
+) -> dict[str, object]:
+    await _ensure_current_tab_bridge_ready()
+    bridge = get_current_tab_extension_bridge()
+    payload = await bridge.call("activate_tab", {"tab_id": request.tab_id})
+    result: dict[str, object] = {
+        "ok": True,
+        "tab_id": payload.get("tab_id"),
+        "window_id": payload.get("window_id"),
+        "url": payload.get("url", ""),
+        "title": payload.get("title", ""),
+    }
+    window_focus_error = payload.get("window_focus_error")
+    if window_focus_error:
+        result["window_focus_error"] = str(window_focus_error)
+    return result
 
 
 async def _current_tab_click_payload(request: HostCurrentTabClickRequest) -> dict[str, object]:
@@ -155,7 +207,13 @@ async def _current_tab_extract_text_payload(
 ) -> dict[str, object]:
     await _ensure_current_tab_bridge_ready()
     bridge = get_current_tab_extension_bridge()
-    payload = await bridge.call("extract_text", {"selector": request.selector})
+    payload = await bridge.call(
+        "extract_text",
+        {
+            "selector": request.selector,
+            "target_tab_id": request.target_tab_id,
+        },
+    )
     return {
         "ok": True,
         "selector": payload.get("selector", request.selector or "body"),
@@ -325,6 +383,20 @@ def _capabilities() -> CapabilityListResult:
                 implemented=current_tab_bridge_enabled(),
             ),
             CapabilityDescriptor(
+                name="host.current_tab.list_tabs",
+                risk="low",
+                requires_approval=False,
+                description="Enumerate open Chrome tabs via the current-tab extension relay (read-only).",
+                implemented=current_tab_bridge_enabled(),
+            ),
+            CapabilityDescriptor(
+                name="host.current_tab.activate",
+                risk="medium",
+                requires_approval=True,
+                description="Activate a specific Chrome tab through the current-tab extension relay.",
+                implemented=current_tab_bridge_enabled(),
+            ),
+            CapabilityDescriptor(
                 name="host.current_tab.click",
                 risk="medium",
                 requires_approval=True,
@@ -445,10 +517,24 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
     )
 
     if is_loopback_host(host):
+        # Dockerized gateway clients reach the host-bound bridge via
+        # host.docker.internal while staying local to the developer machine.
+        allowed_loopback_hosts = [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+            "host.docker.internal:*",
+        ]
+        allowed_loopback_origins = [
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+            "http://host.docker.internal:*",
+        ]
         transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+            allowed_hosts=allowed_loopback_hosts,
+            allowed_origins=allowed_loopback_origins,
         )
     else:
         transport_security = TransportSecuritySettings(
@@ -851,6 +937,8 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
         agent_name: str,
         url: str,
         timeout_ms: int = 15000,
+        new_tab: bool = False,
+        target_tab_id: Optional[int] = None,
         approval_token: Optional[str] = None,
     ) -> dict:
         request = HostCurrentTabNavigateRequest(
@@ -861,12 +949,64 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             approval_token=approval_token,
             url=url,
             timeout_ms=timeout_ms,
+            new_tab=new_tab,
+            target_tab_id=target_tab_id,
         )
         try:
             payload = await _current_tab_navigate_payload(request)
         except CurrentTabBridgeError as exc:
             payload = _current_tab_error_payload(str(exc))
         return HostCurrentTabNavigateResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.current_tab.list_tabs",
+        description="Enumerate open Chrome tabs via the current-tab extension relay (read-only).",
+    )
+    async def host_current_tab_list_tabs(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostCurrentTabListTabsRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+        )
+        try:
+            payload = await _current_tab_list_tabs_payload(request)
+        except CurrentTabBridgeError as exc:
+            payload = _current_tab_error_payload(str(exc))
+        return HostCurrentTabListTabsResult.model_validate(payload).model_dump()
+
+    @mcp.tool(
+        name="host.current_tab.activate",
+        description="Activate a specific Chrome tab through the current-tab extension relay.",
+    )
+    async def host_current_tab_activate(
+        request_id: str,
+        session_id: str,
+        user_id: str,
+        agent_name: str,
+        tab_id: int,
+        approval_token: Optional[str] = None,
+    ) -> dict:
+        request = HostCurrentTabActivateRequest(
+            request_id=request_id,
+            session_id=session_id,
+            user_id=user_id,
+            agent_name=agent_name,
+            approval_token=approval_token,
+            tab_id=tab_id,
+        )
+        try:
+            payload = await _current_tab_activate_payload(request)
+        except CurrentTabBridgeError as exc:
+            payload = _current_tab_error_payload(str(exc))
+        return HostCurrentTabActivateResult.model_validate(payload).model_dump()
 
     @mcp.tool(
         name="host.current_tab.click",
@@ -932,6 +1072,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
         user_id: str,
         agent_name: str,
         selector: Optional[str] = None,
+        target_tab_id: Optional[int] = None,
         approval_token: Optional[str] = None,
     ) -> dict:
         request = HostCurrentTabExtractTextRequest(
@@ -941,6 +1082,7 @@ def create_server(host: str = "127.0.0.1", port: int = 8766):
             agent_name=agent_name,
             approval_token=approval_token,
             selector=selector,
+            target_tab_id=target_tab_id,
         )
         try:
             payload = await _current_tab_extract_text_payload(request)

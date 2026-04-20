@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 import struct
 import uuid
 import zlib
@@ -96,6 +97,61 @@ _CONTROL_LOOP_AUTHOR = "control_loop"
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PLAYBACK_SCREENSHOT_DIFF_RATIO_THRESHOLD = 0.002
 _PLAYBACK_SCREENSHOT_DELTA_THRESHOLD = 0.0005
+_GOOGLE_SHEETS_UI_ONLY_PHRASES = frozenset(
+    {
+        "untitled spreadsheet",
+        "google sheets",
+        "ask gemini",
+        "gemini in workspace can make mistakes",
+        "generate a custom spreadsheet",
+        "turn on screen reader support",
+        "learn more",
+    }
+)
+_GOOGLE_SHEETS_SURFACE_MARKERS = frozenset(
+    {
+        "untitled spreadsheet",
+        "google sheets",
+        "ask gemini",
+        "sheet1",
+        "turn on screen reader support",
+        "fileeditview",
+        "share",
+    }
+)
+_GOOGLE_SHEETS_UI_ONLY_TOKENS = frozenset(
+    {
+        "ask",
+        "gemini",
+        "share",
+        "file",
+        "edit",
+        "view",
+        "insert",
+        "format",
+        "data",
+        "tools",
+        "extensions",
+        "help",
+        "sheet1",
+        "build",
+        "submit",
+        "close",
+        "turn",
+        "screen",
+        "reader",
+        "support",
+        "generate",
+        "custom",
+        "spreadsheet",
+        "learn",
+        "more",
+        "default",
+        "arial",
+        "fileeditview",
+        "123",
+    }
+)
 _TEXT_ENTRY_KEYWORDS = SPREADSHEET_KEYWORDS | frozenset(
     {
         "入力",
@@ -175,6 +231,262 @@ def _goal_needs_text_entry(goal: str) -> bool:
 
 def _response_succeeded(response: dict[str, Any]) -> bool:
     return bool(response.get("success") or response.get("ok"))
+
+
+def _is_google_sheets_destination(current_tab: dict[str, Any]) -> bool:
+    destination = " ".join(
+        str(current_tab.get(key) or "").strip().lower()
+        for key in ("url", "title")
+    )
+    return (
+        "docs.google.com/spreadsheets" in destination
+        or "sheets.new" in destination
+        or "google sheets" in destination
+    )
+
+
+def _is_spreadsheet_task(goal: Any) -> bool:
+    normalized = str(goal or "").strip().lower()
+    if not normalized:
+        return False
+    return _contains_any(normalized, SPREADSHEET_KEYWORDS)
+
+
+def _has_sheets_candidate_window(window_titles: Any) -> bool:
+    if not isinstance(window_titles, list):
+        return False
+    text = " ".join(str(title or "") for title in window_titles).lower()
+    return (
+        "google sheets" in text
+        or "spreadsheet" in text
+        or "docs.google.com/spreadsheets" in text
+    )
+
+
+def _is_destination_bound_for_spreadsheet(current_tab: dict[str, Any]) -> bool:
+    """Whether current_tab points to a known spreadsheet-authoring destination.
+
+    Today we only recognize Google Sheets; extend as other destinations are supported.
+    """
+    return _is_google_sheets_destination(current_tab)
+
+
+def _should_fail_for_target_context_mismatch(
+    goal: Any,
+    current_tab: dict[str, Any] | None,
+    desktop: dict[str, Any] | None,
+    destination_tab: dict[str, Any] | None = None,
+) -> bool:
+    """Generalized destination-bound evidence rule.
+
+    If the task is a spreadsheet-authoring task but evidence is NOT destination-bound
+    (no Sheets tab reachable via current_tab OR destination_tab), the evidence cannot
+    certify success regardless of what text any tab contains.
+
+    When `destination_tab` is destination-bound we've located and can read the
+    spreadsheet surface, so target context is confirmed even when current_tab is
+    Control UI — this is the expected B2/B3 flow where the user keeps the Control UI
+    focused and the verifier side-channels the destination tab read-only.
+
+    Non-destination-bound evidence (chat, docs listing, about:blank, unrelated site)
+    still counts as a mismatch — URL/title alone never clears this rule.
+    """
+    if not _is_spreadsheet_task(goal):
+        return False
+    current_tab = current_tab if isinstance(current_tab, dict) else {}
+    desktop = desktop if isinstance(desktop, dict) else {}
+    # Destination-bound destination_tab clears the mismatch regardless of current_tab.
+    if isinstance(destination_tab, dict) and _is_destination_bound_for_spreadsheet(
+        destination_tab
+    ):
+        return False
+    has_tab_evidence = bool(
+        str(current_tab.get("url") or "").strip()
+        or str(current_tab.get("title") or "").strip()
+        or str(current_tab.get("text_excerpt") or "").strip()
+    )
+    if not has_tab_evidence:
+        return False
+    if _is_destination_bound_for_spreadsheet(current_tab):
+        return False
+    # Tab evidence exists but points somewhere other than the expected destination.
+    # This is a target-context mismatch: non-destination-bound evidence.
+    return True
+
+
+def _destination_tab_has_meaningful_text_entry_evidence(
+    destination_tab: dict[str, Any],
+    goal: Any = None,
+) -> bool:
+    """Mirror of _current_tab_has_meaningful_text_entry_evidence for destination_tab.
+
+    destination_tab text evidence is read from the actual spreadsheet surface
+    (not the focused tab), so it satisfies the destination-bound requirement
+    for spreadsheet tasks. URL presence alone is never enough — text_excerpt must
+    pass the same non-boilerplate check the current_tab path already applies.
+    """
+    if not isinstance(destination_tab, dict):
+        return False
+    if not (
+        destination_tab.get("extract_text_succeeded")
+        and int(destination_tab.get("text_length") or 0) > 0
+    ):
+        return False
+    text_excerpt = str(destination_tab.get("text_excerpt") or "").strip()
+    if not text_excerpt:
+        return False
+    if _is_google_sheets_destination(destination_tab):
+        return _google_sheets_excerpt_has_entered_content(text_excerpt)
+    return True
+
+
+def _has_destination_bound_text_evidence(
+    verification_inputs: dict[str, Any],
+) -> bool:
+    """Whether any destination-bound tab captured meaningful text evidence.
+
+    Checks destination_tab first (preferred, read-only capture), then falls back
+    to current_tab when current_tab IS the destination (the shortcut path in
+    _capture_destination_tab). URL-only never counts.
+    """
+    goal = verification_inputs.get("goal")
+    destination_tab = verification_inputs.get("destination_tab")
+    if isinstance(
+        destination_tab, dict
+    ) and _destination_tab_has_meaningful_text_entry_evidence(destination_tab, goal):
+        return True
+    current_tab = verification_inputs.get("current_tab")
+    if (
+        isinstance(current_tab, dict)
+        and _is_destination_bound_for_spreadsheet(current_tab)
+        and _current_tab_has_meaningful_text_entry_evidence(current_tab, goal)
+    ):
+        return True
+    return False
+
+
+def _google_sheets_excerpt_has_entered_content(text_excerpt: str) -> bool:
+    normalized = " ".join(str(text_excerpt or "").split()).lower()
+    if not normalized:
+        return False
+    if not any(marker in normalized for marker in _GOOGLE_SHEETS_SURFACE_MARKERS):
+        return False
+    cleaned = normalized
+    for phrase in _GOOGLE_SHEETS_UI_ONLY_PHRASES:
+        cleaned = cleaned.replace(phrase, " ")
+    tokens = re.findall(
+        r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9_./:+#&()'-]{2,}",
+        cleaned,
+    )
+    meaningful_tokens = [
+        token
+        for token in tokens
+        if token not in _GOOGLE_SHEETS_UI_ONLY_TOKENS
+    ]
+    return bool(meaningful_tokens)
+
+
+def _google_sheets_excerpt_meaningful_token_count(text_excerpt: str) -> int:
+    normalized = " ".join(str(text_excerpt or "").split()).lower()
+    if not normalized:
+        return 0
+    if not any(marker in normalized for marker in _GOOGLE_SHEETS_SURFACE_MARKERS):
+        return 0
+    cleaned = normalized
+    for phrase in _GOOGLE_SHEETS_UI_ONLY_PHRASES:
+        cleaned = cleaned.replace(phrase, " ")
+    tokens = re.findall(
+        r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9_./:+#&()'-]{2,}",
+        cleaned,
+    )
+    meaningful_tokens = [
+        token
+        for token in tokens
+        if token not in _GOOGLE_SHEETS_UI_ONLY_TOKENS
+    ]
+    return len(dict.fromkeys(meaningful_tokens))
+
+
+def _has_sparse_google_sheets_destination_text_evidence(
+    verification_inputs: dict[str, Any],
+) -> bool:
+    goal = verification_inputs.get("goal")
+    if not _is_spreadsheet_task(goal):
+        return False
+    for key in ("destination_tab", "current_tab"):
+        tab = verification_inputs.get(key)
+        if not isinstance(tab, dict) or not _is_destination_bound_for_spreadsheet(tab):
+            continue
+        if not _is_google_sheets_destination(tab):
+            continue
+        text_excerpt = str(tab.get("text_excerpt") or "").strip()
+        if not text_excerpt:
+            continue
+        token_count = _google_sheets_excerpt_meaningful_token_count(text_excerpt)
+        if 0 < token_count < 4:
+            return True
+    return False
+
+
+def _current_tab_has_meaningful_text_entry_evidence(
+    current_tab: dict[str, Any],
+    goal: Any = None,
+) -> bool:
+    if not (
+        current_tab.get("extract_text_succeeded")
+        and int(current_tab.get("text_length") or 0) > 0
+    ):
+        return False
+    text_excerpt = str(current_tab.get("text_excerpt") or "").strip()
+    if not text_excerpt:
+        return False
+    # Generalized destination-bound rule: for spreadsheet tasks, evidence from a
+    # non-destination tab (Control UI, unrelated site, new-tab page, etc.) is not
+    # meaningful no matter how much text it contains.
+    if _is_spreadsheet_task(goal) and not _is_destination_bound_for_spreadsheet(current_tab):
+        return False
+    if _is_google_sheets_destination(current_tab):
+        return _google_sheets_excerpt_has_entered_content(text_excerpt)
+    return True
+
+
+def _current_tab_text_conflicts_with_destination(
+    current_tab: dict[str, Any],
+    goal: Any = None,
+) -> bool:
+    if not (
+        current_tab.get("extract_text_succeeded")
+        and int(current_tab.get("text_length") or 0) > 0
+    ):
+        return False
+    text_excerpt = str(current_tab.get("text_excerpt") or "").strip()
+    if not text_excerpt:
+        return False
+    # Generalized: a spreadsheet task with a non-destination current_tab is always
+    # a destination mismatch, regardless of what the tab's text contains.
+    if _is_spreadsheet_task(goal) and not _is_destination_bound_for_spreadsheet(current_tab):
+        return True
+    if _is_google_sheets_destination(current_tab):
+        return not any(
+            marker in " ".join(text_excerpt.split()).lower()
+            for marker in _GOOGLE_SHEETS_SURFACE_MARKERS
+        )
+    return False
+
+
+def _artifact_refs_have_visual_evidence(artifact_refs: Any) -> bool:
+    refs = artifact_refs if isinstance(artifact_refs, list) else []
+    for ref in refs:
+        normalized = str(ref or "").strip().lower()
+        if not normalized:
+            continue
+        if normalized.startswith(("http://", "https://")):
+            continue
+        if normalized.endswith(
+            (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tiff", ".svg")
+        ):
+            return True
+    return False
 
 
 # ── Agents with callbacks ──────────────────────────────────────────────────
@@ -418,6 +730,7 @@ class ControlLoop:
                     "Structured verification inputs:\n"
                     f"{json.dumps(verification_inputs, ensure_ascii=False, indent=2)}"
                 )
+            # Attach screenshots so the verifier can visually inspect results.
             screenshot_paths: list[str] = []
             if verification_inputs:
                 desktop_vi = verification_inputs.get("desktop") or {}
@@ -579,7 +892,9 @@ class ControlLoop:
         message: str,
         image_paths: list[str] | None = None,
     ) -> None:
-        """指定 agent を Runner 経由で一度実行する。"""
+        """指定 agent を Runner 経由で一度実行する。
+        image_paths が指定された場合、PNG 画像を inline_data Part として添付する。
+        """
         runner = Runner(
             agent=agent,
             app_name=_APP_NAME,
@@ -771,9 +1086,13 @@ class ControlLoop:
             executor_outputs=executor_outputs,
             tool_responses=tool_responses,
         )
+        opened_tab_ids = _parse_opened_tab_ids(
+            state.get(StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS)
+        )
         if _verification_needs_current_tab_backfill(verification_inputs):
             verification_inputs = await _backfill_current_tab_verification_inputs(
-                verification_inputs
+                verification_inputs,
+                opened_tab_ids=opened_tab_ids,
             )
 
         state_delta: dict[str, Any] = {}
@@ -1143,11 +1462,104 @@ def _verification_needs_current_tab_backfill(
         return True
     if verification_inputs.get("text_entry_goal") and not has_text:
         return True
+    if _verification_needs_destination_tab_backfill(verification_inputs):
+        return True
     return False
+
+
+def _verification_needs_destination_tab_backfill(
+    verification_inputs: dict[str, Any],
+) -> bool:
+    """True when the task is destination-bound (spreadsheet today) and
+    verification_inputs do not yet carry a destination_tab entry.
+
+    The destination_tab is a read-only side-channel capture: we discover a
+    candidate tab (e.g. the Google Sheets tab the task opened earlier), then
+    call extract_text with target_tab_id to read it without stealing focus
+    from whatever tab the user is currently viewing (typically Control UI).
+    """
+    goal = verification_inputs.get("goal")
+    if not _is_spreadsheet_task(goal):
+        return False
+    destination_tab = verification_inputs.get("destination_tab")
+    if not isinstance(destination_tab, dict):
+        return True
+    # Already captured — allow backfill only if location is missing.
+    return not bool(str(destination_tab.get("url") or "").strip())
+
+
+def _select_destination_tab_candidate(
+    tabs: list[dict[str, Any]],
+    *,
+    goal: Any,
+    opened_tab_ids: set[int],
+) -> dict[str, Any] | None:
+    """Pick the best destination_tab candidate from a tab listing.
+
+    Preference order (spreadsheet task):
+      1. A tab in opened_tab_ids whose URL/title indicates Google Sheets.
+      2. Any tab whose URL/title indicates Google Sheets.
+      3. A tab in opened_tab_ids (last resort — caller should treat as non-
+         destination-bound and fail the target_context_mismatch rule).
+
+    Returns the selected raw tab dict or None when nothing matches.
+    """
+    spreadsheet = _is_spreadsheet_task(goal)
+
+    def _looks_like_sheets(tab: dict[str, Any]) -> bool:
+        return _is_google_sheets_destination(
+            {"url": tab.get("url"), "title": tab.get("title")}
+        )
+
+    if spreadsheet:
+        in_opened_and_sheets = [
+            t
+            for t in tabs
+            if isinstance(t, dict)
+            and _optional_int_from_tab(t) in opened_tab_ids
+            and _looks_like_sheets(t)
+        ]
+        if in_opened_and_sheets:
+            return in_opened_and_sheets[0]
+        any_sheets = [
+            t for t in tabs if isinstance(t, dict) and _looks_like_sheets(t)
+        ]
+        if any_sheets:
+            return any_sheets[0]
+
+    in_opened = [
+        t
+        for t in tabs
+        if isinstance(t, dict) and _optional_int_from_tab(t) in opened_tab_ids
+    ]
+    if in_opened:
+        return in_opened[0]
+    return None
+
+
+def _optional_int_from_tab(tab: dict[str, Any]) -> int | None:
+    try:
+        return int(tab.get("tab_id"))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_opened_tab_ids(raw: Any) -> set[int]:
+    if not isinstance(raw, (list, tuple, set)):
+        return set()
+    out: set[int] = set()
+    for entry in raw:
+        try:
+            out.add(int(entry))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 async def _backfill_current_tab_verification_inputs(
     verification_inputs: dict[str, Any],
+    *,
+    opened_tab_ids: set[int] | None = None,
 ) -> dict[str, Any]:
     from src.tools.current_tab import current_tab_extract_text, current_tab_info
 
@@ -1170,6 +1582,9 @@ async def _backfill_current_tab_verification_inputs(
                 current_tab["tab_id"] = info_result.get("tab_id")
             if info_result.get("window_id") is not None:
                 current_tab["window_id"] = info_result.get("window_id")
+            current_tab["destination_bound"] = _is_destination_bound_for_spreadsheet(
+                current_tab
+            )
 
     if verification_inputs.get("text_entry_goal"):
         try:
@@ -1188,7 +1603,131 @@ async def _backfill_current_tab_verification_inputs(
                     int(text_result.get("length") or len(text) or 0),
                 )
 
+    # ── destination_tab capture (read-only, no activate) ────────────────────
+    goal = verification_inputs.get("goal")
+    if _is_spreadsheet_task(goal):
+        await _capture_destination_tab(
+            verification_inputs,
+            goal=goal,
+            opened_tab_ids=opened_tab_ids or set(),
+        )
+
     return verification_inputs
+
+
+async def _capture_destination_tab(
+    verification_inputs: dict[str, Any],
+    *,
+    goal: Any,
+    opened_tab_ids: set[int],
+) -> None:
+    """Read-only destination_tab capture via list_tabs + targeted extract_text.
+
+    Does NOT call current_tab.activate — focus stays on whatever tab the user
+    is currently viewing (typically the Control UI). We enumerate tabs,
+    pick the Sheets candidate, and read its text via extract_text with
+    target_tab_id. If current_tab already points to the destination, we reuse
+    it rather than issuing a redundant capture.
+    """
+    from src.tools.current_tab import current_tab_list_tabs
+
+    current_tab = verification_inputs.get("current_tab") or {}
+    if _is_destination_bound_for_spreadsheet(current_tab):
+        # The focused tab already IS the destination — mirror it into
+        # destination_tab so downstream verifier rules have a uniform handle.
+        destination_tab = dict(current_tab)
+        destination_tab["destination_bound"] = True
+        destination_tab["discovery"] = "current_tab_is_destination"
+        verification_inputs["destination_tab"] = destination_tab
+        return
+
+    tabs: list[dict[str, Any]] = []
+    try:
+        list_result = await current_tab_list_tabs()
+    except Exception:
+        logger.exception("verification backfill: current_tab.list_tabs failed")
+        list_result = None
+    if isinstance(list_result, dict) and _response_succeeded(list_result):
+        raw_tabs = list_result.get("tabs") or []
+        tabs = [t for t in raw_tabs if isinstance(t, dict)]
+
+    if not tabs:
+        return
+
+    candidate = _select_destination_tab_candidate(
+        tabs, goal=goal, opened_tab_ids=opened_tab_ids
+    )
+    if candidate is None:
+        return
+
+    destination_tab: dict[str, Any] = {
+        "url": str(candidate.get("url") or "").strip(),
+        "title": str(candidate.get("title") or "").strip(),
+        "tab_id": _optional_int_from_tab(candidate),
+        "window_id": candidate.get("window_id"),
+    }
+    destination_tab["destination_bound"] = _is_destination_bound_for_spreadsheet(
+        destination_tab
+    )
+    destination_tab["discovery"] = (
+        "opened_tab_ids"
+        if destination_tab["tab_id"] in opened_tab_ids
+        else "window_titles"
+    )
+
+    target_tab_id = destination_tab["tab_id"]
+    if target_tab_id is not None:
+        # Read the destination tab's text WITHOUT activating it. We bypass
+        # current_tab_extract_text() (which derives target_tab_id from
+        # tool_context / TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID and would read the
+        # focused tab instead) and call the host-bridge client directly with
+        # an explicit target_tab_id.
+        text_result = await _extract_text_for_tab(target_tab_id)
+        if isinstance(text_result, dict):
+            text = str(text_result.get("text") or "")
+            if _response_succeeded(text_result):
+                destination_tab["extract_text_succeeded"] = True
+            if text:
+                destination_tab["text_excerpt"] = text[:500]
+            destination_tab["text_length"] = int(
+                text_result.get("length") or len(text) or 0
+            )
+
+    verification_inputs["destination_tab"] = destination_tab
+
+
+async def _extract_text_for_tab(tab_id: int) -> dict[str, Any] | None:
+    """Call host.current_tab.extract_text against a specific tab_id without
+    touching tool_context / session state. Read-only, no side effects on
+    focus."""
+    import uuid as _uuid
+
+    from src.bridges.host_bridge_client import get_host_bridge_client
+    from src.bridges.host_bridge_schema import HostCurrentTabExtractTextRequest
+
+    client = get_host_bridge_client()
+    if client is None:
+        return None
+    request = HostCurrentTabExtractTextRequest(
+        request_id=f"host-current-tab-dest-text-{_uuid.uuid4().hex[:12]}",
+        session_id="verification-destination-capture",
+        user_id="verification-destination-capture",
+        agent_name="control_loop_verifier",
+        approval_token=None,
+        selector=None,
+        target_tab_id=tab_id,
+    )
+    try:
+        result = await client.current_tab_extract_text(request)
+    except Exception:
+        logger.exception("verification backfill: extract_text for tab_id=%s failed", tab_id)
+        return None
+    return {
+        "text": result.text,
+        "length": result.length,
+        "success": result.ok,
+        **({"error": result.error} if result.error else {}),
+    }
 
 
 def _build_verification_inputs(
@@ -1390,14 +1929,64 @@ def _should_demote_browser_text_entry_report(
     if not isinstance(current_tab, dict) or not isinstance(desktop, dict):
         return True
 
-    has_destination = bool(
+    goal = verification_inputs.get("goal")
+    destination_tab = verification_inputs.get("destination_tab")
+    destination_tab = destination_tab if isinstance(destination_tab, dict) else None
+
+    # Generalized target-context-mismatch: any spreadsheet task whose captured evidence
+    # isn't destination-bound (no Sheets tab reachable via destination_tab OR current_tab)
+    # cannot carry a pass, regardless of what text the focused tab holds.
+    if _should_fail_for_target_context_mismatch(
+        goal, current_tab, desktop, destination_tab=destination_tab
+    ):
+        return True
+
+    # When destination_tab IS destination-bound (B2 path), the text-conflict rule
+    # for current_tab no longer applies — current_tab is allowed to be Control UI.
+    destination_bound = bool(
+        destination_tab and _is_destination_bound_for_spreadsheet(destination_tab)
+    )
+    if not destination_bound and _current_tab_text_conflicts_with_destination(
+        current_tab, goal
+    ):
+        return True
+
+    has_destination = destination_bound or bool(
         str(current_tab.get("url") or "").strip()
         or str(current_tab.get("title") or "").strip()
     )
-    has_post_action_evidence = bool(
-        current_tab.get("extract_text_succeeded")
-        and int(current_tab.get("text_length") or 0) > 0
-    ) or bool(desktop.get("screenshot_paths"))
+    artifact_refs = verification_inputs.get("artifact_refs")
+    # Pass-evidence sources (OR'd):
+    #   - destination_tab meaningful text (B2-read, destination-bound)
+    #   - current_tab meaningful text (only counts when current_tab is destination)
+    #   - screenshot / visual artifacts (weaker: NOT guaranteed destination-bound, but
+    #     retained as a fallback for non-spreadsheet text-entry tasks)
+    has_destination_text = _has_destination_bound_text_evidence(verification_inputs)
+    has_legacy_text = _current_tab_has_meaningful_text_entry_evidence(current_tab, goal)
+    has_visual_evidence = bool(desktop.get("screenshot_paths")) or _artifact_refs_have_visual_evidence(
+        artifact_refs
+    )
+    has_post_action_evidence = (
+        has_destination_text or has_legacy_text or has_visual_evidence
+    )
+
+    # `hotkey_succeeded` without `focus_succeeded` is not evidence that keystrokes
+    # reached the intended target — only that the hotkey call returned ok.
+    # For spreadsheet tasks, require real focus OR destination-bound text evidence.
+    # (Plain screenshot is NOT accepted here because it isn't guaranteed to have
+    # captured the destination tab.)
+    focus_succeeded = bool(desktop.get("focus_succeeded"))
+    if (
+        _is_spreadsheet_task(goal)
+        and not focus_succeeded
+        and not has_destination_text
+    ):
+        return True
+
+    # URL-only must never pass: spreadsheet task needs destination-bound text
+    # evidence specifically (plain screenshot is an insufficient substitute).
+    if _is_spreadsheet_task(goal) and not has_destination_text:
+        return True
 
     return not (has_destination and has_post_action_evidence)
 
@@ -1410,16 +1999,53 @@ def _demote_browser_text_entry_report(
     demoted = json.loads(json.dumps(report))
     current_tab = verification_inputs.get("current_tab")
     current_tab = current_tab if isinstance(current_tab, dict) else {}
+    desktop = verification_inputs.get("desktop")
+    desktop = desktop if isinstance(desktop, dict) else {}
+    destination_tab = verification_inputs.get("destination_tab")
+    destination_tab = destination_tab if isinstance(destination_tab, dict) else None
+    artifact_refs = verification_inputs.get("artifact_refs")
+    goal = verification_inputs.get("goal")
     missing_evidence: list[str] = []
     if not str(current_tab.get("url") or "").strip():
         missing_evidence.append("current_tab.url")
     if not str(current_tab.get("title") or "").strip():
         missing_evidence.append("current_tab.title")
-    if not (
-        current_tab.get("extract_text_succeeded")
-        and int(current_tab.get("text_length") or 0) > 0
+    if _should_fail_for_target_context_mismatch(
+        goal, current_tab, desktop, destination_tab=destination_tab
     ):
-        missing_evidence.append("post-action text/screenshot evidence")
+        missing_evidence.append(
+            "no destination-bound tab for the spreadsheet task "
+            "(destination_tab missing or not Sheets; target_context_mismatch)"
+        )
+    destination_bound = bool(
+        destination_tab and _is_destination_bound_for_spreadsheet(destination_tab)
+    )
+    if not destination_bound and _current_tab_text_conflicts_with_destination(
+        current_tab, goal
+    ):
+        missing_evidence.append("current_tab.extract_text matches the actual spreadsheet tab")
+    has_destination_text = _has_destination_bound_text_evidence(verification_inputs)
+    has_meaningful_text = _current_tab_has_meaningful_text_entry_evidence(current_tab, goal)
+    has_visual_evidence = bool(desktop.get("screenshot_paths")) or _artifact_refs_have_visual_evidence(
+        artifact_refs
+    )
+    if _is_spreadsheet_task(goal) and not has_destination_text:
+        missing_evidence.append(
+            "destination_tab (Sheets) extract_text with non-boilerplate cell content"
+        )
+    elif not has_meaningful_text and _is_google_sheets_destination(current_tab):
+        missing_evidence.append("non-boilerplate spreadsheet cell evidence")
+    if not (has_destination_text or has_meaningful_text or has_visual_evidence):
+        missing_evidence.append("meaningful post-action text/screenshot evidence")
+    if (
+        _is_spreadsheet_task(goal)
+        and not bool(desktop.get("focus_succeeded"))
+        and not has_destination_text
+    ):
+        missing_evidence.append(
+            "focus_succeeded=false and no destination-bound text evidence; "
+            "hotkey/screenshot without destination proof cannot certify keystrokes reached Sheets"
+        )
 
     explanation = (
         "現在のブラウザでの入力タスクですが、入力先のタブURL/titleや入力後の証拠が不足しているため、"
@@ -1467,15 +2093,45 @@ def _should_retarget_browser_text_entry_repair(
 
     current_tab = verification_inputs.get("current_tab")
     current_tab = current_tab if isinstance(current_tab, dict) else {}
-    has_destination = bool(
+    desktop = verification_inputs.get("desktop")
+    desktop = desktop if isinstance(desktop, dict) else {}
+    destination_tab = verification_inputs.get("destination_tab")
+    destination_tab = destination_tab if isinstance(destination_tab, dict) else None
+    artifact_refs = verification_inputs.get("artifact_refs")
+    goal = verification_inputs.get("goal")
+    if _should_fail_for_target_context_mismatch(
+        goal, current_tab, desktop, destination_tab=destination_tab
+    ):
+        return True
+    destination_bound = bool(
+        destination_tab and _is_destination_bound_for_spreadsheet(destination_tab)
+    )
+    if not destination_bound and _current_tab_text_conflicts_with_destination(
+        current_tab, goal
+    ):
+        return True
+    has_destination = destination_bound or bool(
         str(current_tab.get("url") or "").strip()
         or str(current_tab.get("title") or "").strip()
     )
-    has_text_evidence = bool(
-        current_tab.get("extract_text_succeeded")
-        and int(current_tab.get("text_length") or 0) > 0
+    has_destination_text = _has_destination_bound_text_evidence(verification_inputs)
+    has_text_evidence = _current_tab_has_meaningful_text_entry_evidence(current_tab, goal)
+    has_visual_evidence = bool(desktop.get("screenshot_paths")) or _artifact_refs_have_visual_evidence(
+        artifact_refs
     )
-    return not (has_destination and has_text_evidence)
+    if (
+        _is_spreadsheet_task(goal)
+        and _has_sparse_google_sheets_destination_text_evidence(verification_inputs)
+        and not has_visual_evidence
+    ):
+        return True
+    # URL-only must never allow a pass for spreadsheet tasks: require destination-bound text.
+    if _is_spreadsheet_task(goal) and not has_destination_text:
+        return True
+    return not (
+        has_destination
+        and (has_destination_text or has_text_evidence or has_visual_evidence)
+    )
 
 
 def _retarget_browser_text_entry_repair(
@@ -1486,17 +2142,62 @@ def _retarget_browser_text_entry_repair(
     retargeted = json.loads(json.dumps(report))
     current_tab = verification_inputs.get("current_tab")
     current_tab = current_tab if isinstance(current_tab, dict) else {}
+    desktop = verification_inputs.get("desktop")
+    desktop = desktop if isinstance(desktop, dict) else {}
+    destination_tab = verification_inputs.get("destination_tab")
+    destination_tab = destination_tab if isinstance(destination_tab, dict) else None
+    artifact_refs = verification_inputs.get("artifact_refs")
+    goal = verification_inputs.get("goal")
 
     missing_evidence: list[str] = []
     if not str(current_tab.get("url") or "").strip():
         missing_evidence.append("current_tab.url")
     if not str(current_tab.get("title") or "").strip():
         missing_evidence.append("current_tab.title")
-    if not (
-        current_tab.get("extract_text_succeeded")
-        and int(current_tab.get("text_length") or 0) > 0
+    if _should_fail_for_target_context_mismatch(
+        goal, current_tab, desktop, destination_tab=destination_tab
     ):
-        missing_evidence.append("current_tab.extract_text")
+        missing_evidence.append(
+            "no destination-bound tab for the spreadsheet task "
+            "(destination_tab missing or not Sheets; target_context_mismatch)"
+        )
+    destination_bound = bool(
+        destination_tab and _is_destination_bound_for_spreadsheet(destination_tab)
+    )
+    if not destination_bound and _current_tab_text_conflicts_with_destination(
+        current_tab, goal
+    ):
+        missing_evidence.append("current_tab.extract_text matches the actual spreadsheet tab")
+    has_destination_text = _has_destination_bound_text_evidence(verification_inputs)
+    has_meaningful_text = _current_tab_has_meaningful_text_entry_evidence(current_tab, goal)
+    has_visual_evidence = bool(desktop.get("screenshot_paths")) or _artifact_refs_have_visual_evidence(
+        artifact_refs
+    )
+    if (
+        _is_spreadsheet_task(goal)
+        and _has_sparse_google_sheets_destination_text_evidence(verification_inputs)
+        and not has_visual_evidence
+    ):
+        missing_evidence.append(
+            "spreadsheet screenshot with multiple populated cells; current_tab.extract_text only captured sparse active-cell text"
+        )
+    if _is_spreadsheet_task(goal) and not has_destination_text:
+        missing_evidence.append(
+            "destination_tab (Sheets) extract_text with non-boilerplate cell content"
+        )
+    elif not has_meaningful_text and _is_google_sheets_destination(current_tab):
+        missing_evidence.append("non-boilerplate spreadsheet cell evidence")
+    if not (has_destination_text or has_meaningful_text or has_visual_evidence):
+        missing_evidence.append("current_tab.extract_text or screenshot evidence")
+    if (
+        _is_spreadsheet_task(goal)
+        and not bool(desktop.get("focus_succeeded"))
+        and not has_destination_text
+    ):
+        missing_evidence.append(
+            "focus_succeeded=false and no destination-bound text evidence; "
+            "hotkey/screenshot without destination proof cannot certify keystrokes reached Sheets"
+        )
 
     summary = (
         "現在のブラウザでの入力タスクは証拠不足です。入力先タブの URL/title と入力後のページ証拠を"

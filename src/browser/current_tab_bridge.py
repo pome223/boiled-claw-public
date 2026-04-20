@@ -51,6 +51,13 @@ def _extract_request_token(websocket: Any) -> str:
     return str(values[0]).strip() if values else ""
 
 
+def _normalize_current_tab_bridge_host(host: str) -> str:
+    normalized = str(host or "").strip().lower()
+    if normalized == "host.docker.internal":
+        return "127.0.0.1"
+    return str(host or "").strip()
+
+
 class CurrentTabExtensionBridge:
     """WebSocket relay that accepts a single Chrome extension connection."""
 
@@ -241,7 +248,7 @@ def get_current_tab_extension_bridge() -> CurrentTabExtensionBridge:
     settings = get_settings()
     if _current_tab_bridge is None:
         _current_tab_bridge = CurrentTabExtensionBridge(
-            host=settings.current_tab_bridge_host,
+            host=_normalize_current_tab_bridge_host(settings.current_tab_bridge_host),
             port=settings.current_tab_bridge_port,
             shared_token=settings.current_tab_bridge_token,
             allow_remote_bind=settings.bridge_allow_remote_bind,

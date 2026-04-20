@@ -36,6 +36,7 @@ def _extract_plan_id(state: dict[str, Any], approved_plan: dict[str, Any] | None
 
 def _build_executor_message(
     *,
+    approved_plan: dict[str, Any] | None = None,
     replay_context: dict[str, Any] | None,
 ) -> str:
     if not replay_context:
@@ -44,10 +45,30 @@ def _build_executor_message(
     source_task_id = str(replay_context.get("source_task_id") or "").strip()
     if not from_step:
         return "Execute the approved plan."
+    remaining_steps: list[dict[str, Any]] = []
+    if isinstance(approved_plan, dict):
+        steps = approved_plan.get("steps")
+        steps = steps if isinstance(steps, list) else []
+        replay_started = False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("step_id") or "").strip()
+            if step_id == from_step:
+                replay_started = True
+            if replay_started:
+                remaining_steps.append(step)
+    suffix_block = ""
+    if remaining_steps:
+        suffix_block = (
+            "Replay suffix steps (execute only these unless recovery is required):\n"
+            f"{json.dumps(remaining_steps, ensure_ascii=False, indent=2)}\n"
+        )
     return (
         "Replay the approved plan from the specified step.\n\n"
         f"Replay source task: {source_task_id or '-'}\n"
         f"Replay from step: {from_step}\n"
+        f"{suffix_block}"
         "Treat earlier approved steps as already satisfied unless redoing them is "
         "strictly necessary to regain focus, recover the target app/tab state, or "
         "gather fresh evidence for the remaining suffix."

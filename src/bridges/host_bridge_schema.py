@@ -248,6 +248,8 @@ class HostCurrentTabNavigateRequest(BaseModel):
     approval_token: Optional[str] = None
     url: str = Field(min_length=1)
     timeout_ms: int = Field(default=15000, ge=1000, le=120000)
+    new_tab: bool = False
+    target_tab_id: Optional[int] = None
 
 
 class HostCurrentTabNavigateResult(BaseModel):
@@ -257,6 +259,52 @@ class HostCurrentTabNavigateResult(BaseModel):
     url: str = ""
     title: str = ""
     error: Optional[str] = None
+
+
+class HostCurrentTabListTabsRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+
+
+class HostCurrentTabListEntry(BaseModel):
+    tab_id: Optional[int] = None
+    window_id: Optional[int] = None
+    url: str = ""
+    title: str = ""
+    active: bool = False
+    index: Optional[int] = None
+
+
+class HostCurrentTabListTabsResult(BaseModel):
+    ok: bool
+    tabs: list[HostCurrentTabListEntry] = Field(default_factory=list)
+    error: Optional[str] = None
+
+
+class HostCurrentTabActivateRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    session_id: str = Field(min_length=1)
+    user_id: str = Field(min_length=1)
+    agent_name: str = Field(min_length=1)
+    approval_token: Optional[str] = None
+    tab_id: int
+
+
+class HostCurrentTabActivateResult(BaseModel):
+    ok: bool
+    tab_id: Optional[int] = None
+    window_id: Optional[int] = None
+    url: str = ""
+    title: str = ""
+    error: Optional[str] = None
+    # Surfaced when the tab-focus step succeeded but the subsequent
+    # window-focus step (chrome.windows.update focused=true) failed.
+    # Lets verifier/caller distinguish "tab active in background window"
+    # from "tab active and window foreground".
+    window_focus_error: Optional[str] = None
 
 
 class HostCurrentTabClickRequest(BaseModel):
@@ -298,6 +346,7 @@ class HostCurrentTabExtractTextRequest(BaseModel):
     agent_name: str = Field(min_length=1)
     approval_token: Optional[str] = None
     selector: Optional[str] = None
+    target_tab_id: Optional[int] = None
 
 
 class HostCurrentTabExtractTextResult(BaseModel):
