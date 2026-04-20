@@ -395,6 +395,12 @@ The intended behavior is:
 
 In other words, this is not just "browser automation." It is a current-browser workflow that keeps the user's active session usable, separates task navigation from the chat surface, and adds extra checks so spreadsheet-oriented tasks are more likely to finish with verifiable results.
 
+Example flow: the operator asks boiled-claw, in Japanese, to research notable `新々刀` swordsmiths and summarize the findings into Google Sheets. The embedded animation below is a README-friendly conversion of a real execution recording, followed by the captured result state from the Control UI.
+
+![Current-browser Google Sheets execution demo](assets/current-browser-sheets-demo-20260421.gif)
+
+![Current-browser Google Sheets result screenshot](assets/current-browser-sheets-result-20260421.jpg)
+
 The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 
 - Get active tab info
