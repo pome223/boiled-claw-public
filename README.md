@@ -380,6 +380,21 @@ This extension requires `<all_urls>` host permission because it uses `chrome.scr
 
 Current-browser spreadsheet plans normalize navigation through `current_tab.navigate` instead of relying on a Desktop `Cmd/Ctrl+T` hotkey. When the active tab is the boiled-claw Control UI chat, the runtime preserves that chat tab by opening a separate task tab before navigating. Spreadsheet entry steps also now locate and click a real grid cell such as `A1` before typing so writes land in the sheet instead of the browser chrome or Sheets toolbar. If an executor reaches for `browser.navigate` during a current-browser task, the runtime redirects that call to `current_tab.navigate` and records the redirect in the audit log.
 
+From a user perspective, this means boiled-claw can handle requests like:
+
+- "Research this topic in the current browser and put the results into Google Sheets"
+- "Stay in this browser session, but use a spreadsheet tab for data entry"
+- "Verify that the spreadsheet was actually updated, not just opened"
+
+The intended behavior is:
+
+- The Control UI chat stays available while boiled-claw opens or reuses a separate task tab for the spreadsheet work.
+- When entering spreadsheet data, boiled-claw targets a real sheet cell such as `A1`, so text lands in the grid instead of the browser chrome, toolbar, or document title.
+- Follow-up extraction and verification steps can return to the same task-owned tab, which makes multi-step browser tasks less brittle.
+- If Google Sheets exposes only sparse UI text, the control loop treats that as weak evidence and asks for stronger destination-bound proof instead of claiming success too early.
+
+In other words, this is not just "browser automation." It is a current-browser workflow that keeps the user's active session usable, separates task navigation from the chat surface, and adds extra checks so spreadsheet-oriented tasks are more likely to finish with verifiable results.
+
 The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 
 - Get active tab info
