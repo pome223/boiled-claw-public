@@ -12,6 +12,15 @@ from google.adk.agents.context import Context as ToolContext
 
 from src.computer_use.trajectory_store import get_computer_trajectory_store
 from src.config.settings import get_settings
+from src.physical_ai.runtime_schema import (
+    PhysicalMissionContract,
+    SafetyGovernorDecisionValue,
+    build_action_envelope,
+    build_physical_mission_contract,
+    build_physical_replay_plan,
+    build_physical_verifier_result,
+    build_safety_governor_decision,
+)
 from src.physical_ai.validation_store import (
     get_physical_ai_validation_store,
     reset_physical_ai_validation_store,
@@ -58,6 +67,47 @@ def _record_validation_run(run: dict[str, Any]) -> None:
 
 def _validation_status_payload(run_id: str) -> dict[str, Any] | None:
     return get_physical_ai_validation_store().get(run_id)
+
+
+def _simulation_contract(
+    *,
+    workflow: str,
+    scenario: str,
+    robot: str | None,
+    task: str | None,
+    parameters: dict[str, Any],
+) -> dict[str, Any]:
+    existing = parameters.get("mission_contract")
+    if isinstance(existing, dict) and existing:
+        return PhysicalMissionContract.model_validate(existing).model_dump(mode="json")
+    contract_id = f"mission_{workflow}_{scenario}".replace("/", "_").replace(" ", "_")
+    return build_physical_mission_contract(
+        contract_id=contract_id,
+        objective_type="simulation_validation",
+        objective_target=scenario or workflow,
+        workflow=workflow,
+        scenario=scenario,
+        robot=robot,
+        task=task,
+        additional_allowed_actions=["validate_replay"],
+        additional_completion_criteria=["simulation_validated"],
+        metadata={"validation_mode": "simulation_first"},
+    ).model_dump(mode="json")
+
+
+def _validation_mission_contract(validation: dict[str, Any], validation_run_id: str) -> PhysicalMissionContract:
+    existing = validation.get("mission_contract")
+    if isinstance(existing, dict) and existing:
+        return PhysicalMissionContract.model_validate(existing)
+    return build_physical_mission_contract(
+        contract_id=f"mission_{validation_run_id}",
+        objective_type="simulation_validation",
+        objective_target=str(validation.get("scenario") or validation_run_id),
+        workflow=str(validation.get("workflow") or "simulation_validation"),
+        scenario=str(validation.get("scenario") or validation_run_id),
+        robot=str(validation.get("robot") or ""),
+        task=str(validation.get("task") or ""),
+    )
 
 
 def _attempt_error(attempt: dict[str, Any]) -> str | None:
@@ -127,11 +177,20 @@ async def _refresh_validation_run(validation: dict[str, Any]) -> dict[str, Any] 
             "task": validation.get("task"),
         },
     )
+    mission_contract = _validation_mission_contract(validation, str(validation["run_id"]))
+    verifier_result = build_physical_verifier_result(
+        response,
+        validation_run_id=str(validation["run_id"]),
+        mission_contract_id=mission_contract.contract_id,
+    ).model_dump(mode="json")
     refreshed = {
         **validation,
         "status": str(response.get("status") or validation.get("status") or "queued"),
         "validated": _is_validated_response(response),
         "response": response,
+        "mission_contract": mission_contract.model_dump(mode="json"),
+        "telemetry_health": verifier_result.get("telemetry_health") or {},
+        "verifier_result": verifier_result,
     }
     _record_validation_run(refreshed)
     return refreshed
@@ -180,24 +239,43 @@ async def physical_ai_submit_simulation(
         return {"success": False, "error": f"{adapter_name} adapter URL is not configured"}
 
     parameters = json.loads(parameters_json) if parameters_json else {}
+    mission_contract = _simulation_contract(
+        workflow=workflow,
+        scenario=scenario,
+        robot=robot,
+        task=task,
+        parameters=parameters,
+    )
     request = {
         "workflow": workflow,
         "scenario": scenario,
         "robot": robot,
         "task": task,
         "parameters": parameters,
+        "mission_contract": mission_contract,
         "validation_mode": "simulation_first",
     }
     response = await _post_adapter_json(url, request)
     run_id = str(response.get("run_id") or response.get("id") or f"sim-{uuid.uuid4().hex[:12]}")
     status = str(response.get("status") or "queued")
     validated = _is_validated_response(response)
+    verifier_result = build_physical_verifier_result(
+        response,
+        validation_run_id=run_id,
+        mission_contract_id=str(mission_contract.get("contract_id") or ""),
+    ).model_dump(mode="json")
+    telemetry_health = verifier_result.get("telemetry_health") or {}
+    replay_plan = parameters.get("offline_replay_plan") if isinstance(parameters.get("offline_replay_plan"), dict) else {}
     payload = {
         "success": True,
         "adapter": adapter_name,
         "run_id": run_id,
         "status": status,
         "validated": validated,
+        "mission_contract": mission_contract,
+        "telemetry_health": telemetry_health,
+        "verifier_result": verifier_result,
+        "replay_plan": replay_plan,
         "response": response,
     }
     _record_validation_run(
@@ -207,6 +285,10 @@ async def physical_ai_submit_simulation(
             "scenario": scenario,
             "robot": robot,
             "task": task,
+            "mission_contract": mission_contract,
+            "telemetry_health": telemetry_health,
+            "verifier_result": verifier_result,
+            "replay_plan": replay_plan,
             "created_at": time.time(),
         }
     )
@@ -265,6 +347,12 @@ async def physical_ai_validation_status(
         "validated": bool(validation.get("validated")),
         "validation": validation,
         "refreshed": refreshed,
+        "mission_contract": validation.get("mission_contract") or {},
+        "telemetry_health": validation.get("telemetry_health") or {},
+        "verifier_result": validation.get("verifier_result") or {},
+        "replay_plan": validation.get("replay_plan") or {},
+        "action_envelope": validation.get("action_envelope") or {},
+        "governor_decision": validation.get("governor_decision") or {},
     }
     if refresh_error:
         payload["refresh_error"] = refresh_error
@@ -291,10 +379,26 @@ async def physical_ai_build_ros2_action(
         "goal": goal,
     }
     action["topics"] = _ros2_topics(action["namespace"], action["action_name"])
+    mission_contract_id = str(goal.get("mission_contract_id") or "")
+    action_envelope = build_action_envelope(
+        capability=action["action_name"],
+        target=goal,
+        robot_namespace=action["namespace"],
+        frame_id=frame_id,
+        validation_run_id=str(goal.get("validation_run_id") or ""),
+        mission_contract_id=mission_contract_id,
+    ).model_dump(mode="json")
+    governor_decision = {
+        "decision": SafetyGovernorDecisionValue.REQUIRE_OPERATOR.value,
+        "reasons": ["simulation_first_required"],
+        "mission_contract_id": mission_contract_id,
+    }
     return {
         "success": True,
         "simulation_first_required": True,
         "ros2_action": action,
+        "action_envelope": action_envelope,
+        "governor_decision": governor_decision,
     }
 
 
@@ -313,18 +417,87 @@ async def physical_ai_dispatch_ros2_action(
     validation = _validation_status_payload(validation_run_id)
     if validation is None:
         return {"success": False, "error": f"Unknown validation run: {validation_run_id}"}
+    mission_contract = _validation_mission_contract(validation, validation_run_id)
+    verifier_payload = {
+        **(validation.get("response") or {}),
+        "status": validation.get("status"),
+        "validated": validation.get("validated"),
+        "telemetry_health": validation.get("telemetry_health") or {},
+        "validation_status": (validation.get("verifier_result") or {}).get("verdict"),
+        "failure_type": (validation.get("verifier_result") or {}).get("failure_type"),
+    }
+    verifier_result = build_physical_verifier_result(
+        verifier_payload,
+        validation_run_id=validation_run_id,
+        mission_contract_id=mission_contract.contract_id,
+    )
+    governor_decision = build_safety_governor_decision(
+        mission_contract=mission_contract,
+        telemetry_health=verifier_result.telemetry_health,
+        verifier_result=verifier_result,
+        allow_real_hardware=allow_real_hardware,
+        dry_run=dry_run,
+    ).model_dump(mode="json")
+    if not validation.get("validated"):
+        governor_decision = {
+            **governor_decision,
+            "decision": SafetyGovernorDecisionValue.REJECT.value,
+            "reasons": [
+                "simulation_validation_not_passed",
+                *[
+                    reason
+                    for reason in governor_decision.get("reasons", [])
+                    if str(reason).strip() != "simulation_validation_not_passed"
+                ],
+            ],
+        }
+    ros2_action = json.loads(ros2_action_json)
+    action_envelope = build_action_envelope(
+        capability=str(ros2_action.get("action_name") or "physical_action"),
+        target=ros2_action.get("goal") if isinstance(ros2_action.get("goal"), dict) else {},
+        robot_namespace=str(ros2_action.get("namespace") or "robot"),
+        frame_id=str(ros2_action.get("frame_id") or "") or None,
+        validation_run_id=validation_run_id,
+        mission_contract_id=mission_contract.contract_id,
+    ).model_dump(mode="json")
+    validation = {
+        **validation,
+        "mission_contract": mission_contract.model_dump(mode="json"),
+        "telemetry_health": verifier_result.telemetry_health.model_dump(mode="json"),
+        "verifier_result": verifier_result.model_dump(mode="json"),
+        "action_envelope": action_envelope,
+        "governor_decision": governor_decision,
+    }
+    _record_validation_run(validation)
+
     if not validation.get("validated"):
         return {
             "success": False,
             "error": f"Simulation-first validation has not passed for run {validation_run_id}",
             "validation": validation,
+            "governor_decision": governor_decision,
+        }
+    if governor_decision["decision"] == SafetyGovernorDecisionValue.SAFE_MODE.value:
+        return {
+            "success": False,
+            "error": f"Safety governor entered safe_mode for run {validation_run_id}",
+            "validation": validation,
+            "governor_decision": governor_decision,
+        }
+    if governor_decision["decision"] == SafetyGovernorDecisionValue.REJECT.value:
+        return {
+            "success": False,
+            "error": f"Safety governor rejected action for run {validation_run_id}",
+            "validation": validation,
+            "governor_decision": governor_decision,
         }
 
-    ros2_action = json.loads(ros2_action_json)
     dispatch_payload = {
         "validation_run_id": validation_run_id,
         "validation": validation,
         "ros2_action": ros2_action,
+        "action_envelope": action_envelope,
+        "governor_decision": governor_decision,
     }
     if dry_run or not allow_real_hardware:
         return {
@@ -332,6 +505,8 @@ async def physical_ai_dispatch_ros2_action(
             "dispatched": False,
             "dry_run": True,
             "dispatch_payload": dispatch_payload,
+            "action_envelope": action_envelope,
+            "governor_decision": governor_decision,
         }
 
     settings = get_settings()
@@ -354,6 +529,8 @@ async def physical_ai_dispatch_ros2_action(
         "dry_run": False,
         "response": response,
         "validation_run_id": validation_run_id,
+        "action_envelope": action_envelope,
+        "governor_decision": governor_decision,
     }
 
 
@@ -381,11 +558,36 @@ async def physical_ai_replay_computer_trajectory(
         return {"success": False, "error": f"Unknown computer trajectory: {trajectory_id}"}
 
     trajectory_context = _trajectory_context(trajectory)
+    mission_contract = build_physical_mission_contract(
+        contract_id=f"mission_replay_{trajectory_id}",
+        objective_type="replay_validation",
+        objective_target=scenario,
+        workflow=workflow,
+        scenario=scenario,
+        robot=robot,
+        task=task,
+        additional_allowed_actions=["simulation_replay", "dispatch_validated_action"],
+        additional_completion_criteria=["simulation_replay_reviewed"],
+        metadata={"source_trajectory_id": trajectory_id, "offline_only": True},
+    ).model_dump(mode="json")
+    replay_plan = build_physical_replay_plan(
+        replay_id=f"physical_replay_{trajectory_id}",
+        source_trajectory_id=trajectory_id,
+        adapter=adapter,
+        workflow=workflow,
+        scenario=scenario,
+        mission_contract=PhysicalMissionContract.model_validate(mission_contract),
+        metadata={"robot": robot or "", "task": task or ""},
+    ).model_dump(mode="json")
     task_record = create_task_record(
         kind="physical_ai_replay",
         title=f"Physical replay for trajectory {trajectory_id}",
         status="running",
-        artifacts={"trajectory": trajectory_context},
+        artifacts={
+            "trajectory": trajectory_context,
+            "mission_contract": mission_contract,
+            "replay_plan": replay_plan,
+        },
         metadata={
             "trajectory_id": trajectory_id,
             "adapter": adapter,
@@ -397,6 +599,8 @@ async def physical_ai_replay_computer_trajectory(
     task_id = str(task_record["task_id"])
     simulation_parameters = json.loads(simulation_parameters_json) if simulation_parameters_json else {}
     simulation_parameters["computer_trajectory"] = trajectory_context
+    simulation_parameters["mission_contract"] = mission_contract
+    simulation_parameters["offline_replay_plan"] = replay_plan
 
     simulation = await physical_ai_submit_simulation(
         adapter=adapter,
@@ -411,7 +615,11 @@ async def physical_ai_replay_computer_trajectory(
         update_task_record(
             task_id,
             status="failed",
-            artifacts={"simulation": simulation},
+            artifacts={
+                "mission_contract": mission_contract,
+                "replay_plan": replay_plan,
+                "simulation": simulation,
+            },
             error=simulation.get("error") or "simulation submit failed",
         )
         return {
@@ -419,6 +627,8 @@ async def physical_ai_replay_computer_trajectory(
             "task_id": task_id,
             "error": simulation.get("error") or "simulation submit failed",
             "trajectory": trajectory_context,
+            "mission_contract": mission_contract,
+            "replay_plan": replay_plan,
             "simulation": simulation,
         }
 
@@ -430,6 +640,7 @@ async def physical_ai_replay_computer_trajectory(
         "final_surface": trajectory_context["final_surface"],
     }
     goal["validation_run_id"] = simulation["run_id"]
+    goal["mission_contract_id"] = mission_contract["contract_id"]
 
     ros2_action = await physical_ai_build_ros2_action(
         robot_namespace=robot_namespace,
@@ -443,6 +654,8 @@ async def physical_ai_replay_computer_trajectory(
         "success": True,
         "task_id": task_id,
         "trajectory": trajectory_context,
+        "mission_contract": mission_contract,
+        "replay_plan": replay_plan,
         "simulation": simulation,
         "ros2_action": ros2_action,
     }
@@ -453,6 +666,8 @@ async def physical_ai_replay_computer_trajectory(
             task_id,
             status="awaiting_validation",
             artifacts={
+                "mission_contract": mission_contract,
+                "replay_plan": replay_plan,
                 "simulation": simulation,
                 "ros2_action": ros2_action,
                 "dispatch_skipped_reason": payload["dispatch_skipped_reason"],
@@ -475,6 +690,8 @@ async def physical_ai_replay_computer_trajectory(
         task_id,
         status="completed" if payload["success"] else "failed",
         artifacts={
+            "mission_contract": mission_contract,
+            "replay_plan": replay_plan,
             "simulation": simulation,
             "ros2_action": ros2_action,
             "dispatch": dispatch,

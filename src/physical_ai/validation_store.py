@@ -34,11 +34,35 @@ class PhysicalAIValidationStore:
                     robot TEXT,
                     task TEXT,
                     response_json TEXT NOT NULL,
+                    mission_contract_json TEXT NOT NULL DEFAULT '{}',
+                    telemetry_health_json TEXT NOT NULL DEFAULT '{}',
+                    verifier_result_json TEXT NOT NULL DEFAULT '{}',
+                    replay_plan_json TEXT NOT NULL DEFAULT '{}',
+                    action_envelope_json TEXT NOT NULL DEFAULT '{}',
+                    governor_decision_json TEXT NOT NULL DEFAULT '{}',
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )
                 """
             )
+            cursor.execute("PRAGMA table_info(physical_ai_validation_runs)")
+            columns = {row[1] for row in cursor.fetchall()}
+            for column in (
+                ("mission_contract_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("telemetry_health_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("verifier_result_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("replay_plan_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("action_envelope_json", "TEXT NOT NULL DEFAULT '{}'"),
+                ("governor_decision_json", "TEXT NOT NULL DEFAULT '{}'"),
+            ):
+                if column[0] in columns:
+                    continue
+                cursor.execute(
+                    f"""
+                    ALTER TABLE physical_ai_validation_runs
+                    ADD COLUMN {column[0]} {column[1]}
+                    """
+                )
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_physical_ai_validation_runs_updated_at
@@ -63,10 +87,16 @@ class PhysicalAIValidationStore:
                     robot,
                     task,
                     response_json,
+                    mission_contract_json,
+                    telemetry_health_json,
+                    verifier_result_json,
+                    replay_plan_json,
+                    action_envelope_json,
+                    governor_decision_json,
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     adapter = excluded.adapter,
                     status = excluded.status,
@@ -76,6 +106,12 @@ class PhysicalAIValidationStore:
                     robot = excluded.robot,
                     task = excluded.task,
                     response_json = excluded.response_json,
+                    mission_contract_json = excluded.mission_contract_json,
+                    telemetry_health_json = excluded.telemetry_health_json,
+                    verifier_result_json = excluded.verifier_result_json,
+                    replay_plan_json = excluded.replay_plan_json,
+                    action_envelope_json = excluded.action_envelope_json,
+                    governor_decision_json = excluded.governor_decision_json,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -88,6 +124,12 @@ class PhysicalAIValidationStore:
                     run.get("robot"),
                     run.get("task"),
                     json.dumps(run.get("response") or {}, ensure_ascii=True),
+                    json.dumps(run.get("mission_contract") or {}, ensure_ascii=True),
+                    json.dumps(run.get("telemetry_health") or {}, ensure_ascii=True),
+                    json.dumps(run.get("verifier_result") or {}, ensure_ascii=True),
+                    json.dumps(run.get("replay_plan") or {}, ensure_ascii=True),
+                    json.dumps(run.get("action_envelope") or {}, ensure_ascii=True),
+                    json.dumps(run.get("governor_decision") or {}, ensure_ascii=True),
                     run.get("created_at", now),
                     now,
                 ),
@@ -100,7 +142,9 @@ class PhysicalAIValidationStore:
             cursor.execute(
                 """
                 SELECT run_id, adapter, status, validated, workflow, scenario, robot, task,
-                       response_json, created_at, updated_at
+                       response_json, mission_contract_json, telemetry_health_json,
+                       verifier_result_json, replay_plan_json, action_envelope_json,
+                       governor_decision_json, created_at, updated_at
                 FROM physical_ai_validation_runs
                 WHERE run_id = ?
                 """,
@@ -119,8 +163,14 @@ class PhysicalAIValidationStore:
             "robot": row[6],
             "task": row[7],
             "response": json.loads(row[8]) if row[8] else {},
-            "created_at": row[9],
-            "updated_at": row[10],
+            "mission_contract": json.loads(row[9]) if row[9] else {},
+            "telemetry_health": json.loads(row[10]) if row[10] else {},
+            "verifier_result": json.loads(row[11]) if row[11] else {},
+            "replay_plan": json.loads(row[12]) if row[12] else {},
+            "action_envelope": json.loads(row[13]) if row[13] else {},
+            "governor_decision": json.loads(row[14]) if row[14] else {},
+            "created_at": row[15],
+            "updated_at": row[16],
         }
 
     def clear(self) -> None:

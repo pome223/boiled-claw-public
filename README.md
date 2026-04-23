@@ -124,6 +124,8 @@ In Phase 0 these are **eval-derived substrate artifacts**, not live scheduler-ba
 The next follow-on slice for #86, #88, #89, and #90 stays inside that same Phase 0 contract: eval runs now also emit **eval-derived orchestration artifacts** for scheduler queues, recovery policy/decision, guardrail budget state, and durable human escalation records.
 These are still not a live worker loop. They are the durable report shapes that a future scheduler / recovery engine can consume without changing the external artifact contract.
 The next Google Sheets vertical slice for #92 and #93 now uses that same contract directly: `evals/current_tab_google_sheets.yaml` is a `long_running_vertical_slice`, and the Control UI task detail renders long-running state, scheduler queues, checkpoints, approval waits, and budget exhaustion from the persisted eval report.
+The next physical design slice for #94, #95, #96, and #97 applies the same contract-first rule to simulation-first adapters: each validation run now persists a `mission_contract`, `verifier_result`, `telemetry_health`, `action_envelope`, `governor_decision`, and offline `replay_plan`.
+These are still policy-bounded physical runtime artifacts, not a claim that boiled-claw now owns a live motor-controller stack.
 
 The Phase 0 CLI is now present in the repo:
 
@@ -178,7 +180,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
 - 🖥️ **Reliable Computer Use** - Browser-first observe / evaluate / act / recover flows with SQLite trajectory capture
 - 🧪 **Offline Self-Improvement** - Canary worktrees, benchmark gating, candidate packaging, cleanup, and approved-improvement reuse injected into repair prompts
-- 🤖 **Simulation-First Physical AI** - Isaac Sim / OSMO submission, persisted validation, and ROS2-friendly dispatch envelopes
+- 🤖 **Simulation-First Physical AI** - Mission contracts, persisted validation, telemetry-aware verifier results, safety-governed ROS2 envelopes, and offline replay plans
 - 💻 **Shell Execution** - Guarded execution with shell AST parsing, intent classification, and approvals
 - 📁 **File Operations** - Read and write support
 - 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
@@ -587,10 +589,10 @@ boiled-claw self-improvement-search \
 The physical AI slice is simulation-first by design:
 
 - `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
-- `physical_ai_validation_status` returns the persisted validation state for a run id and can refresh queued runs from adapter status endpoints
-- `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges
-- `physical_ai_dispatch_ros2_action` only allows real dispatch when a persisted validation run is explicitly marked as validated
-- `physical_ai_replay_computer_trajectory` turns a recorded browser/desktop trajectory into a simulation request plus ROS2 dry-run candidate for PoC work
+- `physical_ai_validation_status` returns the persisted validation state for a run id, can refresh queued runs from adapter status endpoints, and exposes `mission_contract`, `telemetry_health`, `verifier_result`, `action_envelope`, `governor_decision`, and `replay_plan`
+- `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges and returns the initial governor state that keeps dispatch operator-mediated by default
+- `physical_ai_dispatch_ros2_action` only allows real dispatch when a persisted validation run is explicitly marked as validated and the safety governor does not return `reject` or `safe_mode`
+- `physical_ai_replay_computer_trajectory` turns a recorded browser/desktop trajectory into a simulation request plus ROS2 dry-run candidate for PoC work, with a persistent offline replay plan attached
 
 Optional `.env`:
 
@@ -604,6 +606,15 @@ PHYSICAL_AI_VALIDATION_DB_PATH=data/physical_ai_validation.db
 ```
 
 Validation runs are stored in SQLite so simulation approvals survive process restarts. Status values like `ready` are not treated as validated; real dispatch requires an explicit pass / validated signal.
+The physical contract is now explicit:
+
+- `mission_contract` keeps the objective, allowed actions, forbidden actions, abort conditions, and evidence-bearing completion criteria first-class
+- `verifier_result` carries `pass | fail | uncertain | unsafe` plus `telemetry_health` and evidence refs
+- `action_envelope` defines the bounded ROS2-facing action proposal, separate from low-level controller commands
+- `governor_decision` captures the safety decision as `allow | reject | require_operator | safe_mode`
+- `replay_plan` is offline-only, benchmark-required, safety-regression-required, and operator-approved before any promoted recovery is considered
+
+This is still a simulation-first design surface. It does not claim live self-modification during a mission, and it deliberately keeps direct motor / thrust / attitude control out of scope.
 
 For a simple Physical AI PoC, replay a failed `computer_*` trajectory into `physical_ai_replay_computer_trajectory`, let the adapter validate it in Isaac Sim / OSMO, and only then inspect or dispatch the ROS2 envelope.
 That replay flow now also returns a persistent `task_id` with simulation / ROS2 / dispatch artifacts attached.

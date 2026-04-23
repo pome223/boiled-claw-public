@@ -309,36 +309,46 @@ Target shape:
 
 ```text
 computer-use trajectory
-  -> generic task graph
+  -> mission contract
   -> simulation scenario request
-  -> validation result
-  -> verification report
-  -> ROS2 dry-run envelope
+  -> verifier result + telemetry health
+  -> safety governor decision
+  -> ROS2 dry-run action envelope
+  -> offline replay plan
 ```
 
-Representative generic schema:
+Representative contract:
 
 ```json
 {
-  "task_graph": [
-    {
-      "step_id": "observe",
-      "modality": "screen_or_scene",
-      "expected_evidence": "object_or_ui_state"
-    },
-    {
-      "step_id": "act",
-      "action_type": "browser_click_or_robot_action"
-    },
-    {
-      "step_id": "verify",
-      "criteria": ["state_changed", "safety_ok"]
-    }
-  ]
+  "mission_contract": {
+    "objective": {"type": "inspection", "target": "rack_a"},
+    "allowed_actions": ["submit_simulation", "capture_image", "build_action_envelope"],
+    "forbidden_actions": ["direct_motor_control", "modify_controller"],
+    "abort_conditions": ["battery_below_reserve", "human_too_close", "localization_lost"],
+    "completion_criteria": ["all_required_targets_observed", "mission_report_generated"]
+  },
+  "verifier_result": {
+    "verdict": "uncertain",
+    "telemetry_health": {"battery": "ok", "localization": "ok", "safety": "nominal"},
+    "recommended_action": "hold_for_additional_validation"
+  },
+  "governor_decision": {
+    "decision": "require_operator",
+    "reasons": ["validation_uncertain"]
+  },
+  "replay_plan": {
+    "offline_only": true,
+    "benchmark_required": true,
+    "safety_regression_required": true,
+    "operator_approval_required": true,
+    "live_self_modification_allowed": false
+  }
 }
 ```
 
 This preserves the broader thesis: browser-first computer use and simulation-first physical AI should share a control-plane vocabulary.
+It should be read as a simulation-first contract surface, not as a claim that boiled-claw already ships a live robotics scheduler or direct motor controller.
 
 ## Minimum First Slice
 
@@ -454,6 +464,7 @@ Deliverables:
 Likely touchpoints:
 
 - `src/tools/physical_ai.py`
+- `src/physical_ai/runtime_schema.py`
 - `src/runtime/replay_schema.py`
 - `src/physical_ai/validation_store.py`
 
