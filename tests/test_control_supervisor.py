@@ -3,7 +3,11 @@ import asyncio
 import pytest
 
 from src.control_loop.root_workflow import ExecutionResult
-from src.gateway.control_supervisor import ControlLoopSupervisor, build_maintenance_goal
+from src.gateway.control_supervisor import (
+    ControlLoopSupervisor,
+    _SupervisorHandle,
+    build_maintenance_goal,
+)
 from src.runtime.durable_execution_schema import GuardrailBudgetPolicy
 from src.runtime.mission_contract import MissionContract, build_mission_contract
 from src.runtime.task_store import TaskStore
@@ -14,6 +18,54 @@ def test_build_maintenance_goal_wraps_objective():
 
     assert "Maintain the following long-running objective" in goal
     assert "Keep the desktop media session healthy" in goal
+
+
+def _create_running_supervisor_task(
+    store: TaskStore,
+    mission_contract: MissionContract,
+    *,
+    control_session_id: str = "ctrlsup_resume_hardened",
+    now: float = 1000.0,
+    status: str = "running",
+    stop_requested: bool = False,
+) -> dict:
+    return store.create(
+        kind="control_supervisor",
+        title=mission_contract.objective,
+        status=status,
+        owner_session_id="sess-owner",
+        owner_user_id="alice",
+        artifacts={
+            "mission_contract": mission_contract.model_dump(mode="json"),
+            "supervisor": {
+                "objective": mission_contract.objective,
+                "loop_goal": build_maintenance_goal(
+                    mission_contract.objective,
+                    mission_contract,
+                ),
+                "constraints": [],
+                "mission_contract_id": mission_contract.contract_id,
+                "duration_seconds": 120,
+                "interval_seconds": 0,
+                "control_session_id": control_session_id,
+                "started_at": now,
+                "ends_at": now + 120,
+                "max_iterations": 1,
+            },
+            "progress": {
+                "iteration": 0,
+                "completed_iterations": 0,
+                "next_run_at": now,
+                "child_task_ids": [],
+                "stop_requested": stop_requested,
+            },
+        },
+        metadata={
+            "type": "control_supervisor",
+            "control_session_id": control_session_id,
+            "mission_contract_id": mission_contract.contract_id,
+        },
+    )
 
 
 @pytest.mark.asyncio
@@ -758,6 +810,209 @@ async def test_control_supervisor_resume_uses_due_scheduler_queue(tmp_path):
     events = store.query_timeline(task["task_id"])["events"]
     assert any(event["event_type"] == "supervisor_resumed" for event in events)
     assert any(event["event_type"] == "scheduler_worker_tick" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_resume_skips_duplicate_active_handle(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    mission_contract = build_mission_contract(
+        contract_id="mission-resume-duplicate",
+        objective="Keep the browser session healthy",
+        allowed_actions=["current_tab.info"],
+    )
+    release_iteration = asyncio.Event()
+    child_calls: list[str] = []
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_calls.append(kwargs["parent_task_id"])
+        await release_iteration.wait()
+        child_task = store.create(
+            kind="control_loop",
+            title="resumed iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-resumed",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok after resume",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+    task = _create_running_supervisor_task(
+        store,
+        mission_contract,
+        control_session_id="ctrlsup_resume_duplicate",
+    )
+
+    assert await supervisor.resume_task(task) is True
+    assert await supervisor.resume_task(task) is False
+    assert len(supervisor._handles) == 1
+    release_iteration.set()
+    await asyncio.gather(*(handle.task for handle in list(supervisor._handles.values())))
+
+    assert child_calls == [task["task_id"]]
+    events = store.query_timeline(task["task_id"])["events"]
+    assert any(
+        event["event_type"] == "supervisor_resume_duplicate_skipped"
+        and event["payload"]["reason"] == "active_handle_exists"
+        for event in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_resume_clears_stale_handle(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    mission_contract = build_mission_contract(
+        contract_id="mission-resume-stale",
+        objective="Keep the browser session healthy",
+        allowed_actions=["current_tab.info"],
+    )
+    child_calls: list[str] = []
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_calls.append(kwargs["parent_task_id"])
+        child_task = store.create(
+            kind="control_loop",
+            title="resumed iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-resumed",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok after resume",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+    task = _create_running_supervisor_task(
+        store,
+        mission_contract,
+        control_session_id="ctrlsup_resume_stale",
+    )
+
+    async def _finished_task():
+        return None
+
+    stale_task = asyncio.create_task(_finished_task())
+    await stale_task
+    supervisor._handles[task["task_id"]] = _SupervisorHandle(
+        task_id=task["task_id"],
+        owner_session_id="sess-owner",
+        user_id="alice",
+        stop_requested=asyncio.Event(),
+        task=stale_task,
+    )
+
+    assert await supervisor.resume_task(task) is True
+    await asyncio.gather(*(handle.task for handle in list(supervisor._handles.values())))
+
+    assert child_calls == [task["task_id"]]
+    events = store.query_timeline(task["task_id"])["events"]
+    assert any(
+        event["event_type"] == "supervisor_resume_stale_handle"
+        and event["payload"]["reason"] == "stale_handle_done"
+        for event in events
+    )
+    assert any(event["event_type"] == "supervisor_resumed" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_resume_skips_explicitly_stopped_task(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    mission_contract = build_mission_contract(
+        contract_id="mission-resume-stopped",
+        objective="Keep the browser session healthy",
+        allowed_actions=["current_tab.info"],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        raise AssertionError("explicitly stopped supervisor should not resume")
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+    task = _create_running_supervisor_task(
+        store,
+        mission_contract,
+        control_session_id="ctrlsup_resume_stopped",
+        stop_requested=True,
+    )
+
+    assert await supervisor.resume_task(task) is False
+    assert supervisor._handles == {}
+    events = store.query_timeline(task["task_id"])["events"]
+    assert any(
+        event["event_type"] == "supervisor_resume_skipped"
+        and event["payload"]["reason"] == "explicit_stop_requested"
+        for event in events
+    )
 
 
 @pytest.mark.asyncio

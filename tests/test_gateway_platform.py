@@ -18,6 +18,7 @@ import src.runtime.tool_events as tool_events_module
 import src.security.tool_policy as tool_policy_module
 from src.gateway.routing import RoutingDecision
 from src.gateway.transcript import TranscriptStore
+from src.runtime.task_store import TaskStore
 
 
 class _FakeScheduler:
@@ -99,6 +100,41 @@ def _receive_foreground_event(ws):
         if payload.get("event") in _WS_BACKGROUND_EVENTS:
             continue
         return payload
+
+
+def test_gateway_running_control_supervisor_tasks_paginates(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    for idx in range(105):
+        store.create(
+            kind="control_supervisor",
+            title=f"running supervisor {idx}",
+            status="running",
+            owner_session_id="sess",
+            owner_user_id="alice",
+        )
+    store.create(
+        kind="control_supervisor",
+        title="completed supervisor",
+        status="completed",
+        owner_session_id="sess",
+        owner_user_id="alice",
+    )
+    store.create(
+        kind="control_loop",
+        title="running child task",
+        status="running",
+        owner_session_id="sess",
+        owner_user_id="alice",
+    )
+    gateway = object.__new__(server_module.GatewayServer)
+    gateway.task_store = store
+
+    tasks = gateway._running_control_supervisor_tasks(page_size=25)
+
+    assert len(tasks) == 105
+    assert len({task["task_id"] for task in tasks}) == 105
+    assert {task["kind"] for task in tasks} == {"control_supervisor"}
+    assert {task["status"] for task in tasks} == {"running"}
 
 
 def test_http_run_persists_transcript_and_session_listing(monkeypatch, tmp_path):
