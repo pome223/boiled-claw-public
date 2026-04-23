@@ -123,6 +123,10 @@ const sessions = [];
 let pendingMessage = null;
 const messageHistory = [];
 let currentSessionId = null;
+let reconnectSessionId = null;
+let reconnectHandle = null;
+let reconnectAttempts = 0;
+let manualDisconnectRequested = false;
 const inlineApprovals = new Map();
 const MAX_EVENT_ROWS = 200;
 
@@ -434,6 +438,7 @@ function wireApprovalButtons(bubble, model) {
       const approved = button.dataset.approved === "true";
       const strategy = button.dataset.strategy || "single";
       sendApprovalAction(
+        model.kind || "tool",
         model.requestId,
         approved,
         strategy,
@@ -489,6 +494,15 @@ function updateInlineApprovalStatus(requestId, status, note = "") {
   existing.status = status;
   existing.note = note;
   updateInlineApprovalElement(existing);
+}
+
+function removeInlineApproval(requestId) {
+  const existing = inlineApprovals.get(requestId);
+  if (!existing) return;
+  if (existing.element && existing.element.isConnected) {
+    existing.element.remove();
+  }
+  inlineApprovals.delete(requestId);
 }
 
 function isDesktopApprovalTool(toolName) {
@@ -583,7 +597,18 @@ function escapeAttr(str) {
 function formatTimestamp(ts) {
   if (!ts) return "-";
   try {
-    return new Date(ts * 1000).toLocaleString();
+    if (typeof ts === "number") {
+      return new Date(ts * 1000).toLocaleString();
+    }
+    const parsed = new Date(ts);
+    if (!Number.isNaN(parsed.getTime())) {
+      return parsed.toLocaleString();
+    }
+    const numeric = Number(ts);
+    if (!Number.isNaN(numeric)) {
+      return new Date(numeric * 1000).toLocaleString();
+    }
+    return "-";
   } catch (_) {
     return "-";
   }
@@ -1119,10 +1144,123 @@ function renderCompactList(targetEl, items, renderer, emptyText) {
   targetEl.innerHTML = items.map((item) => renderer(item)).join("");
 }
 
+function extractTaskApprovalRequest(task) {
+  const artifacts = task && typeof task.artifacts === "object" ? task.artifacts : {};
+  const result = artifacts.result && typeof artifacts.result === "object" ? artifacts.result : {};
+  const resumeContext = artifacts.resume_context && typeof artifacts.resume_context === "object"
+    ? artifacts.resume_context
+    : {};
+  const candidates = [
+    result.approval_request,
+    resumeContext.approval_request,
+    artifacts.approval_request,
+  ];
+  return candidates.find((candidate) => candidate && typeof candidate === "object") || null;
+}
+
+function buildSyntheticControlApproval(task, approvalRequest) {
+  if (!task || !approvalRequest) return null;
+  const requestId = String(approvalRequest.request_id || "").trim();
+  if (!requestId) return null;
+  return {
+    request_id: requestId,
+    state: "pending",
+    tool_name: `control plan ${approvalRequest.plan_id || task.task_id || "control"}`,
+    tool_pattern: "control_loop",
+    agent_name: "control_loop",
+    reason: approvalRequest.goal || approvalRequest.reason || task.title || "control approval required",
+    session_id: task.owner_session_id || "",
+    created_at: task.updated_at || task.created_at || null,
+    scope: "single",
+    synthetic_control: true,
+    plan_id: approvalRequest.plan_id || "",
+    risk_level: approvalRequest.risk_level || "",
+    required_capabilities: Array.isArray(approvalRequest.required_capabilities)
+      ? approvalRequest.required_capabilities
+      : [],
+  };
+}
+
+function shouldRecoverControlApproval(task) {
+  if (!task || task.status !== "pending") return false;
+  return Boolean(extractTaskApprovalRequest(task));
+}
+
+function collectSyntheticControlApprovals() {
+  const merged = new Map();
+  const tasks = [
+    ...(Array.isArray(dashboardState.recentTasks) ? dashboardState.recentTasks : []),
+    ...(Array.isArray(dashboardState.dashboardTasks) ? dashboardState.dashboardTasks : []),
+  ];
+  tasks.forEach((task) => {
+    if (!shouldRecoverControlApproval(task)) return;
+    const synthetic = buildSyntheticControlApproval(task, extractTaskApprovalRequest(task));
+    if (synthetic) merged.set(synthetic.request_id, synthetic);
+  });
+  return Array.from(merged.values()).sort((a, b) => {
+    const aTs = Date.parse(a.created_at || "") || 0;
+    const bTs = Date.parse(b.created_at || "") || 0;
+    return bTs - aTs;
+  });
+}
+
+function mergeApprovalLists(primary, synthetic) {
+  const merged = new Map();
+  (Array.isArray(primary) ? primary : []).forEach((item) => {
+    if (!item || !item.request_id) return;
+    merged.set(item.request_id, item);
+  });
+  (Array.isArray(synthetic) ? synthetic : []).forEach((item) => {
+    if (!item || !item.request_id || merged.has(item.request_id)) return;
+    merged.set(item.request_id, item);
+  });
+  return Array.from(merged.values());
+}
+
 function updateDashboardUi() {
-  const pendingCount = dashboardState.pendingApprovalsTotal;
+  const syntheticControlApprovals = collectSyntheticControlApprovals();
+  const activeSyntheticControlApprovalIds = new Set(
+    syntheticControlApprovals.map((approval) => approval.request_id),
+  );
+  syntheticControlApprovals.forEach((approval) => {
+    const existing = inlineApprovals.get(approval.request_id);
+    const preserveStatus = existing && existing.kind === "control" && existing.status !== "pending";
+    upsertInlineApproval({
+      kind: "control",
+      requestId: approval.request_id,
+      title: approval.tool_name,
+      subtitle: approval.risk_level
+        ? `risk=${approval.risk_level} caps=${(approval.required_capabilities || []).join(", ")}`
+        : "pending control approval",
+      reason: approval.reason || "control approval required",
+      sessionId: approval.session_id || "",
+      status: preserveStatus ? existing.status : "pending",
+      note: preserveStatus
+        ? existing.note
+        : "Recovered from pending task state. Respond inline to continue the control loop.",
+      syntheticControl: true,
+    });
+  });
+  Array.from(inlineApprovals.values()).forEach((model) => {
+    if (
+      model.kind === "control"
+      && model.syntheticControl
+      && model.status === "pending"
+      && !activeSyntheticControlApprovalIds.has(model.requestId)
+    ) {
+      removeInlineApproval(model.requestId);
+    }
+  });
+  const pendingApprovals = mergeApprovalLists(
+    dashboardState.pendingApprovals,
+    syntheticControlApprovals,
+  );
+  const pendingCount = pendingApprovals.length;
   const openTaskCount = dashboardState.openTaskCount;
-  const filteredApprovals = dashboardState.dashboardApprovals || [];
+  const filteredApprovals = mergeApprovalLists(
+    dashboardState.dashboardApprovals || [],
+    syntheticControlApprovals,
+  );
   const filteredTasks = dashboardState.dashboardTasks || [];
   if (dashboardSessionBackendEl) {
     dashboardSessionBackendEl.textContent = dashboardState.sessionBackend || "-";
@@ -1138,7 +1276,7 @@ function updateDashboardUi() {
   }
   if (dashboardApprovalsCaptionEl) {
     dashboardApprovalsCaptionEl.textContent = paginationLabel(
-      dashboardState.approvalTotal,
+      Math.max(dashboardState.approvalTotal, filteredApprovals.length),
       dashboardState.approvalPage,
       dashboardState.approvalPageSize,
       filteredApprovals.length,
@@ -1188,7 +1326,7 @@ function updateDashboardUi() {
 
   renderCompactList(
     inspectorApprovalsListEl,
-    dashboardState.pendingApprovals,
+    pendingApprovals,
     renderApprovalListItem,
     "No pending approvals."
   );
@@ -1395,6 +1533,193 @@ function renderTaskComparison(comparison) {
   ].join("");
 }
 
+function humanizeLongRunningToken(value) {
+  const text = String(value || "").trim();
+  if (!text) return "-";
+  return text.replace(/[_-]+/g, " ");
+}
+
+function extractLongRunningReport(task) {
+  const artifacts = task && typeof task.artifacts === "object" ? task.artifacts : {};
+  const report = artifacts.report && typeof artifacts.report === "object" ? artifacts.report : null;
+  if (!report) return null;
+  const durable = report.durable_execution && typeof report.durable_execution === "object"
+    ? report.durable_execution
+    : {};
+  const runJobs = Array.isArray(report.run_jobs) ? report.run_jobs : [];
+  if (!runJobs.length && !Object.keys(durable).length) {
+    return null;
+  }
+  return { report, durable, runJobs };
+}
+
+function renderLongRunningTaskState(task) {
+  const state = extractLongRunningReport(task);
+  if (!state) {
+    return "";
+  }
+  const { report, durable, runJobs } = state;
+  const slice = report.slice && typeof report.slice === "object" ? report.slice : {};
+  const schedulerState = durable.scheduler_state && typeof durable.scheduler_state === "object"
+    ? durable.scheduler_state
+    : {};
+  const resumeState = durable.resume_state && typeof durable.resume_state === "object"
+    ? durable.resume_state
+    : {};
+  const checkpoints = Array.isArray(durable.checkpoints) ? durable.checkpoints : [];
+  const escalations = Array.isArray(durable.escalations) ? durable.escalations : [];
+  const activeRunJobs = runJobs.filter((item) => {
+    const queue = String(item.scheduler_queue || "").trim();
+    return queue && queue !== "completed";
+  });
+  const budgetExhaustedJobs = runJobs.filter((item) => (
+    Boolean(item.budget_state && item.budget_state.budget_exhausted)
+  ));
+  const queueGroups = [
+    ["ready", Array.isArray(schedulerState.ready_queue) ? schedulerState.ready_queue : []],
+    ["blocked", Array.isArray(schedulerState.blocked_queue) ? schedulerState.blocked_queue : []],
+    ["waiting_for_approval", Array.isArray(schedulerState.waiting_for_approval_queue) ? schedulerState.waiting_for_approval_queue : []],
+    ["retry_later", Array.isArray(schedulerState.retry_later_queue) ? schedulerState.retry_later_queue : []],
+    ["periodic_check", Array.isArray(schedulerState.periodic_check_queue) ? schedulerState.periodic_check_queue : []],
+    ["completed", Array.isArray(schedulerState.completed_queue) ? schedulerState.completed_queue : []],
+  ];
+  const latestCheckpoints = checkpoints.slice(-3).reverse();
+
+  const renderQueueEntry = (queueName, entry) => {
+    const metaBits = [
+      entry.node_id || "-",
+      entry.checkpoint_id || "-",
+      entry.available_at ? formatTimestamp(entry.available_at) : null,
+    ].filter(Boolean);
+    const metadata = entry.metadata && typeof entry.metadata === "object" ? entry.metadata : {};
+    const detailBits = [
+      metadata.failure_type ? `failure=${metadata.failure_type}` : "",
+      metadata.chosen_action ? `next=${metadata.chosen_action}` : "",
+    ].filter(Boolean);
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(entry.node_id || queueName)}</div><div class="item-meta mono">${escapeHtml(metaBits.join(" · "))}</div></div>`,
+      statusTag(queueName),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(entry.reason || "-")}</div>`,
+      detailBits.length ? `<div class="item-meta mono">${escapeHtml(detailBits.join(" · "))}</div>` : "",
+      entry.escalation_id ? `<div class="item-meta mono">${escapeHtml(`escalation=${entry.escalation_id}`)}</div>` : "",
+      `</div>`,
+    ].join("");
+  };
+
+  const renderRunJob = (job) => {
+    const checkpoint = job.checkpoint && typeof job.checkpoint === "object" ? job.checkpoint : {};
+    const decision = job.recovery_decision && typeof job.recovery_decision === "object" ? job.recovery_decision : {};
+    const budgetState = job.budget_state && typeof job.budget_state === "object" ? job.budget_state : {};
+    const replayReference = job.replay_reference && typeof job.replay_reference === "object" ? job.replay_reference : {};
+    const detailBits = [
+      job.failure_type ? `failure=${job.failure_type}` : "",
+      decision.chosen_action ? `next=${decision.chosen_action}` : "",
+      checkpoint.current_task_node_id ? `node=${checkpoint.current_task_node_id}` : "",
+    ].filter(Boolean);
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(job.run_job_id || job.task_node_id || "run job")}</div><div class="item-meta mono">${escapeHtml(`trajectory=${job.trajectory_id || "-"}`)}</div></div>`,
+      statusTag(job.scheduler_queue || job.status || "unknown"),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(detailBits.join(" · ") || "-")}</div>`,
+      `<div class="item-meta">${escapeHtml(job.scheduler_queue_entry?.reason || decision.failure_type || "-")}</div>`,
+      replayReference && Object.keys(replayReference).length
+        ? `<div class="item-meta mono">${escapeHtml(compactText(JSON.stringify(replayReference), 180))}</div>`
+        : "",
+      budgetState.budget_exhausted
+        ? `<div class="item-meta mono">${escapeHtml(`budget=${(budgetState.budget_exhausted_reasons || []).join(", ") || "exhausted"}`)}</div>`
+        : "",
+      `</div>`,
+    ].join("");
+  };
+
+  const renderCheckpoint = (checkpoint) => {
+    const replayRef = Array.isArray(checkpoint.replay_references) ? checkpoint.replay_references[0] : null;
+    const approvalIds = Array.isArray(checkpoint.pending_approval_ids) ? checkpoint.pending_approval_ids : [];
+    return [
+      `<div class="detail-card">`,
+      `<div class="k">${escapeHtml(checkpoint.checkpoint_id || "checkpoint")}</div>`,
+      `<div class="item-meta mono">${escapeHtml([
+        checkpoint.current_task_node_id || "-",
+        `next=${checkpoint.next_actionable_task_node_id || "-"}`,
+        formatTimestamp(checkpoint.created_at),
+      ].join(" · "))}</div>`,
+      `<div class="item-detail">${escapeHtml(`trajectory=${(checkpoint.trajectory_ids || []).join(", ") || "-"} blocked=${(checkpoint.blocked_task_node_ids || []).join(", ") || "-"}`)}</div>`,
+      replayRef ? `<div class="item-meta mono">${escapeHtml(compactText(JSON.stringify(replayRef), 180))}</div>` : "",
+      approvalIds.length ? `<div class="item-meta mono">${escapeHtml(`approvals=${approvalIds.join(", ")}`)}</div>` : "",
+      `</div>`,
+    ].join("");
+  };
+
+  const renderEscalation = (escalation) => [
+    `<div class="detail-card">`,
+    `<div class="detail-heading">`,
+    `<div><div class="k">${escapeHtml(escalation.approval_request_id || escalation.escalation_id || "approval wait")}</div><div class="item-meta mono">${escapeHtml(escalation.node_id || "-")}</div></div>`,
+    statusTag(escalation.status || "waiting_for_approval"),
+    `</div>`,
+    `<div class="item-detail">${escapeHtml(escalation.reason || "-")}</div>`,
+    `<div class="item-meta mono">${escapeHtml([
+      escalation.failure_type || "-",
+      escalation.resume_checkpoint_id || escalation.checkpoint_id || "-",
+      formatTimestamp(escalation.created_at),
+    ].join(" · "))}</div>`,
+    `</div>`,
+  ].join("");
+
+  return [
+    `<div class="detail-section">`,
+    `<div class="k">Long-Running State</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Slice</div><div>${escapeHtml(humanizeLongRunningToken(slice.type || "-"))}</div><div class="item-meta mono">${escapeHtml(report.eval_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Runs</div><div>${escapeHtml(`${report.runs_evaluated || 0}/${report.runs_requested || report.runs_evaluated || 0}`)}</div><div class="item-meta mono">${escapeHtml(`success_rate=${Number(report.success_rate || 0).toFixed(4)}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Resume</div><div>${escapeHtml(humanizeLongRunningToken(resumeState.reason || "-"))}</div><div class="item-meta mono">${escapeHtml(resumeState.next_actionable_task_node_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Queues</div><div>${escapeHtml([
+      `ready=${resumeState.scheduler_queue_counts?.ready ?? 0}`,
+      `blocked=${resumeState.scheduler_queue_counts?.blocked ?? 0}`,
+      `approvals=${resumeState.scheduler_queue_counts?.waiting_for_approval ?? 0}`,
+      `retry=${resumeState.scheduler_queue_counts?.retry_later ?? 0}`,
+    ].join(" · "))}</div><div class="item-meta mono">${escapeHtml(`pending=${(resumeState.pending_approval_ids || []).join(", ") || "-"}`)}</div></div>`,
+    `</div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Scheduler Queues</div>`,
+    queueGroups.some(([, items]) => items.length)
+      ? `<div class="detail-grid">${queueGroups.flatMap(([queueName, items]) => (
+          items.map((entry) => renderQueueEntry(queueName, entry))
+        )).join("")}</div>`
+      : `<div class="muted">No scheduler queue entries recorded.</div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Blocked or Deferred Tasks</div>`,
+    activeRunJobs.length
+      ? `<div class="detail-grid">${activeRunJobs.map(renderRunJob).join("")}</div>`
+      : `<div class="muted">No blocked or deferred task nodes.</div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Latest Checkpoints</div>`,
+    latestCheckpoints.length
+      ? `<div class="detail-grid">${latestCheckpoints.map(renderCheckpoint).join("")}</div>`
+      : `<div class="muted">No checkpoints recorded.</div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Approval Waits</div>`,
+    escalations.length
+      ? `<div class="detail-grid">${escalations.map(renderEscalation).join("")}</div>`
+      : `<div class="muted">No approval waits recorded.</div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Budget Exhaustion</div>`,
+    budgetExhaustedJobs.length
+      ? `<div class="detail-grid">${budgetExhaustedJobs.map(renderRunJob).join("")}</div>`
+      : `<div class="muted">No budget exhaustion recorded.</div>`,
+    `</div>`,
+  ].join("");
+}
+
 function renderTaskDetail(task) {
   const relatedTasks = dashboardState.relatedTasks || [];
   const childTasks = dashboardState.childTasks || [];
@@ -1471,6 +1796,7 @@ function renderTaskDetail(task) {
     `<div class="k">Approval Dependencies</div>`,
     renderRelationChips("approval", relatedApprovals, "No linked approvals."),
     `</div>`,
+    renderLongRunningTaskState(task),
     renderTaskTimeline(taskTimeline, taskTimelinePagination),
     `<div class="detail-section">`,
     `<div class="k">Audit Trail</div>`,
@@ -2397,6 +2723,7 @@ function scheduleAuditRefresh(delay = 250) {
 
 function handleConnected(payload) {
   currentSessionId = payload.session_id || null;
+  reconnectSessionId = currentSessionId || null;
   sessionBadgeEl.textContent = currentSessionId || "-";
   const pv = payload.protocol_version || "?";
   addSession(currentSessionId || "unknown", payload.user_id || currentSettings().userId);
@@ -2510,11 +2837,41 @@ function handleControlApprovalRequest(payload) {
     reason: goal || reason || "control approval required",
     argsPreview: reason && goal !== reason ? reason : "",
     status: "pending",
-    note: "Respond inline to continue the control loop."
+    note: "Respond inline to continue the control loop.",
+    syntheticControl: false,
   });
 }
 
-async function sendApprovalAction(requestId, approved, strategy = "single", sessionId = "") {
+async function sendControlApproval(requestId, approved, sessionId = "") {
+  const settings = currentSettings();
+  const base = toHttpBaseUrl(settings);
+  try {
+    await fetchJsonOrThrow(`${base}/control-loop/approve`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        user_id: (settings.userId || "web_user").trim() || "web_user",
+        request_id: requestId,
+        approved,
+        session_id: sessionId || currentSessionId || "",
+      }),
+    });
+    updateInlineApprovalStatus(
+      requestId,
+      approved ? "approving" : "denying",
+      approved ? "Approval sent. Waiting for gateway confirmation..." : "Denial sent. Waiting for gateway confirmation..."
+    );
+    scheduleDashboardRefresh(50);
+  } catch (err) {
+    addSystemMessage(`approval error: ${err}`);
+  }
+}
+
+async function sendApprovalAction(kind, requestId, approved, strategy = "single", sessionId = "") {
+  if (kind === "control" && strategy === "single") {
+    await sendControlApproval(requestId, approved, sessionId);
+    return;
+  }
   if (strategy !== "single") {
     const base = toHttpBaseUrl(currentSettings());
     const note = approved
@@ -2565,11 +2922,20 @@ function sendApproval(requestId, approved) {
 
 function handleTaskUpdate(payload) {
   const task = payload.task && typeof payload.task === "object" ? payload.task : {};
+  const approvalRequest = extractTaskApprovalRequest(task);
+  const requestId = approvalRequest?.request_id || "";
   logEvent("task.update", {
     task_id: payload.task_id || task.task_id,
     status: task.status || payload.timeline_event?.status,
     event_type: payload.timeline_event?.event_type || "",
   });
+  if (
+    requestId
+    && task.status
+    && task.status !== "pending"
+  ) {
+    removeInlineApproval(requestId);
+  }
   if (
     dashboardState.selectedKind === "task"
     && dashboardState.selectedId
@@ -2971,11 +3337,19 @@ function activateTab(tabKey) {
 // -----------------------------------------------------------------------
 
 function switchSession(targetSessionId) {
-  if (socket) socket.close();
+  manualDisconnectRequested = true;
+  if (reconnectHandle) {
+    window.clearTimeout(reconnectHandle);
+    reconnectHandle = null;
+  }
+  const previous = socket;
+  socket = null;
+  if (previous) previous.close();
   resetDashboardPages();
   messageHistory.length = 0;
   inlineApprovals.clear();
   restoreMessages();
+  manualDisconnectRequested = false;
   connect(targetSessionId);
 }
 
@@ -3007,17 +3381,27 @@ function connect(targetSessionId = null) {
     return;
   }
 
+  if (reconnectHandle) {
+    window.clearTimeout(reconnectHandle);
+    reconnectHandle = null;
+  }
+  manualDisconnectRequested = false;
+  const requestedSessionId = targetSessionId || reconnectSessionId || currentSessionId || null;
   const settings = currentSettings();
-  const wsUrl = toWebSocketUrl(settings, targetSessionId);
+  const wsUrl = toWebSocketUrl(settings, requestedSessionId);
   logEvent("socket.connecting", { wsUrl });
   setStatus(false, "connecting...");
 
-  socket = new WebSocket(wsUrl);
+  const ws = new WebSocket(wsUrl);
+  socket = ws;
 
-  socket.onopen = () => {
+  ws.onopen = () => {
+    if (socket !== ws) return;
     setStatus(true, "online");
     addSystemMessage(`connected: ${wsUrl}`);
     logEvent("socket.open");
+    reconnectAttempts = 0;
+    reconnectSessionId = null;
     if (pendingMessage) {
       const toSend = pendingMessage;
       pendingMessage = null;
@@ -3025,10 +3409,10 @@ function connect(targetSessionId = null) {
     }
   };
 
-  socket.onclose = (event) => {
+  ws.onclose = (event) => {
+    if (socket !== ws) return;
+    socket = null;
     setStatus(false, "offline");
-    currentSessionId = null;
-    sessionBadgeEl.textContent = "-";
     clearWaiting();
     setRunInProgress(false);
     _streamingBubble = null;
@@ -3037,15 +3421,28 @@ function connect(targetSessionId = null) {
     logEvent("socket.close", { code: event.code, reason: event.reason || "" });
     scheduleDashboardRefresh(50);
     if (isTabActive("audit")) scheduleAuditRefresh(50);
+    const sessionToReconnect = currentSessionId || requestedSessionId;
+    reconnectSessionId = sessionToReconnect || null;
+    if (!manualDisconnectRequested && sessionToReconnect && !reconnectHandle) {
+      const delay = Math.min(5000, 500 * 2 ** reconnectAttempts);
+      reconnectAttempts += 1;
+      addSystemMessage(`reconnecting in ${Math.round(delay / 100) / 10}s...`);
+      reconnectHandle = window.setTimeout(() => {
+        reconnectHandle = null;
+        connect(sessionToReconnect);
+      }, delay);
+    }
   };
 
-  socket.onerror = () => {
+  ws.onerror = () => {
+    if (socket !== ws) return;
     setStatus(false, "error");
     addSystemMessage("connection error");
     logEvent("socket.error");
   };
 
-  socket.onmessage = (event) => {
+  ws.onmessage = (event) => {
+    if (socket !== ws) return;
     try {
       const payload = JSON.parse(event.data);
       logEvent(`ws.${payload.event || payload.type || "message"}`, payload);
@@ -3093,7 +3490,18 @@ function connect(targetSessionId = null) {
 }
 
 function disconnect() {
-  if (socket) socket.close();
+  manualDisconnectRequested = true;
+  if (reconnectHandle) {
+    window.clearTimeout(reconnectHandle);
+    reconnectHandle = null;
+  }
+  reconnectSessionId = currentSessionId || reconnectSessionId;
+  const previous = socket;
+  socket = null;
+  if (previous) previous.close();
+  setStatus(false, "offline");
+  clearWaiting();
+  setRunInProgress(false);
 }
 
 function sendMessage(text) {

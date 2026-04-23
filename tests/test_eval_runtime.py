@@ -46,6 +46,44 @@ def test_normalize_trajectory_failure_prefers_target_context_mismatch_for_url_fa
     assert classification["classified_by"] == ["verifier"]
 
 
+def test_normalize_trajectory_failure_detects_wrong_surface_from_preferred_surface():
+    classification = normalize_trajectory_failure(
+        {
+            "status": "failed",
+            "final_surface": "desktop",
+            "observation": {
+                "preferred_surface": "current_tab",
+                "available_surfaces": ["current_tab", "desktop"],
+            },
+            "attempts": [
+                {
+                    "surface": "desktop",
+                    "result": {
+                        "error": "preferred surface current_tab but final surface desktop",
+                    },
+                }
+            ],
+            "verification": {
+                "status": "fail",
+                "checks": [
+                    {
+                        "name": "surface",
+                        "expected": "current_tab",
+                        "actual": "desktop",
+                        "passed": False,
+                    }
+                ],
+            },
+        },
+        classified_by="replay_analysis",
+    )
+
+    assert classification["preliminary_failure_type"] == "wrong_surface"
+    assert classification["normalized_failure_type"] == "wrong_surface"
+    assert classification["failure_type"] == "wrong_surface"
+    assert classification["classified_by"] == ["replay_analysis"]
+
+
 def test_run_eval_spec_persists_report_and_backfills_failure_classification(tmp_path, monkeypatch):
     store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
     trajectory_id = store.record(
@@ -465,6 +503,143 @@ match:
     assert result["durable_execution"]["scheduler_state"]["blocked_queue"][0]["node_id"] == (
         "current_tab_google_sheets_phase0/run-2"
     )
+
+
+def test_run_eval_spec_uses_checked_in_google_sheets_long_running_vertical_slice(tmp_path, monkeypatch):
+    store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
+    success_trajectory = store.record(
+        action="fill",
+        status="success",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={
+            "status": "pass",
+            "success": True,
+            "checks": [
+                {
+                    "name": "url_contains",
+                    "expected": "docs.google.com/spreadsheets",
+                    "actual": "https://docs.google.com/spreadsheets/d/1",
+                    "passed": True,
+                },
+                {
+                    "name": "text_contains",
+                    "expected": "Summary",
+                    "actual": "Summary row written",
+                    "passed": True,
+                    "evidence_refs": ["sheet-success.png"],
+                },
+            ],
+        },
+        request={
+            "selector": ".cell-input",
+            "verify": {"url_contains": "docs.google.com/spreadsheets"},
+        },
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab", "desktop"]},
+    )
+    wrong_surface_trajectory = store.record(
+        action="fill",
+        status="failed",
+        final_surface="desktop",
+        attempts=[
+            {
+                "surface": "desktop",
+                "strategy": "desktop_ax",
+                "result": {
+                    "error": "preferred surface current_tab but final surface desktop",
+                },
+            }
+        ],
+        verification={
+            "status": "fail",
+            "success": False,
+            "checks": [
+                {
+                    "name": "surface",
+                    "expected": "current_tab",
+                    "actual": "desktop",
+                    "passed": False,
+                }
+            ],
+        },
+        request={
+            "selector": ".cell-input",
+            "verify": {"url_contains": "docs.google.com/spreadsheets"},
+        },
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab", "desktop"]},
+    )
+    weak_evidence_trajectory = store.record(
+        action="fill",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={
+            "status": "partial_pass",
+            "success": False,
+            "checks": [
+                {
+                    "name": "text_contains",
+                    "expected": "Summary",
+                    "actual": "",
+                    "passed": False,
+                    "evidence_refs": ["sheet-weak-evidence.png"],
+                }
+            ],
+        },
+        request={
+            "selector": ".cell-input",
+            "verify": {"url_contains": "docs.google.com/spreadsheets"},
+        },
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab", "desktop"]},
+    )
+
+    spec_path = Path(__file__).resolve().parents[1] / "evals" / "current_tab_google_sheets.yaml"
+
+    monkeypatch.setattr(eval_runtime, "get_computer_trajectory_store", lambda: store)
+    monkeypatch.setattr(eval_runtime, "get_memory_store", lambda: _StubMemoryStore([]))
+
+    result = eval_runtime.run_eval_spec(spec_path, limit=3)
+
+    assert result["success"] is True
+    assert result["slice"]["type"] == "long_running_vertical_slice"
+    assert result["runs_evaluated"] == 3
+    assert result["success_rate"] == 0.3333
+    assert result["failure_buckets"]["weak_evidence"] == 1
+    assert result["failure_buckets"]["wrong_surface"] == 1
+    assert result["failure_buckets"]["focus_mismatch"] == 0
+    assert result["failure_buckets"]["target_context_mismatch"] == 0
+    assert [item["trajectory_id"] for item in result["run_jobs"]] == [
+        weak_evidence_trajectory,
+        wrong_surface_trajectory,
+        success_trajectory,
+    ]
+    assert result["run_jobs"][0]["failure_type"] == "weak_evidence"
+    assert result["run_jobs"][0]["scheduler_queue"] == "waiting_for_approval"
+    assert result["run_jobs"][0]["recommended_repair_targets"][0] == (
+        "strengthen destination-bound verifier"
+    )
+    assert result["run_jobs"][1]["failure_type"] == "wrong_surface"
+    assert result["run_jobs"][1]["scheduler_queue"] == "retry_later"
+    assert result["run_jobs"][1]["recovery_decision"]["chosen_action"] == "switch_surface"
+    assert result["run_jobs"][1]["recommended_repair_targets"][0] == (
+        "rebind the task to the intended execution surface before acting"
+    )
+    assert result["run_jobs"][1]["checkpoint"]["trajectory_ids"] == [wrong_surface_trajectory]
+    assert result["run_jobs"][1]["checkpoint"]["replay_references"][0]["trajectory_id"] == (
+        wrong_surface_trajectory
+    )
+    assert result["run_jobs"][2]["trajectory_id"] == success_trajectory
+    assert result["run_jobs"][2]["job_run"]["status"] == "completed"
+    assert result["durable_execution"]["scheduler_state"]["waiting_for_approval_queue"][0]["node_id"] == (
+        "current_tab_google_sheets_phase0/run-1"
+    )
+    assert result["durable_execution"]["scheduler_state"]["retry_later_queue"][0]["node_id"] == (
+        "current_tab_google_sheets_phase0/run-2"
+    )
+    assert result["durable_execution"]["scheduler_state"]["completed_queue"][0]["node_id"] == (
+        "current_tab_google_sheets_phase0/run-3"
+    )
+    assert result["durable_execution"]["resume_state"]["reason"] == "awaiting_approval"
 
 
 def test_eval_cli_run_and_report_use_persisted_task(tmp_path, monkeypatch):

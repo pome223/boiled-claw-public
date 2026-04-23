@@ -180,6 +180,10 @@ def _recommended_repair_targets(failure_type: str | None) -> list[str]:
             "record and verify frontmost app before action",
             "strengthen current-tab and desktop focus recovery",
         ],
+        "wrong_surface": [
+            "rebind the task to the intended execution surface before acting",
+            "record preferred surface and enforce surface switch before retry",
+        ],
         "target_context_mismatch": [
             "bind action to destination URL or window before typing",
             "strengthen current-tab context preservation and replay checks",
@@ -195,6 +199,7 @@ def _candidate_promotion_artifacts(failure_type: str | None) -> list[str]:
     mapping = {
         "weak_evidence": ["approved_improvement_memory", "approved_skill"],
         "focus_mismatch": ["approved_improvement_memory", "approved_skill"],
+        "wrong_surface": ["approved_improvement_memory", "approved_skill"],
         "target_context_mismatch": ["approved_improvement_memory", "capability_patch"],
         "unknown": ["approved_improvement_memory"],
     }
@@ -374,6 +379,17 @@ def _default_recovery_policies() -> dict[str, RecoveryPolicy]:
             failure_type="focus_mismatch",
             allowed_actions=[
                 RecoveryActionType.RESELECT_SURFACE,
+                RecoveryActionType.RETRY_WITH_BACKOFF,
+            ],
+            retry_limit=2,
+            escalation_condition="retry_limit_exhausted",
+            budget_impact=RecoveryBudgetImpact(tool_calls=1),
+            next_scheduler_queue=SchedulerQueueKind.RETRY_LATER,
+        ),
+        "wrong_surface": RecoveryPolicy(
+            failure_type="wrong_surface",
+            allowed_actions=[
+                RecoveryActionType.SWITCH_SURFACE,
                 RecoveryActionType.RETRY_WITH_BACKOFF,
             ],
             retry_limit=2,

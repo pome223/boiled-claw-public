@@ -53,6 +53,12 @@ eval-derived substrate artifact として出している。
 ここでもまだ background worker や distributed scheduler を実装するのではなく、
 後続の runtime が読む durable contract を先に確定させる。
 
+その次の #92 / #93 は、この contract を current-tab Google Sheets に縦に通す slice として扱う。
+`evals/current_tab_google_sheets.yaml` は `long_running_vertical_slice` として複数 bounded job を評価し、
+各 `run_jobs[]` が `trajectory_id / replay_reference / checkpoint / job_run / verifier_verdict` を持つ。
+Control UI 側では `/tasks/{id}` の persisted report をそのまま描画し、
+task graph / scheduler queues / approval waits / latest checkpoints / budget exhaustion を operator が確認できるようにする。
+
 最小の first slice は、current-tab Google Sheets task を起点に
 `trajectory -> normalized failure_type -> replay-linked report -> canary -> approved_improvement_memory reuse`
 を通す形がよい。

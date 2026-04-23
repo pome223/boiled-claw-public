@@ -1,6 +1,6 @@
 id: current_tab_google_sheets_phase0
-goal: "Use the current browser session to write into Google Sheets without losing context."
-slice_type: bounded_long_running
+goal: "Use the current browser session to write structured research notes into Google Sheets without losing context."
+slice_type: long_running_vertical_slice
 substrate:
   - task_store
   - trajectory_store
@@ -37,6 +37,9 @@ surfaces:
   - browser
 success_criteria:
   - destination_url_contains: "docs.google.com/spreadsheets"
+  - sheet_contains_any:
+      - "Source"
+      - "Summary"
   - evidence_required: "destination_bound_text_or_screenshot"
   - write_target: "sheet_cell"
 runs: 5
@@ -50,6 +53,7 @@ budget:
 failure_buckets:
   - weak_evidence
   - focus_mismatch
+  - wrong_surface
   - target_context_mismatch
 match:
   action: fill

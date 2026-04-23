@@ -86,6 +86,19 @@ distributed scheduler, worker fleet, or live background daemon yet. The point
 is to make queueing / retry / approval / blocked-state contracts durable before
 the worker implementation lands.
 
+The next vertical slice after that is #92 and #93:
+
+```text
+current-tab Google Sheets long-running eval
+  -> multiple bounded run_jobs
+  -> trajectory/checkpoint/replay refs per run
+  -> scheduler / approval / budget state in the persisted report
+  -> Control UI task detail for operator inspection
+```
+
+This keeps the same rule intact: the UI is reading eval-derived durable
+artifacts first, not claiming that a live scheduler daemon already exists.
+
 ## Priority Order
 
 | Priority | Theme | Why now | Primary output |

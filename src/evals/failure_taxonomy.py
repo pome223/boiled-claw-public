@@ -16,6 +16,7 @@ from typing import Any
 PHASE0_FAILURE_BUCKETS = (
     "weak_evidence",
     "focus_mismatch",
+    "wrong_surface",
     "target_context_mismatch",
     "unknown",
 )
@@ -40,7 +41,7 @@ def _failed_checks(verification: dict[str, Any] | None) -> dict[str, dict[str, A
     return failed
 
 
-def _classify_from_verification(trajectory: dict[str, Any]) -> str | None:
+def _classify_from_verification_checks(trajectory: dict[str, Any]) -> str | None:
     verification = trajectory.get("verification")
     if not isinstance(verification, dict):
         return None
@@ -50,13 +51,19 @@ def _classify_from_verification(trajectory: dict[str, Any]) -> str | None:
         return "focus_mismatch"
     if "url_contains" in failed or "window_title_contains" in failed:
         return "target_context_mismatch"
+    if "surface" in failed or "final_surface" in failed:
+        return "wrong_surface"
+    return None
 
-    if "text_contains" in failed or "text_not_contains" in failed:
-        return "weak_evidence"
 
-    status = _normalized_text(verification.get("status"))
-    if status in {"fail", "partial_pass"}:
-        return "weak_evidence"
+def _classify_from_surface(trajectory: dict[str, Any]) -> str | None:
+    observation = trajectory.get("observation")
+    if not isinstance(observation, dict):
+        observation = {}
+    preferred_surface = _normalized_text(observation.get("preferred_surface"))
+    final_surface = _normalized_text(trajectory.get("final_surface"))
+    if preferred_surface and final_surface and preferred_surface != final_surface:
+        return "wrong_surface"
     return None
 
 
@@ -71,8 +78,33 @@ def _classify_from_attempts(trajectory: dict[str, Any]) -> str | None:
             continue
         if any(token in error for token in ("frontmost", "focus", "inactive")):
             return "focus_mismatch"
+        if any(
+            token in error
+            for token in (
+                "wrong surface",
+                "surface mismatch",
+                "preferred surface",
+                "final surface",
+            )
+        ):
+            return "wrong_surface"
         if any(token in error for token in ("tab", "window", "url")):
             return "target_context_mismatch"
+    return None
+
+
+def _classify_from_verification_status(trajectory: dict[str, Any]) -> str | None:
+    verification = trajectory.get("verification")
+    if not isinstance(verification, dict):
+        return None
+
+    failed = _failed_checks(verification)
+    if "text_contains" in failed or "text_not_contains" in failed:
+        return "weak_evidence"
+
+    status = _normalized_text(verification.get("status"))
+    if status in {"fail", "partial_pass"}:
+        return "weak_evidence"
     return None
 
 
@@ -81,8 +113,10 @@ def _classify_failure(trajectory: dict[str, Any]) -> str | None:
         return None
 
     return (
-        _classify_from_verification(trajectory)
+        _classify_from_verification_checks(trajectory)
+        or _classify_from_surface(trajectory)
         or _classify_from_attempts(trajectory)
+        or _classify_from_verification_status(trajectory)
         or "unknown"
     )
 
