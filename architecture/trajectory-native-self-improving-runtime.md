@@ -70,6 +70,22 @@ In Phase 0, the emitted `task_graph`, `checkpoint`, `job_run`, and
 `verifier_verdict` artifacts should be read as eval-derived substrate contracts,
 not as proof that a live scheduler-backed runtime is already in place.
 
+The next narrow substrate slice after that is #86, #88, #89, and #90:
+
+```text
+task_graph
+  -> scheduler queue placement
+  -> recovery policy / recovery decision
+  -> guardrail budget state
+  -> human escalation record
+  -> resume state
+```
+
+These are still Phase 0 eval-derived orchestration artifacts. They are not a
+distributed scheduler, worker fleet, or live background daemon yet. The point
+is to make queueing / retry / approval / blocked-state contracts durable before
+the worker implementation lands.
+
 ## Priority Order
 
 | Priority | Theme | Why now | Primary output |

@@ -143,16 +143,23 @@ match:
     assert result["reports"][0]["replay_reference"]["trajectory_id"] == trajectory_id
     assert result["reports"][0]["reuse_suggestions"][0]["memory_id"] == 7
     assert result["reports"][0]["task_node"]["status"] == "failed"
-    assert result["reports"][0]["checkpoint"]["next_actionable_task_node_id"] == (
-        "current_tab_google_sheets_phase0/run-1"
-    )
+    assert result["reports"][0]["scheduler_queue"] == "retry_later"
+    assert result["reports"][0]["recovery_policy"]["failure_type"] == "target_context_mismatch"
+    assert result["reports"][0]["recovery_decision"]["chosen_action"] == "switch_surface"
+    assert result["reports"][0]["checkpoint"]["next_actionable_task_node_id"] is None
+    assert result["reports"][0]["budget_state"]["policy"]["max_same_failure_retries"] == 3
     assert result["reports"][0]["job_run"]["status"] == "failed"
+    assert result["reports"][0]["job_run"]["scheduler_queue"] == "retry_later"
     assert result["durable_execution"]["task_graph"]["nodes"][0]["node_id"] == (
         "current_tab_google_sheets_phase0/run-1"
     )
-    assert result["durable_execution"]["resume_state"]["next_actionable_task_node_id"] == (
+    assert result["durable_execution"]["scheduler_state"]["retry_later_queue"][0]["node_id"] == (
         "current_tab_google_sheets_phase0/run-1"
     )
+    assert "tool_timeout" in result["durable_execution"]["recovery_policies"]
+    assert result["durable_execution"]["resume_state"]["scheduler_queue_counts"]["retry_later"] == 1
+    assert result["durable_execution"]["resume_state"]["next_actionable_task_node_id"] is None
+    assert result["durable_execution"]["resume_state"]["reason"] == "awaiting_unblock_or_human_input"
 
     persisted = store.get(trajectory_id)
     assert persisted["normalized_failure_type"] == "target_context_mismatch"
@@ -225,11 +232,22 @@ match:
     assert result["reports"][0]["failure_type"] == "weak_evidence"
     assert result["reports"][0]["verifier_verdict"]["verdict"] == "uncertain"
     assert result["reports"][0]["verifier_verdict"]["confidence_source"] == "synthetic_default"
+    assert result["reports"][0]["scheduler_queue"] == "waiting_for_approval"
+    assert result["reports"][0]["recovery_decision"]["chosen_action"] == "request_human_approval"
+    assert result["reports"][0]["escalation_record"]["status"] == "waiting_for_approval"
     assert result["reports"][0]["task_node"]["status"] == "blocked"
     assert result["reports"][0]["checkpoint"]["blocked_task_node_ids"] == [
         "current_tab_google_sheets_phase0/run-1"
     ]
+    assert result["reports"][0]["checkpoint"]["pending_approval_ids"] == [
+        "approval:current_tab_google_sheets_phase0/run-1"
+    ]
+    assert result["durable_execution"]["scheduler_state"]["waiting_for_approval_queue"][0]["node_id"] == (
+        "current_tab_google_sheets_phase0/run-1"
+    )
+    assert result["durable_execution"]["resume_state"]["scheduler_queue_counts"]["waiting_for_approval"] == 1
     assert result["durable_execution"]["resume_state"]["next_actionable_task_node_id"] is None
+    assert result["durable_execution"]["resume_state"]["reason"] == "awaiting_approval"
 
 
 def test_override_trajectory_failure_type_applies_and_clears_operator_override(tmp_path):
@@ -365,6 +383,90 @@ match:
     assert "target_context_mismatch" in report["comparison"]["improved_buckets"]
 
 
+def test_run_eval_spec_blocks_when_guardrail_budget_is_exhausted(tmp_path, monkeypatch):
+    store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
+    first_trajectory = store.record(
+        action="fill",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={
+            "status": "fail",
+            "success": False,
+            "checks": [
+                {
+                    "name": "url_contains",
+                    "expected": "docs.google.com/spreadsheets",
+                    "actual": "https://example.com",
+                    "passed": False,
+                }
+            ],
+        },
+        request={"verify": {"url_contains": "docs.google.com/spreadsheets"}},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+    second_trajectory = store.record(
+        action="fill",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={
+            "status": "fail",
+            "success": False,
+            "checks": [
+                {
+                    "name": "url_contains",
+                    "expected": "docs.google.com/spreadsheets",
+                    "actual": "https://example.com/same-failure",
+                    "passed": False,
+                }
+            ],
+        },
+        request={"verify": {"url_contains": "docs.google.com/spreadsheets"}},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    spec_path = tmp_path / "current_tab_google_sheets.yaml"
+    spec_path.write_text(
+        """
+id: current_tab_google_sheets_phase0
+goal: "Write into Google Sheets"
+runs: 2
+budget:
+  max_same_failure_retries: 1
+match:
+  action: fill
+  final_surface_any:
+    - current_tab
+  status_any:
+    - failed
+  request:
+    verify:
+      url_contains: "docs.google.com/spreadsheets"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(eval_runtime, "get_computer_trajectory_store", lambda: store)
+    monkeypatch.setattr(eval_runtime, "get_memory_store", lambda: _StubMemoryStore([]))
+
+    result = eval_runtime.run_eval_spec(spec_path)
+
+    assert result["success"] is True
+    assert [item["trajectory_id"] for item in result["reports"]] == [second_trajectory, first_trajectory]
+    assert result["reports"][0]["scheduler_queue"] == "retry_later"
+    assert result["reports"][0]["budget_state"]["budget_exhausted"] is False
+    assert result["reports"][1]["scheduler_queue"] == "blocked"
+    assert result["reports"][1]["recovery_decision"]["budget_exhausted"] is True
+    assert result["reports"][1]["recovery_decision"]["budget_exhausted_reasons"] == [
+        "max_same_failure_retries_exhausted"
+    ]
+    assert result["durable_execution"]["scheduler_state"]["blocked_queue"][0]["node_id"] == (
+        "current_tab_google_sheets_phase0/run-2"
+    )
+
+
 def test_eval_cli_run_and_report_use_persisted_task(tmp_path, monkeypatch):
     store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
     store.record(
@@ -498,16 +600,29 @@ match:
     assert run_payload["success"] is True
     assert run_payload["run_jobs"][0]["verifier_verdict"]["verdict"] == "uncertain"
     assert run_payload["run_jobs"][0]["verifier_verdict"]["confidence_source"] == "synthetic_default"
+    assert run_payload["run_jobs"][0]["scheduler_queue"] == "waiting_for_approval"
+    assert run_payload["run_jobs"][0]["recovery_decision"]["chosen_action"] == "request_human_approval"
+    assert run_payload["run_jobs"][0]["budget_state"]["pending_approvals_count"] == 1
     assert run_payload["run_jobs"][0]["task_node"]["status"] == "blocked"
     assert run_payload["run_jobs"][0]["job_run"]["status"] == "blocked"
+    assert run_payload["run_jobs"][0]["job_run"]["scheduler_queue"] == "waiting_for_approval"
     assert run_payload["run_jobs"][0]["checkpoint"]["blocked_task_node_ids"] == [
         "current_tab_google_sheets_phase0/run-1"
+    ]
+    assert run_payload["run_jobs"][0]["checkpoint"]["pending_approval_ids"] == [
+        "approval:current_tab_google_sheets_phase0/run-1"
     ]
     assert run_payload["durable_execution"]["task_graph"]["graph_id"] == (
         "current_tab_google_sheets_phase0/task-graph"
     )
+    assert run_payload["durable_execution"]["scheduler_state"]["waiting_for_approval_queue"][0]["node_id"] == (
+        "current_tab_google_sheets_phase0/run-1"
+    )
+    assert run_payload["durable_execution"]["escalations"][0]["approval_request_id"] == (
+        "approval:current_tab_google_sheets_phase0/run-1"
+    )
     assert run_payload["durable_execution"]["resume_state"]["reason"] == (
-        "awaiting_unblock_or_human_input"
+        "awaiting_approval"
     )
 
     report = runner.invoke(
@@ -523,8 +638,9 @@ match:
     assert report_payload["report"]["run_jobs"][0]["checkpoint"]["checkpoint_id"] == (
         "current_tab_google_sheets_phase0/run-1/checkpoint"
     )
+    assert report_payload["report"]["run_jobs"][0]["scheduler_queue"] == "waiting_for_approval"
     assert report_payload["report"]["durable_execution"]["resume_state"]["reason"] == (
-        "awaiting_unblock_or_human_input"
+        "awaiting_approval"
     )
 
 

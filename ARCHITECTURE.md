@@ -41,6 +41,18 @@ resume/retry の材料を先に揃える。
 Phase 0 ではこれらは live scheduler state ではなく、eval run から組み立てられる
 eval-derived substrate artifact として出している。
 
+その次の slice が #86 / #88 / #89 / #90 で、
+同じ eval-derived substrate の上に
+
+- scheduler queue (`ready / blocked / waiting_for_approval / retry_later / periodic_check / completed`)
+- failure-type driven recovery policy / recovery decision
+- guardrail budget state
+- durable human escalation record
+
+を乗せること。
+ここでもまだ background worker や distributed scheduler を実装するのではなく、
+後続の runtime が読む durable contract を先に確定させる。
+
 最小の first slice は、current-tab Google Sheets task を起点に
 `trajectory -> normalized failure_type -> replay-linked report -> canary -> approved_improvement_memory reuse`
 を通す形がよい。
