@@ -31,6 +31,7 @@ from pathlib import Path
 from src.config.settings import get_settings
 from src.agents.root_agent import root_agent
 from src.agents.sub_agents import SUB_AGENTS
+from src.control_loop.live_failure_taxonomy import classify_control_loop_failure
 from src.control_loop.root_workflow import ControlLoop, ExecutionResult
 from src.gateway.routing_agent import routing_agent
 from src.memory_lifecycle.adk_memory_service import get_promoted_memory_service
@@ -77,6 +78,7 @@ from src.gateway.ws_handler import build_websocket_router
 from src.runtime.tool_events import set_tool_event_notifier
 from src.runtime.session_service import create_session_service, describe_session_backend
 from src.runtime.state_keys import StateKeys
+from src.runtime.task_keywords import SPREADSHEET_KEYWORDS, prefers_isolated_browser_for_goal
 from src.gateway.transcript import get_transcript_store
 from src.cron.scheduler import get_scheduler
 from src.runtime.task_store import get_task_store
@@ -143,6 +145,14 @@ _USER_BROWSER_REQUIRED_CAPABILITIES = {
     "desktop.control.click",
     "desktop.control.type",
 }
+_CONTROL_LOOP_FOLLOWUP_MARKERS = (
+    "記載して",
+    "入力して",
+    "転記して",
+    "スプレッドシートに",
+    "sheetに",
+    "spreadsheetに",
+)
 _CURRENT_BROWSER_CONTROL_BASE_CONSTRAINTS = [
     "Operate only on the currently visible browser/tab/window.",
     "Do not launch a new browser application or open a managed browser for this task.",
@@ -158,6 +168,11 @@ _CURRENT_BROWSER_PRESERVE_CONTROL_UI_TAB_CONSTRAINT = (
     "open a new tab in the same browser window for browsing or search. Otherwise "
     "stay on the current tab."
 )
+_ISOLATED_BROWSER_TEXT_ENTRY_CONSTRAINTS = [
+    "For current-browser visible text-entry or form-filling work, use an isolated browser or managed browser page instead of the user's existing browser tabs or forms.",
+    "Do not interact with pre-existing browser tabs, windows, or form fields owned by the user.",
+    "Verify the final URL/title/content inside that isolated browser session before marking the task complete.",
+]
 
 
 @dataclass
@@ -199,10 +214,18 @@ class ConnectionManager:
         if user_id:
             self._session_users[session_id] = user_id
 
-    def disconnect(self, session_id: str) -> None:
+    def disconnect(
+        self,
+        session_id: str,
+        *,
+        preserve_pending: bool = False,
+        preserve_user: bool = False,
+    ) -> None:
         self.active_connections.pop(session_id, None)
-        self._session_users.pop(session_id, None)
-        self._pending_events.pop(session_id, None)
+        if not preserve_user:
+            self._session_users.pop(session_id, None)
+        if not preserve_pending:
+            self._pending_events.pop(session_id, None)
 
     def get_user_id(self, session_id: str) -> Optional[str]:
         return self._session_users.get(session_id)
@@ -608,6 +631,8 @@ class GatewayServer:
         self,
         message: str,
     ) -> str | None:
+        if prefers_isolated_browser_for_goal(message):
+            return None
         if not targets_user_browser(message):
             return None
 
@@ -1498,6 +1523,69 @@ class GatewayServer:
             metadata=metadata,
         )
 
+    def _find_control_loop_task_for_approval(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+    ) -> str | None:
+        task = self._find_control_loop_task_record_for_approval(
+            session_id=session_id,
+            request_id=request_id,
+        )
+        if not isinstance(task, dict):
+            return None
+        task_id = str(task.get("task_id") or "").strip()
+        return task_id or None
+
+    def _find_control_loop_task_owner_for_approval(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+    ) -> str | None:
+        task = self._find_control_loop_task_record_for_approval(
+            session_id=session_id,
+            request_id=request_id,
+        )
+        if not isinstance(task, dict):
+            return None
+        owner_user_id = str(task.get("owner_user_id") or "").strip()
+        return owner_user_id or None
+
+    def _find_control_loop_task_record_for_approval(
+        self,
+        *,
+        session_id: str,
+        request_id: str,
+    ) -> dict[str, Any] | None:
+        request_id = str(request_id or "").strip()
+        if not session_id or not request_id:
+            return None
+        payload = self.task_store.query(
+            owner_session_id=session_id,
+            kind="control_loop",
+            status="open",
+            page=1,
+            page_size=100,
+        )
+        for task in payload.get("tasks") or []:
+            if not isinstance(task, dict):
+                continue
+            artifacts = task.get("artifacts") or {}
+            artifacts = artifacts if isinstance(artifacts, dict) else {}
+            result = artifacts.get("result") or {}
+            result = result if isinstance(result, dict) else {}
+            resume_context = artifacts.get("resume_context") or {}
+            resume_context = resume_context if isinstance(resume_context, dict) else {}
+            candidates = [
+                ((result.get("approval_request") or {}) if isinstance(result.get("approval_request"), dict) else {}).get("request_id"),
+                ((resume_context.get("approval_request") or {}) if isinstance(resume_context.get("approval_request"), dict) else {}).get("request_id"),
+            ]
+            if any(str(candidate or "").strip() == request_id for candidate in candidates):
+                return task
+        return None
+
     @staticmethod
     def _task_timeline_sort_key(entry: dict[str, Any]) -> tuple[float, str]:
         return (float(entry.get("timestamp") or 0.0), str(entry.get("timeline_id") or ""))
@@ -1955,6 +2043,7 @@ class GatewayServer:
                 goal=goal,
                 constraints=constraints,
                 source="http",
+                reset_if_terminal=True,
             )
             self.transcript.append(
                 session.id,
@@ -2015,12 +2104,37 @@ class GatewayServer:
                 user_id=user_id,
                 session_id=session_id,
             )
+            pending_task_id = self._find_control_loop_task_for_approval(
+                session_id=session_id,
+                request_id=request_id,
+            )
+            approval_owner_user_id = self._find_control_loop_task_owner_for_approval(
+                session_id=session_id,
+                request_id=request_id,
+            )
             resolved = await self.control_loop.resolve_human_approval(
                 user_id=user_id,
                 session_id=session_id,
                 approved=approved,
                 request_id=request_id,
             )
+            if (
+                not pending
+                and not resolved
+                and approval_owner_user_id
+                and approval_owner_user_id != user_id
+            ):
+                user_id = approval_owner_user_id
+                pending = await self.control_loop.get_pending_approval(
+                    user_id=user_id,
+                    session_id=session_id,
+                )
+                resolved = await self.control_loop.resolve_human_approval(
+                    user_id=user_id,
+                    session_id=session_id,
+                    approved=approved,
+                    request_id=request_id,
+                )
             if not resolved:
                 raise HTTPException(status_code=404, detail="approval request not found")
 
@@ -2033,20 +2147,15 @@ class GatewayServer:
                     )
                     or pending.get("goal", "")
                 )
-                resumed_result = await self._run_control_loop_http(
+                await self._start_control_loop_run(
                     user_id=user_id,
                     session_id=session_id,
                     goal=resume_goal,
                     constraints=normalize_constraints(
                         (pending.get("plan") or {}).get("constraints")
                     ),
-                    source="http",
+                    task_id=pending_task_id,
                 )
-                if resumed_result.metadata.get("needs_human"):
-                    await self._emit_control_approval_request(
-                        session_id,
-                        resumed_result.metadata.get("approval_request"),
-                    )
 
             response = {
                 "ok": True,
@@ -2054,16 +2163,12 @@ class GatewayServer:
                 "request_id": request_id,
                 "approved": approved,
             }
-            if resumed_result is not None:
+            if approved and pending:
                 response["result"] = {
-                    "ok": resumed_result.success,
-                    "response": resumed_result.final_text,
-                    "plan_id": resumed_result.plan_id,
-                    "verification_report_id": resumed_result.verification_report_id,
-                    "repair_count": resumed_result.repair_count,
-                    "needs_human": bool(resumed_result.metadata.get("needs_human")),
-                    "approval_request": resumed_result.metadata.get("approval_request"),
-                    "promoted_memory_ids": resumed_result.promoted_memory_ids,
+                    "ok": True,
+                    "response": "Approval accepted. Control loop resumed in background.",
+                    "task_id": pending_task_id,
+                    "needs_human": False,
                 }
             return response
 
@@ -2411,10 +2516,14 @@ class GatewayServer:
                 await self.manager.send_json(session_id, ev_chat_done(partial, request_id))
                 return
 
+            effective_message = self._resolve_control_loop_goal(
+                session_id=session_id,
+                goal=message,
+            )
             decision = await self._select_route_for_message(
                 session_id=session_id,
                 user_id=user_id,
-                message=message,
+                message=effective_message,
                 source="chat",
             )
             if decision.target == "control_loop":
@@ -2428,9 +2537,10 @@ class GatewayServer:
                 await self._control_loop_task(
                     session_id,
                     user_id,
-                    message,
+                    effective_message,
                     [],
                     request_id,
+                    reset_if_terminal=True,
                 )
                 return
 
@@ -2752,6 +2862,11 @@ class GatewayServer:
         preserve_control_ui_tab: bool,
     ) -> list[str]:
         effective_constraints = list(constraints)
+        if prefers_isolated_browser_for_goal(goal):
+            for item in _ISOLATED_BROWSER_TEXT_ENTRY_CONSTRAINTS:
+                if item not in effective_constraints:
+                    effective_constraints.append(item)
+            return effective_constraints
         if not targets_user_browser(goal):
             return effective_constraints
         for item in _CURRENT_BROWSER_CONTROL_BASE_CONSTRAINTS:
@@ -2780,6 +2895,59 @@ class GatewayServer:
                 _CURRENT_BROWSER_CONTROL_SAME_TAB_CONSTRAINT
             )
         return effective_constraints
+
+    @staticmethod
+    def _should_expand_control_loop_followup(message: str) -> bool:
+        normalized = str(message or "").strip().lower()
+        if not normalized or len(normalized) > 40:
+            return False
+        if any(marker in normalized for marker in _CONTROL_LOOP_FOLLOWUP_MARKERS):
+            return True
+        return any(keyword in normalized for keyword in SPREADSHEET_KEYWORDS)
+
+    def _latest_completed_control_loop_resume_context(
+        self,
+        *,
+        session_id: str,
+    ) -> dict[str, Any] | None:
+        payload = self.task_store.query(
+            owner_session_id=session_id,
+            kind="control_loop",
+            status="completed",
+            page=1,
+            page_size=10,
+        )
+        tasks = payload.get("tasks")
+        tasks = tasks if isinstance(tasks, list) else []
+        for task in tasks:
+            artifacts = task.get("artifacts")
+            artifacts = artifacts if isinstance(artifacts, dict) else {}
+            resume_context = artifacts.get("resume_context")
+            if isinstance(resume_context, dict) and str(resume_context.get("goal") or "").strip():
+                return resume_context
+        return None
+
+    def _resolve_control_loop_goal(
+        self,
+        *,
+        session_id: str,
+        goal: str,
+    ) -> str:
+        normalized_goal = str(goal or "").strip()
+        if not self._should_expand_control_loop_followup(normalized_goal):
+            return normalized_goal
+        resume_context = self._latest_completed_control_loop_resume_context(
+            session_id=session_id,
+        )
+        if not isinstance(resume_context, dict):
+            return normalized_goal
+        prior_goal = str(resume_context.get("goal") or "").strip()
+        if not prior_goal or prior_goal == normalized_goal:
+            return normalized_goal
+        return (
+            f"{prior_goal}\n\n"
+            f"Follow-up instruction: {normalized_goal}"
+        )
 
     # HTTP agent execution (no abort support)
     async def _run_agent_http(self, user_id: str, session_id: str, message: str) -> dict:
@@ -2820,10 +2988,14 @@ class GatewayServer:
                 "ok": bool(quote.get("ok")),
             }
 
+        effective_message = self._resolve_control_loop_goal(
+            session_id=session_id,
+            goal=message,
+        )
         decision = await self._select_route_for_message(
             session_id=session_id,
             user_id=user_id,
-            message=message,
+            message=effective_message,
             source="http",
         )
         if decision.target == "control_loop":
@@ -2837,9 +3009,10 @@ class GatewayServer:
             result = await self._run_control_loop_http(
                 user_id=user_id,
                 session_id=session_id,
-                goal=message,
+                goal=effective_message,
                 constraints=[],
                 source="http",
+                reset_if_terminal=True,
             )
             if result.metadata.get("needs_human"):
                 await self._emit_control_approval_request(
@@ -3150,6 +3323,20 @@ class GatewayServer:
         error_text = None
         if not result.success and not needs_human:
             error_text = "approval_expired" if approval_expired else (result.final_text or "control loop failed")
+        failure_classification = classify_control_loop_failure(
+            success=result.success,
+            needs_human=needs_human,
+            final_text=result.final_text,
+            verification_status=result.metadata.get("verification_status"),
+            verification_report=(
+                result.metadata.get("verification_report")
+                if isinstance(result.metadata.get("verification_report"), dict)
+                else None
+            ),
+            error=error_text,
+            existing_failure_type=result.metadata.get("normalized_failure_type"),
+        )
+        result.metadata.update(failure_classification)
         update_task_record(
             task_id,
             status="pending" if needs_human else ("completed" if result.success else "failed"),
@@ -3169,6 +3356,10 @@ class GatewayServer:
                     "repair_count": result.repair_count,
                     "promoted_memory_ids": result.promoted_memory_ids,
                     "approval_request": result.metadata.get("approval_request"),
+                    "preliminary_failure_type": failure_classification["preliminary_failure_type"],
+                    "normalized_failure_type": failure_classification["normalized_failure_type"],
+                    "classified_by": failure_classification["classified_by"],
+                    "operator_override": failure_classification["operator_override"],
                     **({"approval_expired": True} if approval_expired else {}),
                 },
                 "resume_context": {
@@ -3183,6 +3374,8 @@ class GatewayServer:
                 "source": source,
                 "request_id": request_id,
                 "needs_human": needs_human,
+                "normalized_failure_type": failure_classification["normalized_failure_type"],
+                "classified_by": failure_classification["classified_by"],
                 **(
                     {
                         "replay_from_step": str(initial_state.get(StateKeys.REPLAY_FROM_STEP) or "").strip(),
@@ -3304,6 +3497,10 @@ class GatewayServer:
                 user_id=user_id,
                 session_id=session_id,
             )
+            pending_control_task_id = self._find_control_loop_task_for_approval(
+                session_id=session_id,
+                request_id=request_id,
+            )
             control_loop_resolved = await self.control_loop.resolve_human_approval(
                 user_id=user_id,
                 session_id=session_id,
@@ -3325,6 +3522,7 @@ class GatewayServer:
                     constraints=normalize_constraints(
                         (pending_control_request.get("plan") or {}).get("constraints")
                     ),
+                    task_id=pending_control_task_id,
                 )
 
         target_session_id = result.session_id if result else session_id
