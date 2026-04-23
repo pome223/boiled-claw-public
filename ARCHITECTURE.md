@@ -72,8 +72,10 @@ current-tab inspection の結果と verifier report は `evidence_refs` / node a
 Control UI は eval-derived report だけでなく live `artifacts.durable_execution` も同じ task graph /
 scheduler / checkpoint / evidence surface として表示する。
 この live scheduler supervisor runtime は `control_supervisor` task 向けに active だが、
-まだ general multi-node mission scheduler ではない。将来の runtime scheduler では startup resume の pagination、
-複数 scheduler entry の priority / due ordering、typed abort condition enum を明示的に扱う。
+まだ general multi-node mission scheduler ではない。Startup resume は running supervisor task を page 全体で走査し、
+active handle 重複、stale handle、explicit stop の skip を task event として残す。
+将来の runtime scheduler では複数 scheduler entry の priority / due ordering、
+typed abort condition enum を明示的に扱う。
 
 その次の #94 / #95 / #96 / #97 は、physical AI 側も同じ contract-first で進める slice として扱う。
 ここで追加するのは live robotics runtime ではなく、simulation-first adapter が永続化する

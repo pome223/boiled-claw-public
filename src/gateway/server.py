@@ -512,12 +512,39 @@ class GatewayServer:
         scheduler.start()
         await scheduler.fire_system_event("startup")
         await self.control_supervisor.resume_open_supervisors(
-            self.task_store.list(
+            self._running_control_supervisor_tasks()
+        )
+
+    def _running_control_supervisor_tasks(
+        self,
+        *,
+        page_size: int = 100,
+    ) -> list[dict[str, Any]]:
+        page = 1
+        tasks: list[dict[str, Any]] = []
+        seen_task_ids: set[str] = set()
+        while True:
+            result = self.task_store.query(
                 kind="control_supervisor",
                 status="running",
-                limit=100,
+                page=page,
+                page_size=page_size,
             )
-        )
+            for task in result.get("tasks") or []:
+                task_id = str(task.get("task_id") or "").strip()
+                if not task_id or task_id in seen_task_ids:
+                    continue
+                seen_task_ids.add(task_id)
+                tasks.append(task)
+            pagination = (
+                result.get("pagination")
+                if isinstance(result.get("pagination"), dict)
+                else {}
+            )
+            if not pagination.get("has_more"):
+                break
+            page += 1
+        return tasks
 
     async def _shutdown_gateway(self) -> None:
         await self.control_supervisor.shutdown()

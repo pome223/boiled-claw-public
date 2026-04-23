@@ -570,13 +570,86 @@ class ControlLoopSupervisor:
                 resumed += 1
         return resumed
 
+    def _append_resume_event(
+        self,
+        task_id: str,
+        *,
+        event_type: str,
+        title: str,
+        reason: str,
+        status: str,
+        summary: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        payload = {
+            "summary": summary,
+            "reason": reason,
+        }
+        if metadata:
+            payload.update(metadata)
+        self._append_task_event_record(
+            task_id,
+            event_type=event_type,
+            status=status,
+            title=title,
+            payload=payload,
+        )
+
     async def resume_task(self, task: dict[str, Any]) -> bool:
         task_id = str(task.get("task_id") or "").strip()
-        if not task_id or task_id in self._handles:
+        if not task_id:
             return False
+        task_status = str(task.get("status") or "unknown")
+
+        handle = self._handles.get(task_id)
+        if handle is not None:
+            if not handle.task.done():
+                self._append_resume_event(
+                    task_id,
+                    event_type="supervisor_resume_duplicate_skipped",
+                    status=task_status,
+                    title="Supervisor resume skipped",
+                    reason="active_handle_exists",
+                    summary=(
+                        "Skipped startup resume because this supervisor already "
+                        "has an active live handle."
+                    ),
+                )
+                return False
+            self._handles.pop(task_id, None)
+            self._append_resume_event(
+                task_id,
+                event_type="supervisor_resume_stale_handle",
+                status=task_status,
+                title="Supervisor stale handle cleared",
+                reason="stale_handle_done",
+                summary=(
+                    "Cleared a completed stale supervisor handle before retrying "
+                    "startup resume."
+                ),
+                metadata={"handle_task_cancelled": handle.task.cancelled()},
+            )
+
         if str(task.get("kind") or "") != "control_supervisor":
+            self._append_resume_event(
+                task_id,
+                event_type="supervisor_resume_skipped",
+                status=task_status,
+                title="Supervisor resume skipped",
+                reason="wrong_kind",
+                summary="Skipped startup resume because the task is not a control supervisor.",
+                metadata={"kind": str(task.get("kind") or "")},
+            )
             return False
-        if str(task.get("status") or "") != "running":
+        if task_status != "running":
+            self._append_resume_event(
+                task_id,
+                event_type="supervisor_resume_skipped",
+                status=task_status,
+                title="Supervisor resume skipped",
+                reason="not_running",
+                summary="Skipped startup resume because the task is not running.",
+            )
             return False
 
         artifacts = task.get("artifacts") if isinstance(task.get("artifacts"), dict) else {}
@@ -584,6 +657,17 @@ class ControlLoopSupervisor:
         supervisor = artifacts.get("supervisor") if isinstance(artifacts.get("supervisor"), dict) else {}
         progress = artifacts.get("progress") if isinstance(artifacts.get("progress"), dict) else {}
         if progress.get("stop_requested"):
+            self._append_resume_event(
+                task_id,
+                event_type="supervisor_resume_skipped",
+                status=task_status,
+                title="Supervisor resume skipped",
+                reason="explicit_stop_requested",
+                summary=(
+                    "Skipped startup resume because this supervisor was explicitly "
+                    "stopped by an operator."
+                ),
+            )
             return False
 
         contract_payload = artifacts.get("mission_contract")
