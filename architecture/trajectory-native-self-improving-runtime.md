@@ -53,6 +53,23 @@ That distinction matters for scope. The goal here is not to ship a full task
 graph / checkpoint / budgeted workflow engine in one step. The goal is to make
 existing durable artifacts feed a measurable self-improvement loop.
 
+The next minimal substrate slice after PR #83 is therefore:
+
+```text
+goal
+  -> durable task_graph
+  -> bounded job
+  -> verifier verdict (pass | fail | uncertain)
+  -> checkpoint
+  -> resume state
+```
+
+This is enough to support #84, #85, and #87 without pulling scheduler policy,
+budget enforcement, or human escalation into the same implementation step.
+In Phase 0, the emitted `task_graph`, `checkpoint`, `job_run`, and
+`verifier_verdict` artifacts should be read as eval-derived substrate contracts,
+not as proof that a live scheduler-backed runtime is already in place.
+
 ## Priority Order
 
 | Priority | Theme | Why now | Primary output |
@@ -309,7 +326,9 @@ Concretely:
 - add one eval spec: `evals/current_tab_google_sheets.yaml`
 - ship the smallest viable `boiled-claw eval run`
 - emit a replay-linked report from one run or a tiny repeated-run batch
-- expose `run_jobs` entries with `trajectory_id`, `verifier_result`, `failure_type`, `recommended_repair_targets`, `candidate_promotion_artifacts`, and `replay_reference`
+- expose top-level `durable_execution.task_graph` and `durable_execution.resume_state`
+- expose `run_jobs` entries with `trajectory_id`, `verifier_result`, `verifier_verdict`, `failure_type`, `recommended_repair_targets`, `candidate_promotion_artifacts`, `replay_reference`, `checkpoint`, and `job_run`
+- keep `unsafe` reserved for future physical verifier integration rather than claiming it is produced by the browser-first Phase 0 slice
 - start with only three failure buckets: `weak_evidence`, `focus_mismatch`, `target_context_mismatch`
 - promote only to `approved_improvement_memory` first, not the full artifact matrix
 

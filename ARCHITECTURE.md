@@ -33,6 +33,14 @@ boiled-claw は、OpenClaw の control plane / execution plane separation を Py
 PR #83 の主役は workflow engine の完成ではなく、それらの durable artifact を
 `trajectory -> eval -> failure classification -> promotion -> reuse` に接続すること。
 
+この次段の substrate 実装は #84 / #85 / #87 で、
+goal を durable `task_graph` に落とし、各 bounded job が `checkpoint` と
+durable verifier verdict (`pass | fail | uncertain`) を残せるようにすること。
+ここでも scheduler や full workflow engine までは広げず、persistent schema と
+resume/retry の材料を先に揃える。
+Phase 0 ではこれらは live scheduler state ではなく、eval run から組み立てられる
+eval-derived substrate artifact として出している。
+
 最小の first slice は、current-tab Google Sheets task を起点に
 `trajectory -> normalized failure_type -> replay-linked report -> canary -> approved_improvement_memory reuse`
 を通す形がよい。

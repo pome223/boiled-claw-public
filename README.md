@@ -119,6 +119,8 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 The current tree already ships a first slice of all of these layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state. The next step is to connect them into one measurable promotion loop: `trajectory -> eval -> repair -> canary -> benchmark -> approval -> promotion -> reuse`.
 The minimum first slice for that loop is a current-tab Google Sheets eval that emits a normalized `failure_type`, produces a replay-linked report, and proves reuse through `approved_improvement_memory`.
 That slice should be read as a **bounded long-running slice** on top of boiled-claw's existing durable-execution substrate: task objects, replay/resume artifacts, approval queues, and scheduler-driven orchestration are the base layer, while PR #83 tightens the self-improvement spine that consumes those artifacts.
+The next substrate slice for #84, #85, and #87 is now explicit too: each eval run can be represented as a durable `task_graph`, each bounded job can emit a `checkpoint` with resume state, and each completed job attaches a durable verifier verdict of `pass`, `fail`, or `uncertain`.
+In Phase 0 these are **eval-derived substrate artifacts**, not live scheduler-backed runtime state yet. They make the contract explicit now, so later scheduler / recovery work can consume the same shapes without inventing a new surface.
 
 The Phase 0 CLI is now present in the repo:
 
@@ -129,14 +131,23 @@ boiled-claw eval report --task-id <current> --compare-to-task-id <baseline>
 boiled-claw eval classify --trajectory-id 42 --failure-type focus_mismatch
 ```
 
-Phase 0 eval reports now surface one `run_jobs[]` record per matched trajectory. Each job is expected to expose:
+Phase 0 eval reports now surface:
+
+- top-level `durable_execution.task_graph`
+- top-level `durable_execution.resume_state`
+- one `run_jobs[]` record per matched trajectory
+
+Each `run_jobs[]` entry is expected to expose:
 
 - `trajectory_id`
 - `verifier_result`
+- `verifier_verdict`
 - `failure_type`
 - `recommended_repair_targets`
 - `candidate_promotion_artifacts`
 - `replay_reference`
+- `checkpoint`
+- `job_run`
 - `reuse_suggestions`
 
 ## The Bet
