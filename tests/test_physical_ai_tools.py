@@ -4,6 +4,7 @@ import pytest
 
 from src.computer_use.trajectory_store import ComputerTrajectoryStore
 from src.physical_ai import validation_store as validation_store_module
+from src.physical_ai.runtime_schema import PhysicalVerifierVerdictValue, SafetyGovernorDecisionValue
 from src.physical_ai.validation_store import reset_physical_ai_validation_store
 from src.runtime.task_store import get_task_store
 from src.tools import physical_ai
@@ -59,6 +60,9 @@ async def test_submit_simulation_records_validated_run(monkeypatch):
     assert result["success"] is True
     assert result["validated"] is True
     assert result["run_id"] == "run-1"
+    assert result["mission_contract"]["objective"]["type"] == "simulation_validation"
+    assert result["verifier_result"]["verdict"] == PhysicalVerifierVerdictValue.PASS.value
+    assert result["telemetry_health"]["safety"] == "nominal"
 
 
 @pytest.mark.asyncio
@@ -79,6 +83,9 @@ async def test_validation_status_returns_persisted_run():
     assert result["success"] is True
     assert result["validated"] is True
     assert result["validation"]["adapter"] == "isaac_sim"
+    assert result["mission_contract"] == {}
+    assert result["telemetry_health"] == {}
+    assert result["verifier_result"] == {}
 
 
 @pytest.mark.asyncio
@@ -129,6 +136,7 @@ async def test_validation_status_refreshes_pending_run(monkeypatch, tmp_path):
     assert result["validated"] is True
     assert result["status"] == "validated"
     assert result["refreshed"] is True
+    assert result["verifier_result"]["verdict"] == PhysicalVerifierVerdictValue.PASS.value
 
 
 @pytest.mark.asyncio
@@ -162,6 +170,7 @@ async def test_submit_simulation_does_not_trust_ready_status(monkeypatch):
 
     assert result["success"] is True
     assert result["validated"] is False
+    assert result["verifier_result"]["verdict"] == PhysicalVerifierVerdictValue.UNCERTAIN.value
 
 
 @pytest.mark.asyncio
@@ -177,6 +186,8 @@ async def test_build_ros2_action_returns_action_topics():
     assert result["success"] is True
     assert result["ros2_action"]["topics"]["send_goal"].endswith("/_action/send_goal")
     assert result["simulation_first_required"] is True
+    assert result["action_envelope"]["capability"] == "follow_joint_trajectory"
+    assert result["governor_decision"]["decision"] == SafetyGovernorDecisionValue.REQUIRE_OPERATOR.value
 
 
 @pytest.mark.asyncio
@@ -203,6 +214,7 @@ async def test_dispatch_rejects_unknown_or_unvalidated_runs():
     )
     assert invalid["success"] is False
     assert "Simulation-first validation has not passed" in invalid["error"]
+    assert invalid["governor_decision"]["decision"] == SafetyGovernorDecisionValue.REJECT.value
 
 
 @pytest.mark.asyncio
@@ -246,6 +258,7 @@ async def test_dispatch_allows_real_hardware_only_after_validated_run(monkeypatc
     )
     assert dry_run["success"] is True
     assert dry_run["dry_run"] is True
+    assert dry_run["governor_decision"]["decision"] == SafetyGovernorDecisionValue.ALLOW.value
 
     dispatched = await physical_ai.physical_ai_dispatch_ros2_action(
         validation_run_id="run-3",
@@ -255,6 +268,41 @@ async def test_dispatch_allows_real_hardware_only_after_validated_run(monkeypatc
     )
     assert dispatched["success"] is True
     assert dispatched["dispatched"] is True
+    assert dispatched["governor_decision"]["decision"] == SafetyGovernorDecisionValue.ALLOW.value
+
+
+@pytest.mark.asyncio
+async def test_dispatch_enters_safe_mode_for_unsafe_validation():
+    physical_ai._record_validation_run(
+        {
+            "run_id": "run-unsafe",
+            "validated": True,
+            "adapter": "isaac_sim",
+            "status": "unsafe",
+            "response": {"status": "unsafe", "validation_status": "unsafe"},
+            "telemetry_health": {"battery": "ok", "localization": "ok", "comms": "ok", "thermal": "ok", "actuators": "ok", "payload": "ok", "safety": "unsafe"},
+            "verifier_result": {
+                "verdict": "unsafe",
+                "telemetry_health": {"battery": "ok", "localization": "ok", "comms": "ok", "thermal": "ok", "actuators": "ok", "payload": "ok", "safety": "unsafe"},
+            },
+            "mission_contract": {
+                "contract_id": "mission_unsafe",
+                "objective": {"type": "inspection", "target": "site_A"},
+            },
+            "created_at": 0.0,
+        }
+    )
+
+    result = await physical_ai.physical_ai_dispatch_ros2_action(
+        validation_run_id="run-unsafe",
+        ros2_action_json=json.dumps({"namespace": "robot_1", "action_name": "foo"}),
+        allow_real_hardware=True,
+        dry_run=False,
+    )
+
+    assert result["success"] is False
+    assert "safe_mode" in result["error"]
+    assert result["governor_decision"]["decision"] == SafetyGovernorDecisionValue.SAFE_MODE.value
 
 
 @pytest.mark.asyncio
@@ -316,12 +364,21 @@ async def test_replay_computer_trajectory_runs_simulation_and_dry_run_dispatch(
     assert result["simulation"]["run_id"] == "run-replay"
     assert result["dispatch"]["success"] is True
     assert result["dispatch"]["dry_run"] is True
+    assert result["mission_contract"]["objective"]["type"] == "replay_validation"
+    assert result["replay_plan"]["offline_only"] is True
+    assert result["replay_plan"]["benchmark_required"] is True
+    assert result["replay_plan"]["operator_approval_required"] is True
     assert result["ros2_action"]["ros2_action"]["goal"]["computer_trajectory"]["id"] == trajectory_id
+    assert result["ros2_action"]["action_envelope"]["bounds"]["mission_contract_id"] == result["mission_contract"]["contract_id"]
     assert captured_sim_request["parameters"]["computer_trajectory"]["id"] == trajectory_id
+    assert captured_sim_request["mission_contract"]["contract_id"] == result["mission_contract"]["contract_id"]
+    assert captured_sim_request["parameters"]["offline_replay_plan"]["offline_only"] is True
     assert captured_sim_request["parameters"]["computer_trajectory"]["status"] == "failed"
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["status"] == "completed"
+    assert task["artifacts"]["mission_contract"]["contract_id"] == result["mission_contract"]["contract_id"]
+    assert task["artifacts"]["replay_plan"]["offline_only"] is True
 
 
 @pytest.mark.asyncio
@@ -368,9 +425,11 @@ async def test_replay_computer_trajectory_skips_dispatch_until_validation_passes
     assert result["simulation"]["validated"] is False
     assert result["dispatch"] is None
     assert result["dispatch_skipped_reason"] == "simulation_not_validated"
+    assert result["replay_plan"]["live_self_modification_allowed"] is False
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["status"] == "awaiting_validation"
+    assert task["artifacts"]["mission_contract"]["objective"]["type"] == "replay_validation"
 
 
 @pytest.mark.asyncio
@@ -420,6 +479,7 @@ async def test_replay_computer_trajectory_bubbles_up_dispatch_failure(
     assert result["task_id"].startswith("task_")
     assert result["dispatch"]["success"] is False
     assert result["error"] == "physical_ai_ros2_bridge_url is not configured"
+    assert result["mission_contract"]["contract_id"].startswith("mission_replay_")
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["status"] == "failed"

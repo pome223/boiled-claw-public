@@ -59,6 +59,25 @@ eval-derived substrate artifact として出している。
 Control UI 側では `/tasks/{id}` の persisted report をそのまま描画し、
 task graph / scheduler queues / approval waits / latest checkpoints / budget exhaustion を operator が確認できるようにする。
 
+その次の #94 / #95 / #96 / #97 は、physical AI 側も同じ contract-first で進める slice として扱う。
+ここで追加するのは live robotics runtime ではなく、simulation-first adapter が永続化する
+
+- `mission_contract`
+- `verifier_result`
+- `telemetry_health`
+- `action_envelope`
+- `governor_decision`
+- `replay_plan`
+
+という durable artifact 群である。
+`mission_contract` は objective / allowed_actions / forbidden_actions / abort_conditions /
+completion_criteria を first-class に持ち、`verifier_result` は
+`pass | fail | uncertain | unsafe` を telemetry health と evidence refs 付きで返す。
+`action_envelope` と `governor_decision` は controller boundary と safety gate を明示し、
+`replay_plan` は offline-only / benchmark-required / safety-regression-required /
+operator-approved を contract として固定する。
+この slice でも direct motor / thrust / attitude control や live self-modification は扱わない。
+
 最小の first slice は、current-tab Google Sheets task を起点に
 `trajectory -> normalized failure_type -> replay-linked report -> canary -> approved_improvement_memory reuse`
 を通す形がよい。
