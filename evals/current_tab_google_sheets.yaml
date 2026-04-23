@@ -4,15 +4,22 @@ slice_type: bounded_long_running
 substrate:
   - task_store
   - trajectory_store
+  - task_graph
+  - checkpoint_resume
+  - durable_verifier_verdicts
   - replay_report
   - approval_gated_promotion
 expected_artifacts:
   - trajectory_id
   - verifier_result
+  - verifier_verdict
   - failure_type
   - recommended_repair_targets
   - candidate_promotion_artifacts
   - replay_reference
+  - task_graph
+  - checkpoint
+  - job_run
   - reuse_suggestions
 surfaces:
   - current_tab

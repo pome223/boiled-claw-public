@@ -18,6 +18,19 @@ from src.runtime.verification_schema import (
     RepairAction,
     VerificationReport,
 )
+from src.runtime.durable_execution_schema import (
+    DurableArtifactRef,
+    DurableCheckpoint,
+    CheckpointBudget,
+    DurableJobRun,
+    DurableJobRunStatus,
+    DurableResumeState,
+    DurableTaskGraph,
+    DurableTaskNode,
+    DurableTaskNodeStatus,
+    DurableVerifierVerdict,
+    DurableVerifierVerdictValue,
+)
 from src.runtime.policy_schema import (
     ApprovalMode,
     ApprovalDecisionStatus,
@@ -48,6 +61,18 @@ __all__ = [
     "CriterionResult",
     "RepairAction",
     "VerificationReport",
+    # durable execution
+    "DurableArtifactRef",
+    "DurableCheckpoint",
+    "CheckpointBudget",
+    "DurableJobRun",
+    "DurableJobRunStatus",
+    "DurableResumeState",
+    "DurableTaskGraph",
+    "DurableTaskNode",
+    "DurableTaskNodeStatus",
+    "DurableVerifierVerdict",
+    "DurableVerifierVerdictValue",
     # policy
     "ApprovalMode",
     "ApprovalDecisionStatus",

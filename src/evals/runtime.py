@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -12,6 +13,19 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from src.computer_use.trajectory_store import get_computer_trajectory_store
 from src.evals.failure_taxonomy import PHASE0_FAILURE_BUCKETS, normalize_trajectory_failure
+from src.runtime.durable_execution_schema import (
+    CheckpointBudget,
+    DurableArtifactRef,
+    DurableCheckpoint,
+    DurableJobRun,
+    DurableJobRunStatus,
+    DurableResumeState,
+    DurableTaskGraph,
+    DurableTaskNode,
+    DurableTaskNodeStatus,
+    DurableVerifierVerdict,
+    DurableVerifierVerdictValue,
+)
 from src.runtime.task_store import get_task_store
 from src.tools.memory import get_memory_store
 from src.tools.self_improvement_runtime.promotion import REUSE_MEMORY_KINDS
@@ -176,6 +190,142 @@ def _candidate_promotion_artifacts(failure_type: str | None) -> list[str]:
     return list(mapping.get(str(failure_type or "unknown"), mapping["unknown"]))
 
 
+def _utc_datetime(value: Any) -> datetime:
+    timestamp = float(value) if value is not None else None
+    if timestamp is None:
+        return datetime.now(timezone.utc)
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc)
+
+
+def _verifier_evidence_refs(trajectory: dict[str, Any]) -> list[str]:
+    verification = trajectory.get("verification")
+    if not isinstance(verification, dict):
+        return []
+
+    refs: list[str] = []
+    for field in ("evidence_refs", "artifact_refs", "screenshot_refs"):
+        values = verification.get(field)
+        if isinstance(values, list):
+            refs.extend(str(item).strip() for item in values if str(item).strip())
+    for item in verification.get("checks") or []:
+        if not isinstance(item, dict):
+            continue
+        values = item.get("evidence_refs")
+        if isinstance(values, list):
+            refs.extend(str(entry).strip() for entry in values if str(entry).strip())
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for ref in refs:
+        if ref in seen:
+            continue
+        seen.add(ref)
+        deduped.append(ref)
+    return deduped
+
+
+def _durable_verdict_value(
+    trajectory: dict[str, Any],
+    *,
+    failure_type: str | None,
+) -> DurableVerifierVerdictValue:
+    status = str(trajectory.get("status") or "").strip()
+    verification = trajectory.get("verification")
+    verification_status = (
+        str(verification.get("status") or "").strip()
+        if isinstance(verification, dict)
+        else ""
+    )
+    if status in {"success", "recovered"} or verification_status == "pass":
+        return DurableVerifierVerdictValue.PASS
+    if verification_status == "partial_pass" or str(failure_type or "") == "weak_evidence":
+        return DurableVerifierVerdictValue.UNCERTAIN
+    return DurableVerifierVerdictValue.FAIL
+
+
+def _durable_verdict_confidence(
+    trajectory: dict[str, Any],
+    *,
+    verdict: DurableVerifierVerdictValue,
+) -> tuple[float, str]:
+    verification = trajectory.get("verification")
+    if isinstance(verification, dict):
+        raw = verification.get("confidence")
+        try:
+            if raw is not None:
+                value = float(raw)
+                if 0.0 <= value <= 1.0:
+                    return value, "reported"
+        except (TypeError, ValueError):
+            pass
+    if verdict == DurableVerifierVerdictValue.PASS:
+        return 0.95, "synthetic_default"
+    if verdict == DurableVerifierVerdictValue.UNCERTAIN:
+        return 0.45, "synthetic_default"
+    return 0.85, "synthetic_default"
+
+
+def _build_durable_verifier_verdict(
+    trajectory: dict[str, Any],
+    *,
+    failure_type: str | None,
+    replay_reference: dict[str, Any],
+    recommended_repair_targets: list[str],
+) -> DurableVerifierVerdict:
+    verdict = _durable_verdict_value(trajectory, failure_type=failure_type)
+    verification = trajectory.get("verification")
+    confidence, confidence_source = _durable_verdict_confidence(
+        trajectory,
+        verdict=verdict,
+    )
+    verifier_source = (
+        str(verification.get("source") or "").strip()
+        if isinstance(verification, dict)
+        else ""
+    ) or "trajectory_eval_phase0"
+    if verdict == DurableVerifierVerdictValue.UNSAFE:
+        verifier_source = verifier_source or "future_physical_verifier"
+    return DurableVerifierVerdict(
+        verdict=verdict,
+        evidence_refs=_verifier_evidence_refs(trajectory),
+        failure_type=failure_type,
+        confidence=confidence,
+        confidence_source=confidence_source,
+        verifier_source=verifier_source,
+        recommended_repair_target=(
+            recommended_repair_targets[0] if recommended_repair_targets else None
+        ),
+        trajectory_id=(
+            int(trajectory["id"]) if trajectory.get("id") is not None else None
+        ),
+        replay_reference=replay_reference,
+        created_at=_utc_datetime(trajectory.get("created_at")),
+    )
+
+
+def _task_node_status_from_verdict(
+    verdict: DurableVerifierVerdictValue,
+) -> DurableTaskNodeStatus:
+    if verdict == DurableVerifierVerdictValue.PASS:
+        return DurableTaskNodeStatus.DONE
+    if verdict == DurableVerifierVerdictValue.UNCERTAIN:
+        return DurableTaskNodeStatus.BLOCKED
+    if verdict == DurableVerifierVerdictValue.UNSAFE:
+        return DurableTaskNodeStatus.BLOCKED
+    return DurableTaskNodeStatus.FAILED
+
+
+def _job_run_status_from_verdict(
+    verdict: DurableVerifierVerdictValue,
+) -> DurableJobRunStatus:
+    if verdict == DurableVerifierVerdictValue.PASS:
+        return DurableJobRunStatus.COMPLETED
+    if verdict == DurableVerifierVerdictValue.UNCERTAIN:
+        return DurableJobRunStatus.BLOCKED
+    if verdict == DurableVerifierVerdictValue.UNSAFE:
+        return DurableJobRunStatus.BLOCKED
+    return DurableJobRunStatus.FAILED
+
+
 def _build_run_report_entry(
     trajectory: dict[str, Any],
     spec: EvalSpec,
@@ -196,6 +346,14 @@ def _build_run_report_entry(
         "final_surface": trajectory.get("final_surface"),
         "created_at": trajectory.get("created_at"),
     }
+    recommended_repair_targets = _recommended_repair_targets(classification["failure_type"])
+    candidate_promotion_artifacts = _candidate_promotion_artifacts(classification["failure_type"])
+    verifier_verdict = _build_durable_verifier_verdict(
+        trajectory,
+        failure_type=classification["failure_type"],
+        replay_reference=replay_reference,
+        recommended_repair_targets=recommended_repair_targets,
+    )
     return {
         "run_index": run_index,
         "run_job_id": f"{spec.id}/run-{run_index}",
@@ -222,8 +380,8 @@ def _build_run_report_entry(
             ),
         },
         "criteria": _criteria_summary(spec, trajectory),
-        "recommended_repair_targets": _recommended_repair_targets(classification["failure_type"]),
-        "candidate_promotion_artifacts": _candidate_promotion_artifacts(classification["failure_type"]),
+        "recommended_repair_targets": recommended_repair_targets,
+        "candidate_promotion_artifacts": candidate_promotion_artifacts,
         "reuse_query": {
             "kinds": list(REUSE_MEMORY_KINDS),
             "strategy": "prefilter",
@@ -231,6 +389,173 @@ def _build_run_report_entry(
         "reuse_suggestions": reuse,
         "replay_reference": replay_reference,
         "replay": replay_reference,
+        "verifier_verdict": verifier_verdict.model_dump(mode="json"),
+    }
+
+
+def _attach_durable_execution_artifacts(
+    spec: EvalSpec,
+    reports: list[dict[str, Any]],
+) -> dict[str, Any]:
+    # Phase 0 derives these substrate artifacts from completed eval reports so the
+    # contract is explicit before a live scheduler-backed runtime exists.
+    graph_id = f"{spec.id}/task-graph"
+    graph_created_at = datetime.now(timezone.utc)
+    task_nodes: list[DurableTaskNode] = []
+    for report in reports:
+        verifier_verdict = DurableVerifierVerdict.model_validate(
+            report.get("verifier_verdict") or {}
+        )
+        checkpoint_id = f"{report['run_job_id']}/checkpoint"
+        trajectory_id = report.get("trajectory_id")
+        replay_reference = (
+            report.get("replay_reference")
+            if isinstance(report.get("replay_reference"), dict)
+            else {}
+        )
+        artifacts = [
+            DurableArtifactRef(
+                kind="trajectory",
+                ref=str(trajectory_id or ""),
+                label=f"trajectory:{trajectory_id}",
+                metadata={"trajectory_id": trajectory_id},
+            ),
+            DurableArtifactRef(
+                kind="replay_reference",
+                ref=json.dumps(replay_reference, ensure_ascii=True, sort_keys=True),
+                label="replay_reference",
+                metadata=replay_reference,
+            ),
+            DurableArtifactRef(
+                kind="verifier_verdict",
+                ref=f"{report['run_job_id']}/verdict",
+                label=verifier_verdict.verdict.value,
+                metadata={
+                    "failure_type": verifier_verdict.failure_type,
+                    "recommended_repair_target": verifier_verdict.recommended_repair_target,
+                },
+            ),
+        ]
+        task_nodes.append(
+            DurableTaskNode(
+                node_id=report["run_job_id"],
+                title=f"Evaluate trajectory {trajectory_id}",
+                description=f"Bounded eval job for trajectory {trajectory_id} in {spec.id}.",
+                status=_task_node_status_from_verdict(verifier_verdict.verdict),
+                completion_criteria=[
+                    str(item.get("name") or "")
+                    for item in report.get("criteria") or []
+                    if str(item.get("name") or "").strip()
+                ],
+                artifacts=artifacts,
+                retry_count=0,
+                trajectory_ids=[int(trajectory_id)] if trajectory_id is not None else [],
+                replay_references=[replay_reference] if replay_reference else [],
+                checkpoint_refs=[checkpoint_id],
+                verifier_verdict=verifier_verdict,
+            )
+        )
+
+    task_graph = DurableTaskGraph(
+        graph_id=graph_id,
+        goal=spec.goal,
+        nodes=task_nodes,
+        created_at=graph_created_at,
+        updated_at=graph_created_at,
+        metadata={
+            "eval_id": spec.id,
+            "slice_type": spec.slice_type,
+        },
+    )
+
+    job_runs: list[DurableJobRun] = []
+    checkpoints: list[DurableCheckpoint] = []
+    successful_artifacts: dict[str, list[DurableArtifactRef]] = {}
+
+    for index, (report, task_node) in enumerate(zip(reports, task_nodes, strict=False), start=1):
+        verifier_verdict = task_node.verifier_verdict
+        checkpoint_id = task_node.checkpoint_refs[0] if task_node.checkpoint_refs else None
+        if task_node.status == DurableTaskNodeStatus.DONE:
+            successful_artifacts[task_node.node_id] = list(task_node.artifacts)
+
+        checkpoint = DurableCheckpoint(
+            checkpoint_id=checkpoint_id or f"{task_node.node_id}/checkpoint",
+            graph_id=task_graph.graph_id,
+            run_id=report["run_job_id"],
+            current_goal=spec.goal,
+            current_task_node_id=task_node.node_id,
+            open_task_node_ids=task_graph.open_task_node_ids(),
+            blocked_task_node_ids=task_graph.blocked_task_node_ids(),
+            pending_approval_ids=[],
+            last_successful_artifacts=dict(successful_artifacts),
+            budget=CheckpointBudget(
+                run_budget_remaining=max(0, len(reports) - index),
+                retry_budget_remaining={
+                    node.node_id: max(0, 1 - node.retry_count)
+                    for node in task_nodes
+                    if node.status in {
+                        DurableTaskNodeStatus.FAILED,
+                        DurableTaskNodeStatus.BLOCKED,
+                    }
+                },
+            ),
+            retry_counters={
+                node.node_id: node.retry_count
+                for node in task_nodes
+                if node.retry_count > 0
+            },
+            trajectory_ids=task_node.trajectory_ids,
+            replay_references=list(task_node.replay_references),
+            next_actionable_task_node_id=task_graph.next_actionable_task_node_id(),
+            created_at=graph_created_at,
+        )
+        job_run = DurableJobRun(
+            run_id=report["run_job_id"],
+            graph_id=task_graph.graph_id,
+            node_id=task_node.node_id,
+            goal=spec.goal,
+            status=_job_run_status_from_verdict(
+                verifier_verdict.verdict if verifier_verdict is not None else DurableVerifierVerdictValue.FAIL
+            ),
+            attempt=1,
+            trajectory_id=(task_node.trajectory_ids[0] if task_node.trajectory_ids else None),
+            replay_reference=(
+                task_node.replay_references[0] if task_node.replay_references else {}
+            ),
+            checkpoint_id=checkpoint.checkpoint_id,
+            verifier_verdict=verifier_verdict,
+            started_at=graph_created_at,
+            ended_at=graph_created_at,
+        )
+        checkpoints.append(checkpoint)
+        job_runs.append(job_run)
+
+        report["task_node_id"] = task_node.node_id
+        report["task_node"] = task_node.model_dump(mode="json")
+        report["checkpoint_id"] = checkpoint.checkpoint_id
+        report["checkpoint"] = checkpoint.model_dump(mode="json")
+        report["job_run"] = job_run.model_dump(mode="json")
+
+    resume_state = (
+        checkpoints[-1].resume_state(task_graph)
+        if checkpoints
+        else DurableResumeState(
+            checkpoint_id=f"{graph_id}/checkpoint",
+            graph_id=graph_id,
+            reason="graph_empty",
+        )
+    )
+
+    return {
+        "task_graph": task_graph.model_dump(mode="json"),
+        "job_runs": [item.model_dump(mode="json") for item in job_runs],
+        "checkpoints": [item.model_dump(mode="json") for item in checkpoints],
+        "verifier_verdicts": [
+            node.verifier_verdict.model_dump(mode="json")
+            for node in task_nodes
+            if node.verifier_verdict is not None
+        ],
+        "resume_state": resume_state.model_dump(mode="json"),
     }
 
 
@@ -498,6 +823,7 @@ def run_eval_spec(
         )
         for index, trajectory in enumerate(normalized_runs)
     ]
+    durable_execution = _attach_durable_execution_artifacts(spec, reports)
     success_count = sum(1 for item in reports if item["status"] in {"success", "recovered"})
     buckets = Counter(
         item["failure_type"]
@@ -534,12 +860,17 @@ def run_eval_spec(
                 "candidate_promotion_artifacts",
                 "replay_reference",
                 "reuse_suggestions",
+                "task_graph",
+                "job_run",
+                "checkpoint",
+                "verifier_verdict",
             ],
         },
         "runs_requested": max(1, int(limit or spec.runs)),
         "runs_evaluated": len(reports),
         "success_rate": round(success_count / len(reports), 4),
         "failure_buckets": failure_buckets,
+        "durable_execution": durable_execution,
         "run_jobs": reports,
         "reports": reports,
     }
