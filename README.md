@@ -114,7 +114,6 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 - Priority 3: policy-bounded self-improvement with security evals, audit, and approval gates
 - Priority 4: deeper current-tab / desktop practical tasks such as Sheets, Docs, SaaS extraction, and cross-app workflows
 - Priority 5: physical replay PoC that reuses the same trajectory schema in simulation-first validation
-- Slack / WhatsApp / Voice / generic Canvas remain secondary until the loop above is measurable and promotable
 
 The current tree already ships a first slice of all of these layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state. The next step is to connect them into one measurable promotion loop: `trajectory -> eval -> repair -> canary -> benchmark -> approval -> promotion -> reuse`.
 The minimum first slice for that loop is a current-tab Google Sheets eval that emits a normalized `failure_type`, produces a replay-linked report, and proves reuse through `approved_improvement_memory`.
@@ -126,6 +125,27 @@ These are still not a live worker loop. They are the durable report shapes that 
 The next Google Sheets vertical slice for #92 and #93 now uses that same contract directly: `evals/current_tab_google_sheets.yaml` is a `long_running_vertical_slice`, and the Control UI task detail renders long-running state, scheduler queues, checkpoints, approval waits, and budget exhaustion from the persisted eval report.
 The next physical design slice for #94, #95, #96, and #97 applies the same contract-first rule to simulation-first adapters: each validation run now persists a `mission_contract`, `verifier_result`, `telemetry_health`, `action_envelope`, `governor_decision`, and offline `replay_plan`.
 These are still policy-bounded physical runtime artifacts, not a claim that boiled-claw now owns a live motor-controller stack.
+
+## Roadmap Progress (#83-#97)
+
+The recent work through `PR #83` and issues `#84-#97` is now in the tree as one connected spine:
+
+- `PR #83` established the trajectory-native eval / failure-classification / promotion / reuse loop
+- `#84`, `#85`, and `#87` added durable `task_graph`, `checkpoint`, `job_run`, and `verifier_verdict` artifacts
+- `#86`, `#88`, `#89`, and `#90` added eval-derived scheduler, recovery, budget, and escalation artifacts
+- `#92` and `#93` turned the current-tab Google Sheets flow into a bounded long-running vertical slice with Control UI visibility
+- `#91` connected `approved_improvement_memory` reuse to normalized failure types and persisted `reuse_trace`
+- `#94`, `#95`, `#96`, and `#97` added simulation-first physical runtime contracts: `mission_contract`, `verifier_result`, `telemetry_health`, `action_envelope`, `governor_decision`, and offline `replay_plan`
+
+Taken together, that means boiled-claw now has a real contract from:
+
+```text
+trajectory
+  -> eval report
+  -> durable execution artifacts
+  -> recovery / approval / reuse
+  -> simulation-first physical replay contracts
+```
 
 The Phase 0 CLI is now present in the repo:
 
@@ -185,7 +205,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 📁 **File Operations** - Read and write support
 - 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
 - 🧠 **Memory System** - SQLite + vector search
-- 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
+- 💬 **Control UI + CLI** - Web UI, WebSocket protocol, and CLI over one Gateway surface
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
 - 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state, subscribes to task / approval deltas over WebSocket, exposes a clickable detail / intervention panel, renders long-running scheduler / checkpoint / approval-wait state for eval-backed tasks, and lets operators replay / compare control-loop runs from the task detail view
@@ -217,7 +237,7 @@ The runtime substrate then lifts those scattered tools into `resource_list`, `re
 ```mermaid
 flowchart LR
     User["User"]
-    Channels["Web UI / CLI / Telegram / Discord"]
+    Clients["Web UI / CLI / API"]
 
     subgraph Gateway["Gateway (Docker / control plane)"]
         Protocol["Typed WS / HTTP protocol"]
@@ -240,7 +260,7 @@ flowchart LR
     MCP["MCP servers"]
     Skills["Skills / plugins"]
 
-    User --> Channels --> Protocol
+    User --> Clients --> Protocol
     Protocol --> Routing --> ControlLoop
     Protocol --> Transcript
     ControlLoop --> Memory
@@ -343,13 +363,6 @@ docker compose --profile cli run --rm boiled-claw-cli chat
 ```
 
 > **Note:** The legacy `cli` command name still works as an alias for `chat`.
-
-#### Channel Mode (Telegram, Discord)
-
-```bash
-# Set channel tokens in .env first
-docker compose run --rm boiled-claw-gateway python -m src.main channels
-```
 
 #### Development Commands
 
@@ -714,11 +727,7 @@ boiled-claw/
 │   │   ├── sample_server.py         # Sample MCP server
 │   │   ├── host_bridge_server.py    # Host Bridge MCP server
 │   │   └── desktop_bridge_server.py # Desktop Bridge adapter server
-│   ├── channels/
-│   │   ├── base.py             # Channel base class
-│   │   ├── registry.py         # Channel registry
-│   │   ├── telegram.py         # Telegram integration
-│   │   └── discord_ch.py       # Discord integration
+│   ├── channels/               # Optional external channel adapters
 │   ├── memory/
 │   │   └── (memory store implementation)
 │   ├── security/
@@ -759,7 +768,7 @@ Options:
 Commands:
   chat       Start an interactive chat session (REPL).
   web        Start the WebSocket Gateway server.
-  channels   Start multi-channel mode (Telegram, Discord).
+  channels   Start optional external channel workers.
   bridge     Manage bridge services (host, desktop).
   status     Show configuration, bridge connectivity, and registered tools.
 ```
@@ -894,13 +903,6 @@ curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
 curl -sS -X POST http://127.0.0.1:18789/tasks/{task_id}/cancel
 ```
 
-### Using with Telegram
-
-1. Create a Telegram Bot via BotFather
-2. Set `TELEGRAM_BOT_TOKEN` in `.env`
-3. Start with `docker compose run --rm boiled-claw-gateway python -m src.main channels`
-4. Send a message to the Bot on Telegram
-
 ## Feature List
 
 ### Tools
@@ -998,12 +1000,6 @@ Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
 - Tool approval request / resolve (`tools.approval_request`, `tools.approval`)
 - Transcript ownership protection via Gateway API key + trusted identity header
 
-### Channels
-
-- Telegram (python-telegram-bot)
-- Discord (discord.py)
-- WebSocket (FastAPI)
-
 ## Development
 
 ### Tests
@@ -1032,8 +1028,6 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - [x] Gateway-owned transcript / history persistence
 - [x] Cron platform (delivery target / retry / system events)
 - [x] Tool security / approvals
-- [x] Telegram channel
-- [x] Discord channel
 - [x] Security (audit logs + policies)
 - [x] Docker support
 - [x] Multi-agent (sub-agents)
@@ -1046,12 +1040,7 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - [x] Redis sessions
 
 > [!NOTE]
-> The next planned work is the trajectory-native eval / promotion spine described above and in [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md). Channel expansion stays intentionally secondary until that loop is in place.
-
-- [ ] Slack channel
-- [ ] WhatsApp channel
-- [ ] Canvas (visual workspace)
-- [ ] Voice interface
+> The next planned work remains the trajectory-native eval / promotion / reuse spine described above and in [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md). The product story is intentionally centered on browser-first execution, durable artifacts, and simulation-first physical replay rather than new chat surfaces.
 
 ## References
 
