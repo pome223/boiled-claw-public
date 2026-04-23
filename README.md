@@ -121,6 +121,8 @@ The minimum first slice for that loop is a current-tab Google Sheets eval that e
 That slice should be read as a **bounded long-running slice** on top of boiled-claw's existing durable-execution substrate: task objects, replay/resume artifacts, approval queues, and scheduler-driven orchestration are the base layer, while PR #83 tightens the self-improvement spine that consumes those artifacts.
 The next substrate slice for #84, #85, and #87 is now explicit too: each eval run can be represented as a durable `task_graph`, each bounded job can emit a `checkpoint` with resume state, and each completed job attaches a durable verifier verdict of `pass`, `fail`, or `uncertain`.
 In Phase 0 these are **eval-derived substrate artifacts**, not live scheduler-backed runtime state yet. They make the contract explicit now, so later scheduler / recovery work can consume the same shapes without inventing a new surface.
+The next follow-on slice for #86, #88, #89, and #90 stays inside that same Phase 0 contract: eval runs now also emit **eval-derived orchestration artifacts** for scheduler queues, recovery policy/decision, guardrail budget state, and durable human escalation records.
+These are still not a live worker loop. They are the durable report shapes that a future scheduler / recovery engine can consume without changing the external artifact contract.
 
 The Phase 0 CLI is now present in the repo:
 
@@ -146,9 +148,22 @@ Each `run_jobs[]` entry is expected to expose:
 - `recommended_repair_targets`
 - `candidate_promotion_artifacts`
 - `replay_reference`
+- `recovery_policy`
+- `recovery_decision`
+- `budget_state`
+- `scheduler_queue_entry`
+- `escalation_record`
 - `checkpoint`
 - `job_run`
 - `reuse_suggestions`
+
+Top-level `durable_execution` is expected to expose:
+
+- `task_graph`
+- `resume_state`
+- `scheduler_state`
+- `recovery_policies`
+- `escalations`
 
 ## The Bet
 

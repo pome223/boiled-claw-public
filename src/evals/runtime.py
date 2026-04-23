@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -17,6 +17,7 @@ from src.runtime.durable_execution_schema import (
     CheckpointBudget,
     DurableArtifactRef,
     DurableCheckpoint,
+    DurableEscalationRecord,
     DurableJobRun,
     DurableJobRunStatus,
     DurableResumeState,
@@ -25,6 +26,15 @@ from src.runtime.durable_execution_schema import (
     DurableTaskNodeStatus,
     DurableVerifierVerdict,
     DurableVerifierVerdictValue,
+    EscalationStatus,
+    GuardrailBudgetPolicy,
+    RecoveryActionType,
+    RecoveryBudgetImpact,
+    RecoveryDecision,
+    RecoveryPolicy,
+    SchedulerQueueEntry,
+    SchedulerQueueKind,
+    SchedulerQueueState,
 )
 from src.runtime.task_store import get_task_store
 from src.tools.memory import get_memory_store
@@ -78,6 +88,7 @@ class EvalSpec(BaseModel):
     slice_type: str = Field(default="bounded_long_running")
     substrate: list[str] = Field(default_factory=list)
     expected_artifacts: list[str] = Field(default_factory=list)
+    budget: dict[str, Any] = Field(default_factory=dict)
     match: EvalMatch = Field(default_factory=EvalMatch)
 
     @field_validator("surfaces", "failure_buckets", "substrate", "expected_artifacts", mode="before")
@@ -326,6 +337,250 @@ def _job_run_status_from_verdict(
     return DurableJobRunStatus.FAILED
 
 
+def _default_guardrail_budget_policy(spec: EvalSpec) -> GuardrailBudgetPolicy:
+    budget = spec.budget if isinstance(spec.budget, dict) else {}
+
+    def _int_field(name: str, default: int) -> int:
+        raw = budget.get(name, default)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return default
+
+    return GuardrailBudgetPolicy(
+        max_runtime_hours=max(1, _int_field("max_runtime_hours", 72)),
+        max_total_llm_calls=max(1, _int_field("max_total_llm_calls", 1200)),
+        max_total_tool_calls=max(1, _int_field("max_total_tool_calls", 5000)),
+        max_same_failure_retries=max(0, _int_field("max_same_failure_retries", 3)),
+        max_repair_depth=max(0, _int_field("max_repair_depth", 2)),
+        max_pending_approvals=max(0, _int_field("max_pending_approvals", 5)),
+    )
+
+
+def _default_recovery_policies() -> dict[str, RecoveryPolicy]:
+    return {
+        "weak_evidence": RecoveryPolicy(
+            failure_type="weak_evidence",
+            allowed_actions=[
+                RecoveryActionType.GATHER_DESTINATION_EVIDENCE,
+                RecoveryActionType.REQUEST_HUMAN_APPROVAL,
+            ],
+            retry_limit=1,
+            escalation_condition="unresolved_uncertain_verdict",
+            budget_impact=RecoveryBudgetImpact(tool_calls=1, pending_approvals=1),
+            next_scheduler_queue=SchedulerQueueKind.WAITING_FOR_APPROVAL,
+        ),
+        "focus_mismatch": RecoveryPolicy(
+            failure_type="focus_mismatch",
+            allowed_actions=[
+                RecoveryActionType.RESELECT_SURFACE,
+                RecoveryActionType.RETRY_WITH_BACKOFF,
+            ],
+            retry_limit=2,
+            escalation_condition="retry_limit_exhausted",
+            budget_impact=RecoveryBudgetImpact(tool_calls=1),
+            next_scheduler_queue=SchedulerQueueKind.RETRY_LATER,
+        ),
+        "target_context_mismatch": RecoveryPolicy(
+            failure_type="target_context_mismatch",
+            allowed_actions=[
+                RecoveryActionType.SWITCH_SURFACE,
+                RecoveryActionType.RETRY_WITH_BACKOFF,
+            ],
+            retry_limit=2,
+            escalation_condition="retry_limit_exhausted",
+            budget_impact=RecoveryBudgetImpact(tool_calls=1),
+            next_scheduler_queue=SchedulerQueueKind.RETRY_LATER,
+        ),
+        "unknown": RecoveryPolicy(
+            failure_type="unknown",
+            allowed_actions=[
+                RecoveryActionType.INSPECT_REPLAY,
+                RecoveryActionType.MARK_FAILED,
+            ],
+            retry_limit=0,
+            escalation_condition="manual_triage_required",
+            budget_impact=RecoveryBudgetImpact(),
+            next_scheduler_queue=SchedulerQueueKind.BLOCKED,
+        ),
+        "policy_blocked": RecoveryPolicy(
+            failure_type="policy_blocked",
+            allowed_actions=[RecoveryActionType.REQUEST_HUMAN_APPROVAL],
+            retry_limit=0,
+            escalation_condition="approval_required",
+            budget_impact=RecoveryBudgetImpact(pending_approvals=1),
+            next_scheduler_queue=SchedulerQueueKind.WAITING_FOR_APPROVAL,
+        ),
+        "tool_timeout": RecoveryPolicy(
+            failure_type="tool_timeout",
+            allowed_actions=[RecoveryActionType.RETRY_WITH_BACKOFF],
+            retry_limit=2,
+            escalation_condition="backoff_exhausted",
+            budget_impact=RecoveryBudgetImpact(tool_calls=1),
+            next_scheduler_queue=SchedulerQueueKind.RETRY_LATER,
+        ),
+    }
+
+
+def _recovery_policy_for_failure_type(failure_type: str | None) -> RecoveryPolicy | None:
+    if not str(failure_type or "").strip():
+        return None
+    policies = _default_recovery_policies()
+    return policies.get(str(failure_type or "unknown"), policies["unknown"])
+
+
+def _budget_exhaustion_reasons(
+    *,
+    budget_policy: GuardrailBudgetPolicy,
+    runtime_hours_used: int,
+    llm_calls_used: int,
+    tool_calls_used: int,
+    repair_depth_used: int,
+    pending_approvals_count: int,
+    chosen_action: RecoveryActionType | None,
+    next_scheduler_queue: SchedulerQueueKind,
+    failure_type: str | None,
+    retry_count: int,
+) -> list[str]:
+    reasons: list[str] = []
+    if runtime_hours_used > budget_policy.max_runtime_hours:
+        reasons.append("max_runtime_hours_exhausted")
+    if llm_calls_used > budget_policy.max_total_llm_calls:
+        reasons.append("max_total_llm_calls_exhausted")
+    if tool_calls_used > budget_policy.max_total_tool_calls:
+        reasons.append("max_total_tool_calls_exhausted")
+    if repair_depth_used > budget_policy.max_repair_depth:
+        reasons.append("max_repair_depth_exhausted")
+    if pending_approvals_count > budget_policy.max_pending_approvals:
+        reasons.append("max_pending_approvals_exhausted")
+    if (
+        next_scheduler_queue == SchedulerQueueKind.RETRY_LATER
+        and failure_type
+        and retry_count >= budget_policy.max_same_failure_retries
+    ):
+        reasons.append("max_same_failure_retries_exhausted")
+    return reasons
+
+
+def _base_recovery_decision_for_report(
+    report: dict[str, Any],
+    *,
+    verifier_verdict: DurableVerifierVerdict,
+) -> tuple[str | None, RecoveryPolicy | None, RecoveryActionType | None, SchedulerQueueKind]:
+    failure_type = report.get("failure_type")
+    if verifier_verdict.verdict == DurableVerifierVerdictValue.PASS:
+        return failure_type, None, None, SchedulerQueueKind.COMPLETED
+
+    normalized_failure_type = str(failure_type or "unknown")
+    policy = _recovery_policy_for_failure_type(normalized_failure_type)
+    chosen_action = None
+    next_queue = SchedulerQueueKind.BLOCKED
+    if policy is not None:
+        chosen_action = policy.allowed_actions[0] if policy.allowed_actions else None
+        next_queue = policy.next_scheduler_queue
+
+    if verifier_verdict.verdict == DurableVerifierVerdictValue.UNCERTAIN:
+        chosen_action = RecoveryActionType.REQUEST_HUMAN_APPROVAL
+        next_queue = SchedulerQueueKind.WAITING_FOR_APPROVAL
+    elif verifier_verdict.verdict == DurableVerifierVerdictValue.UNSAFE:
+        chosen_action = RecoveryActionType.REQUEST_HUMAN_APPROVAL
+        next_queue = SchedulerQueueKind.WAITING_FOR_APPROVAL
+
+    return normalized_failure_type, policy, chosen_action, next_queue
+
+
+def _repair_depth_increment(chosen_action: RecoveryActionType | None) -> int:
+    if chosen_action in {
+        RecoveryActionType.RESELECT_SURFACE,
+        RecoveryActionType.GATHER_DESTINATION_EVIDENCE,
+        RecoveryActionType.SWITCH_SURFACE,
+        RecoveryActionType.RETRY_WITH_BACKOFF,
+        RecoveryActionType.INSPECT_REPLAY,
+    }:
+        return 1
+    return 0
+
+
+def _scheduler_available_at(
+    queue: SchedulerQueueKind,
+    *,
+    created_at: datetime,
+) -> datetime | None:
+    if queue == SchedulerQueueKind.RETRY_LATER:
+        return (created_at + timedelta(minutes=15)).replace(second=0, microsecond=0)
+    if queue == SchedulerQueueKind.PERIODIC_CHECK:
+        return (created_at + timedelta(hours=1)).replace(second=0, microsecond=0)
+    return None
+
+
+def _scheduler_queue_reason(
+    decision: RecoveryDecision,
+    *,
+    verifier_verdict: DurableVerifierVerdict,
+) -> str:
+    if decision.budget_exhausted:
+        return "guardrail_budget_exhausted"
+    if decision.next_scheduler_queue == SchedulerQueueKind.COMPLETED:
+        return "verifier_passed"
+    if decision.next_scheduler_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL:
+        if verifier_verdict.verdict == DurableVerifierVerdictValue.UNCERTAIN:
+            return "unresolved_uncertain_verifier_result"
+        if verifier_verdict.verdict == DurableVerifierVerdictValue.UNSAFE:
+            return "unsafe_verifier_boundary"
+        return "human_approval_required"
+    if decision.next_scheduler_queue == SchedulerQueueKind.RETRY_LATER:
+        return f"{decision.failure_type or 'unknown'}_retry_later"
+    if decision.next_scheduler_queue == SchedulerQueueKind.PERIODIC_CHECK:
+        return f"{decision.failure_type or 'unknown'}_periodic_check"
+    if decision.next_scheduler_queue == SchedulerQueueKind.READY:
+        return "ready_for_worker"
+    return f"{decision.failure_type or 'unknown'}_blocked"
+
+
+def _append_scheduler_queue_entry(
+    queue_state: SchedulerQueueState,
+    entry: SchedulerQueueEntry,
+) -> None:
+    if entry.queue == SchedulerQueueKind.READY:
+        queue_state.ready_queue.append(entry)
+    elif entry.queue == SchedulerQueueKind.WAITING_FOR_APPROVAL:
+        queue_state.waiting_for_approval_queue.append(entry)
+    elif entry.queue == SchedulerQueueKind.RETRY_LATER:
+        queue_state.retry_later_queue.append(entry)
+    elif entry.queue == SchedulerQueueKind.PERIODIC_CHECK:
+        queue_state.periodic_check_queue.append(entry)
+    elif entry.queue == SchedulerQueueKind.COMPLETED:
+        queue_state.completed_queue.append(entry)
+    else:
+        queue_state.blocked_queue.append(entry)
+
+
+def _build_escalation_record(
+    *,
+    run_id: str,
+    node_id: str,
+    checkpoint_id: str,
+    created_at: datetime,
+    failure_type: str | None,
+    reason: str,
+) -> DurableEscalationRecord:
+    approval_request_id = f"approval:{run_id}"
+    return DurableEscalationRecord(
+        escalation_id=f"{run_id}/escalation",
+        node_id=node_id,
+        run_id=run_id,
+        checkpoint_id=checkpoint_id,
+        status=EscalationStatus.WAITING_FOR_APPROVAL,
+        reason=reason,
+        failure_type=failure_type,
+        approval_request_id=approval_request_id,
+        audit_ref=f"audit://{run_id}/approval",
+        resume_checkpoint_id=checkpoint_id,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
 def _build_run_report_entry(
     trajectory: dict[str, Any],
     spec: EvalSpec,
@@ -398,20 +653,91 @@ def _attach_durable_execution_artifacts(
     reports: list[dict[str, Any]],
 ) -> dict[str, Any]:
     # Phase 0 derives these substrate artifacts from completed eval reports so the
-    # contract is explicit before a live scheduler-backed runtime exists.
+    # contract is explicit before a live scheduler-backed runtime exists. The
+    # scheduler / recovery / budget / escalation artifacts here are therefore
+    # eval-derived orchestration representations, not worker-owned state.
     graph_id = f"{spec.id}/task-graph"
     graph_created_at = datetime.now(timezone.utc)
+    budget_policy = _default_guardrail_budget_policy(spec)
+    queue_state = SchedulerQueueState()
+    escalations: list[DurableEscalationRecord] = []
+    recovery_policies = {
+        key: value.model_dump(mode="json")
+        for key, value in _default_recovery_policies().items()
+    }
     task_nodes: list[DurableTaskNode] = []
-    for report in reports:
+    job_runs: list[DurableJobRun] = []
+    checkpoints: list[DurableCheckpoint] = []
+    successful_artifacts: dict[str, list[DurableArtifactRef]] = {}
+    retry_counters: Counter[str] = Counter()
+    llm_calls_used = 0
+    tool_calls_used = 0
+    repair_depth_used = 0
+    pending_approvals_count = 0
+
+    for index, report in enumerate(reports, start=1):
         verifier_verdict = DurableVerifierVerdict.model_validate(
             report.get("verifier_verdict") or {}
         )
+        failure_type = str(report.get("failure_type") or "") or None
         checkpoint_id = f"{report['run_job_id']}/checkpoint"
         trajectory_id = report.get("trajectory_id")
         replay_reference = (
             report.get("replay_reference")
             if isinstance(report.get("replay_reference"), dict)
             else {}
+        )
+        retry_count = retry_counters[failure_type] if failure_type else 0
+        (
+            normalized_failure_type,
+            recovery_policy,
+            chosen_action,
+            next_scheduler_queue,
+        ) = _base_recovery_decision_for_report(
+            report,
+            verifier_verdict=verifier_verdict,
+        )
+        llm_calls_used += 1 + (
+            recovery_policy.budget_impact.llm_calls if recovery_policy is not None else 0
+        )
+        tool_calls_used += max(1, len(verifier_verdict.evidence_refs)) + (
+            recovery_policy.budget_impact.tool_calls if recovery_policy is not None else 0
+        )
+        repair_depth_used += _repair_depth_increment(chosen_action)
+        pending_approvals_after = pending_approvals_count + (
+            1 if next_scheduler_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL else 0
+        )
+        budget_reasons = _budget_exhaustion_reasons(
+            budget_policy=budget_policy,
+            runtime_hours_used=index,
+            llm_calls_used=llm_calls_used,
+            tool_calls_used=tool_calls_used,
+            repair_depth_used=repair_depth_used,
+            pending_approvals_count=pending_approvals_after,
+            chosen_action=chosen_action,
+            next_scheduler_queue=next_scheduler_queue,
+            failure_type=normalized_failure_type,
+            retry_count=retry_count,
+        )
+        budget_exhausted = bool(budget_reasons)
+        if budget_exhausted:
+            next_scheduler_queue = SchedulerQueueKind.BLOCKED
+        recovery_decision = RecoveryDecision(
+            node_id=report["run_job_id"],
+            failure_type=normalized_failure_type,
+            chosen_action=chosen_action,
+            policy=recovery_policy,
+            next_scheduler_queue=next_scheduler_queue,
+            budget_exhausted=budget_exhausted,
+            budget_exhausted_reasons=budget_reasons,
+        )
+        queue_reason = _scheduler_queue_reason(
+            recovery_decision,
+            verifier_verdict=verifier_verdict,
+        )
+        available_at = _scheduler_available_at(
+            next_scheduler_queue,
+            created_at=graph_created_at,
         )
         artifacts = [
             DurableArtifactRef(
@@ -448,13 +774,68 @@ def _attach_durable_execution_artifacts(
                     if str(item.get("name") or "").strip()
                 ],
                 artifacts=artifacts,
-                retry_count=0,
+                retry_count=retry_count,
+                next_retry_at=available_at,
+                scheduler_queue=next_scheduler_queue,
                 trajectory_ids=[int(trajectory_id)] if trajectory_id is not None else [],
                 replay_references=[replay_reference] if replay_reference else [],
                 checkpoint_refs=[checkpoint_id],
                 verifier_verdict=verifier_verdict,
             )
         )
+        queue_entry = SchedulerQueueEntry(
+            entry_id=f"{report['run_job_id']}/queue",
+            node_id=report["run_job_id"],
+            queue=next_scheduler_queue,
+            reason=queue_reason,
+            available_at=available_at,
+            checkpoint_id=checkpoint_id,
+            trajectory_ids=[int(trajectory_id)] if trajectory_id is not None else [],
+            metadata={
+                "failure_type": normalized_failure_type,
+                "chosen_action": chosen_action.value if chosen_action is not None else "",
+            },
+        )
+        escalation_record = None
+        if next_scheduler_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL:
+            escalation_record = _build_escalation_record(
+                run_id=report["run_job_id"],
+                node_id=report["run_job_id"],
+                checkpoint_id=checkpoint_id,
+                created_at=graph_created_at,
+                failure_type=normalized_failure_type,
+                reason=queue_reason,
+            )
+            queue_entry.escalation_id = escalation_record.escalation_id
+            escalations.append(escalation_record)
+            pending_approvals_count = pending_approvals_after
+        _append_scheduler_queue_entry(queue_state, queue_entry)
+        if failure_type and verifier_verdict.verdict != DurableVerifierVerdictValue.PASS:
+            retry_counters[failure_type] += 1
+        current_pending_approval_ids = [
+            escalation.approval_request_id
+            for escalation in escalations
+            if escalation.approval_request_id
+        ]
+
+        report["recovery_policy"] = (
+            recovery_policy.model_dump(mode="json") if recovery_policy is not None else None
+        )
+        report["recovery_decision"] = recovery_decision.model_dump(mode="json")
+        report["scheduler_queue"] = next_scheduler_queue.value
+        report["scheduler_queue_entry"] = queue_entry.model_dump(mode="json")
+        report["escalation_record"] = (
+            escalation_record.model_dump(mode="json") if escalation_record is not None else None
+        )
+        report["_checkpoint_budget_snapshot"] = {
+            "runtime_hours_used": index,
+            "llm_calls_used": llm_calls_used,
+            "tool_calls_used": tool_calls_used,
+            "same_failure_retries": dict(retry_counters),
+            "repair_depth_used": repair_depth_used,
+            "pending_approvals_count": pending_approvals_count,
+            "pending_approval_ids": current_pending_approval_ids,
+        }
 
     task_graph = DurableTaskGraph(
         graph_id=graph_id,
@@ -465,16 +846,28 @@ def _attach_durable_execution_artifacts(
         metadata={
             "eval_id": spec.id,
             "slice_type": spec.slice_type,
+            "scheduler_phase": "eval_derived_phase0",
         },
     )
-
-    job_runs: list[DurableJobRun] = []
-    checkpoints: list[DurableCheckpoint] = []
-    successful_artifacts: dict[str, list[DurableArtifactRef]] = {}
 
     for index, (report, task_node) in enumerate(zip(reports, task_nodes, strict=False), start=1):
         verifier_verdict = task_node.verifier_verdict
         checkpoint_id = task_node.checkpoint_refs[0] if task_node.checkpoint_refs else None
+        checkpoint_budget_snapshot = (
+            report.get("_checkpoint_budget_snapshot")
+            if isinstance(report.get("_checkpoint_budget_snapshot"), dict)
+            else {}
+        )
+        pending_approval_ids = [
+            str(item).strip()
+            for item in checkpoint_budget_snapshot.get("pending_approval_ids") or []
+            if str(item).strip()
+        ]
+        same_failure_retry_counts = (
+            checkpoint_budget_snapshot.get("same_failure_retries")
+            if isinstance(checkpoint_budget_snapshot.get("same_failure_retries"), dict)
+            else {}
+        )
         if task_node.status == DurableTaskNodeStatus.DONE:
             successful_artifacts[task_node.node_id] = list(task_node.artifacts)
 
@@ -486,18 +879,32 @@ def _attach_durable_execution_artifacts(
             current_task_node_id=task_node.node_id,
             open_task_node_ids=task_graph.open_task_node_ids(),
             blocked_task_node_ids=task_graph.blocked_task_node_ids(),
-            pending_approval_ids=[],
+            pending_approval_ids=list(pending_approval_ids),
             last_successful_artifacts=dict(successful_artifacts),
             budget=CheckpointBudget(
                 run_budget_remaining=max(0, len(reports) - index),
                 retry_budget_remaining={
-                    node.node_id: max(0, 1 - node.retry_count)
-                    for node in task_nodes
-                    if node.status in {
-                        DurableTaskNodeStatus.FAILED,
-                        DurableTaskNodeStatus.BLOCKED,
-                    }
+                    failure_key: max(
+                        0,
+                        budget_policy.max_same_failure_retries - retry_total,
+                    )
+                    for failure_key, retry_total in same_failure_retry_counts.items()
                 },
+                policy=budget_policy,
+                runtime_hours_used=int(checkpoint_budget_snapshot.get("runtime_hours_used") or index),
+                llm_calls_used=int(checkpoint_budget_snapshot.get("llm_calls_used") or 0),
+                tool_calls_used=int(checkpoint_budget_snapshot.get("tool_calls_used") or 0),
+                same_failure_retries=dict(same_failure_retry_counts),
+                repair_depth_used=int(checkpoint_budget_snapshot.get("repair_depth_used") or 0),
+                pending_approvals_count=int(
+                    checkpoint_budget_snapshot.get("pending_approvals_count") or len(pending_approval_ids)
+                ),
+                budget_exhausted=bool(
+                    report.get("recovery_decision", {}).get("budget_exhausted")
+                ),
+                budget_exhausted_reasons=list(
+                    report.get("recovery_decision", {}).get("budget_exhausted_reasons") or []
+                ),
             ),
             retry_counters={
                 node.node_id: node.retry_count
@@ -517,12 +924,13 @@ def _attach_durable_execution_artifacts(
             status=_job_run_status_from_verdict(
                 verifier_verdict.verdict if verifier_verdict is not None else DurableVerifierVerdictValue.FAIL
             ),
-            attempt=1,
+            attempt=task_node.retry_count + 1,
             trajectory_id=(task_node.trajectory_ids[0] if task_node.trajectory_ids else None),
             replay_reference=(
                 task_node.replay_references[0] if task_node.replay_references else {}
             ),
             checkpoint_id=checkpoint.checkpoint_id,
+            scheduler_queue=task_node.scheduler_queue,
             verifier_verdict=verifier_verdict,
             started_at=graph_created_at,
             ended_at=graph_created_at,
@@ -535,6 +943,8 @@ def _attach_durable_execution_artifacts(
         report["checkpoint_id"] = checkpoint.checkpoint_id
         report["checkpoint"] = checkpoint.model_dump(mode="json")
         report["job_run"] = job_run.model_dump(mode="json")
+        report["budget_state"] = checkpoint.budget.model_dump(mode="json")
+        report.pop("_checkpoint_budget_snapshot", None)
 
     resume_state = (
         checkpoints[-1].resume_state(task_graph)
@@ -544,6 +954,17 @@ def _attach_durable_execution_artifacts(
             graph_id=graph_id,
             reason="graph_empty",
         )
+    )
+    final_pending_approval_ids = [
+        escalation.approval_request_id
+        for escalation in escalations
+        if escalation.approval_request_id
+    ]
+    resume_state = resume_state.model_copy(
+        update={
+            "pending_approval_ids": list(final_pending_approval_ids),
+            "scheduler_queue_counts": queue_state.counts(),
+        }
     )
 
     return {
@@ -555,6 +976,9 @@ def _attach_durable_execution_artifacts(
             for node in task_nodes
             if node.verifier_verdict is not None
         ],
+        "recovery_policies": recovery_policies,
+        "scheduler_state": queue_state.model_dump(mode="json"),
+        "escalations": [item.model_dump(mode="json") for item in escalations],
         "resume_state": resume_state.model_dump(mode="json"),
     }
 
@@ -849,6 +1273,10 @@ def run_eval_spec(
                 "task_store",
                 "trajectory_store",
                 "replay_report",
+                "scheduler_queue_state",
+                "recovery_policy",
+                "guardrail_budget",
+                "human_escalation_queue",
                 "approval_gated_promotion",
             ],
             "expected_artifacts": spec.expected_artifacts
@@ -860,10 +1288,16 @@ def run_eval_spec(
                 "candidate_promotion_artifacts",
                 "replay_reference",
                 "reuse_suggestions",
+                "recovery_policy",
+                "recovery_decision",
+                "budget_state",
+                "scheduler_queue_entry",
+                "escalation_record",
                 "task_graph",
                 "job_run",
                 "checkpoint",
                 "verifier_verdict",
+                "scheduler_state",
             ],
         },
         "runs_requested": max(1, int(limit or spec.runs)),

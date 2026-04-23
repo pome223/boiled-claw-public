@@ -7,6 +7,10 @@ substrate:
   - task_graph
   - checkpoint_resume
   - durable_verifier_verdicts
+  - scheduler_queue_state
+  - recovery_policy
+  - guardrail_budget
+  - human_escalation_queue
   - replay_report
   - approval_gated_promotion
 expected_artifacts:
@@ -17,9 +21,15 @@ expected_artifacts:
   - recommended_repair_targets
   - candidate_promotion_artifacts
   - replay_reference
+  - recovery_policy
+  - recovery_decision
+  - budget_state
+  - scheduler_queue_entry
+  - escalation_record
   - task_graph
   - checkpoint
   - job_run
+  - scheduler_state
   - reuse_suggestions
 surfaces:
   - current_tab
@@ -30,6 +40,13 @@ success_criteria:
   - evidence_required: "destination_bound_text_or_screenshot"
   - write_target: "sheet_cell"
 runs: 5
+budget:
+  max_runtime_hours: 72
+  max_total_llm_calls: 1200
+  max_total_tool_calls: 5000
+  max_same_failure_retries: 3
+  max_repair_depth: 2
+  max_pending_approvals: 5
 failure_buckets:
   - weak_evidence
   - focus_mismatch
