@@ -511,6 +511,13 @@ class GatewayServer:
         scheduler.set_notifier(self._cron_notifier_fn)
         scheduler.start()
         await scheduler.fire_system_event("startup")
+        await self.control_supervisor.resume_open_supervisors(
+            self.task_store.list(
+                kind="control_supervisor",
+                status="running",
+                limit=100,
+            )
+        )
 
     async def _shutdown_gateway(self) -> None:
         await self.control_supervisor.shutdown()

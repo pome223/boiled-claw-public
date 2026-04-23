@@ -93,6 +93,7 @@ def update_task_record(
     winner_task_id: Optional[str] = None,
     loser_task_ids: Optional[list[str]] = None,
     approval_dependencies: Optional[list[str]] = None,
+    ended_at: Optional[float] = None,
 ) -> dict[str, Any] | None:
     return get_task_store().update(
         task_id,
@@ -105,6 +106,7 @@ def update_task_record(
         winner_task_id=winner_task_id,
         loser_task_ids=loser_task_ids,
         approval_dependencies=approval_dependencies,
+        ended_at=ended_at,
     )
 
 

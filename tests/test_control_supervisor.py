@@ -263,6 +263,76 @@ async def test_control_supervisor_graceful_stop_marks_task_cancelled(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_control_supervisor_shutdown_leaves_running_task_resumable(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    waiting_for_next_iteration = asyncio.Event()
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        if kwargs.get("event_type") == "supervisor_waiting":
+            waiting_for_next_iteration.set()
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-1",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="Keep the session healthy",
+        constraints=[],
+        duration_seconds=120,
+        interval_seconds=60,
+        source="test",
+        max_iterations=3,
+    )
+    await waiting_for_next_iteration.wait()
+    await supervisor.shutdown()
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "running"
+    assert parent["artifacts"]["progress"]["completed_iterations"] == 1
+    assert parent["artifacts"]["progress"].get("stop_requested") is not True
+    assert parent["artifacts"]["progress"]["next_run_at"] is not None
+    events = store.query_timeline(started.task["task_id"])["events"]
+    assert any(event["event_type"] == "supervisor_shutdown_deferred" for event in events)
+
+
+@pytest.mark.asyncio
 async def test_control_supervisor_retries_retry_later_queue_and_completes(tmp_path):
     store = TaskStore(str(tmp_path / "tasks.db"))
     child_calls: list[int] = []
@@ -557,3 +627,292 @@ async def test_control_supervisor_classifies_child_policy_exception(tmp_path):
     assert durable["scheduler_state"]["waiting_for_approval_queue"][0]["reason"] == (
         "human_approval_required"
     )
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_resume_uses_due_scheduler_queue(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    now = {"value": 1000.0}
+    mission_contract = build_mission_contract(
+        contract_id="mission-resume-test",
+        objective="Keep the browser session healthy",
+        allowed_actions=["current_tab.info"],
+        completion_criteria=["current tab remains inspectable"],
+        evidence_requirements=["current_tab_info result"],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="resumed iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+            artifacts={"result": {"success": True, "final_text": "ok after resume"}},
+        )
+        return (
+            ExecutionResult(
+                request_id="req-resumed",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok after resume",
+                success=True,
+                metadata={"task_id": child_task["task_id"]},
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+        now_fn=lambda: now["value"],
+    )
+    runtime_state = supervisor._initial_runtime_state(
+        objective=mission_contract.objective,
+        loop_goal=build_maintenance_goal(mission_contract.objective, mission_contract),
+        control_session_id="ctrlsup_resume_test",
+        created_at=now["value"],
+        next_run_at=now["value"],
+        mission_contract=mission_contract,
+    )
+    first_report = supervisor._record_runtime_iteration(
+        runtime_state,
+        objective=mission_contract.objective,
+        iteration=1,
+        max_iterations=2,
+        result=ExecutionResult(
+            request_id="req-1",
+            session_id="ctrlsup_resume_test",
+            user_id="alice",
+            final_text="ok before restart",
+            success=True,
+        ),
+        child_task_id="task_child_before_restart",
+        next_run_at=now["value"] + 60,
+        has_more_iterations=True,
+    )
+    task = store.create(
+        kind="control_supervisor",
+        title=mission_contract.objective,
+        status="running",
+        owner_session_id="sess-owner",
+        owner_user_id="alice",
+        artifacts={
+            "mission_contract": mission_contract.model_dump(mode="json"),
+            "supervisor": {
+                "objective": mission_contract.objective,
+                "loop_goal": build_maintenance_goal(mission_contract.objective, mission_contract),
+                "constraints": [],
+                "mission_contract_id": mission_contract.contract_id,
+                "duration_seconds": 120,
+                "interval_seconds": 60,
+                "control_session_id": "ctrlsup_resume_test",
+                "started_at": now["value"],
+                "ends_at": now["value"] + 120,
+                "max_iterations": 2,
+            },
+            "progress": {
+                "iteration": 1,
+                "completed_iterations": 1,
+                "next_run_at": now["value"] + 60,
+                "child_task_ids": ["task_child_before_restart"],
+                "last_child_task_id": "task_child_before_restart",
+            },
+            "durable_execution": first_report["durable_execution"],
+        },
+        metadata={
+            "type": "control_supervisor",
+            "control_session_id": "ctrlsup_resume_test",
+            "mission_contract_id": mission_contract.contract_id,
+        },
+    )
+    now["value"] += 60
+
+    assert await supervisor.resume_task(task) is True
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "completed"
+    assert parent["artifacts"]["progress"]["completed_iterations"] == 2
+    assert parent["artifacts"]["progress"]["child_task_ids"][0] == "task_child_before_restart"
+    durable = parent["artifacts"]["durable_execution"]
+    assert len(durable["job_runs"]) == 2
+    assert durable["job_runs"][1]["scheduler_queue"] == "completed"
+    events = store.query_timeline(task["task_id"])["events"]
+    assert any(event["event_type"] == "supervisor_resumed" for event in events)
+    assert any(event["event_type"] == "scheduler_worker_tick" for event in events)
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_aborts_when_contract_forbids_human_approval(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    mission_contract = build_mission_contract(
+        contract_id="mission-abort-test",
+        objective="Keep the current tab healthy",
+        allowed_actions=["current_tab.info"],
+        abort_conditions=["human approval required"],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="needs approval",
+            status="pending",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-approval",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="Human approval is required.",
+                success=False,
+                metadata={
+                    "needs_human": True,
+                    "approval_request": {"request_id": "approval-test"},
+                },
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=1,
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "failed"
+    assert parent["error"] == "mission_aborted:human approval required"
+    assert parent["artifacts"]["result"]["mission_aborted"] is True
+    durable = parent["artifacts"]["durable_execution"]
+    assert durable["scheduler_state"]["blocked_queue"][0]["reason"] == (
+        "mission_aborted:human approval required"
+    )
+    assert durable["scheduler_state"]["waiting_for_approval_queue"] == []
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_links_current_tab_evidence_refs(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="inspect current tab",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-evidence",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+                verification_report_id="verify-1",
+                metadata={
+                    "verification_inputs": {
+                        "current_tab": {
+                            "info_succeeded": True,
+                            "url": "http://127.0.0.1:18789/chat",
+                            "title": "boiled-claw Control UI",
+                            "tab_id": 10,
+                            "window_id": 1,
+                        }
+                    }
+                },
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="Keep the current tab healthy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=1,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    durable = parent["artifacts"]["durable_execution"]
+    job = durable["job_runs"][0]
+    child_task_id = parent["artifacts"]["progress"]["last_child_task_id"]
+    assert f"{child_task_id}#verification_inputs.current_tab" in job["verifier_verdict"]["evidence_refs"]
+    assert "verification_report:verify-1" in job["verifier_verdict"]["evidence_refs"]
+    artifact_kinds = {item["kind"] for item in durable["task_graph"]["nodes"][0]["artifacts"]}
+    assert "current_tab_info" in artifact_kinds
+    assert "verification_report" in artifact_kinds
