@@ -285,6 +285,69 @@ def test_start_control_supervisor_endpoint_returns_task(monkeypatch, tmp_path):
     assert payload["control_session_id"] == "ctrlsup_demo"
 
 
+def test_start_control_supervisor_endpoint_accepts_mission_contract(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+    captured: dict[str, object] = {}
+
+    async def _fake_start(**kwargs):
+        captured.update(kwargs)
+        mission_contract = kwargs["mission_contract"].model_dump(mode="json")
+        return SupervisorStartResult(
+            task={
+                "task_id": "task-supervisor-contract",
+                "kind": "control_supervisor",
+                "title": kwargs["objective"],
+                "status": "running",
+                "owner_session_id": kwargs["owner_session_id"],
+                "owner_user_id": kwargs["user_id"],
+                "parent_task_id": None,
+                "run_id": None,
+                "winner_task_id": None,
+                "loser_task_ids": [],
+                "approval_dependencies": [],
+                "artifacts": {"mission_contract": mission_contract},
+                "metadata": {"mission_contract_id": mission_contract["contract_id"]},
+                "error": None,
+                "created_at": time.time(),
+                "updated_at": time.time(),
+                "started_at": time.time(),
+                "ended_at": None,
+            },
+            control_session_id="ctrlsup_contract",
+            max_iterations=12,
+            ends_at=time.time() + 3600,
+            next_run_at=time.time(),
+            mission_contract=mission_contract,
+        )
+
+    monkeypatch.setattr(gateway.control_supervisor, "start", _fake_start)
+
+    with TestClient(gateway.app) as client:
+        response = client.post(
+            "/tasks/supervisors/control-loop",
+            json={
+                "user_id": "alice",
+                "mission_contract": {
+                    "contract_id": "mission-http-test",
+                    "objective": "Keep the current-tab sheet healthy",
+                    "allowed_actions": ["current_tab.read", "current_tab.fill"],
+                    "forbidden_actions": ["leave the target sheet"],
+                    "abort_conditions": ["human approval required"],
+                    "completion_criteria": ["target cell evidence is visible"],
+                    "evidence_requirements": ["post-action screenshot"],
+                },
+                "duration_seconds": 3600,
+                "interval_seconds": 60,
+            },
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert captured["objective"] == "Keep the current-tab sheet healthy"
+    assert payload["mission_contract"]["contract_id"] == "mission-http-test"
+    assert payload["task"]["metadata"]["mission_contract_id"] == "mission-http-test"
+
+
 def test_cancel_control_supervisor_endpoint_requires_running_handle(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
     task = gateway.task_store.create(
@@ -625,6 +688,41 @@ async def test_run_control_loop_http_adds_current_browser_constraints(
     assert "Operate only on the currently visible browser/tab/window." in constraints
     assert "Do not launch a new browser application or open a managed browser for this task." in constraints
     assert "Do not open a new browser tab or window unless the user explicitly asked for it." in constraints
+
+
+@pytest.mark.asyncio
+async def test_run_control_loop_with_task_persists_policy_exceptions(
+    monkeypatch,
+    tmp_path,
+):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    async def _fake_current_browser_runtime_error(_goal: str):
+        return None
+
+    async def _fake_control_loop_run(**kwargs):
+        raise PermissionError("Capability 'current_tab.navigate' is not in the approved plan.")
+
+    monkeypatch.setattr(gateway, "_current_browser_runtime_error", _fake_current_browser_runtime_error)
+    monkeypatch.setattr(gateway.control_loop, "run", _fake_control_loop_run)
+
+    result, task_id = await gateway._run_control_loop_with_task(
+        user_id="alice",
+        session_id="sess-policy",
+        goal="Keep the current browser session healthy",
+        constraints=[],
+        request_id="req-policy",
+        source="test",
+        preserve_control_ui_tab=False,
+    )
+
+    task = gateway.task_store.get(task_id)
+    assert result.success is False
+    assert result.metadata["normalized_failure_type"] == "policy_blocked"
+    assert task is not None
+    assert task["status"] == "failed"
+    assert task["error"].startswith("Control loop blocked by policy:")
+    assert task["artifacts"]["result"]["normalized_failure_type"] == "policy_blocked"
 
 
 @pytest.mark.asyncio

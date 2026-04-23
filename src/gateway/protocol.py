@@ -311,12 +311,28 @@ EVENT_SCHEMAS: dict[str, dict[str, Any]] = {
 
 HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
     "POST /tasks/supervisors/control-loop": {
-        "description": "Start an opt-in long-running supervisor that repeatedly runs the control loop against a stable maintenance goal.",
+        "description": "Start an opt-in long-running supervisor from a goal or first-class mission_contract.",
         "request": {
             "type": "object",
-            "required": ["goal"],
+            "anyOf": [
+                {"required": ["goal"]},
+                {"required": ["mission_contract"]},
+            ],
             "properties": {
                 "goal": {"type": "string"},
+                "mission_contract": {
+                    "type": "object",
+                    "properties": {
+                        "contract_id": {"type": "string"},
+                        "objective": {"type": "string"},
+                        "allowed_actions": {"type": "array"},
+                        "forbidden_actions": {"type": "array"},
+                        "abort_conditions": {"type": "array"},
+                        "completion_criteria": {"type": "array"},
+                        "evidence_requirements": {"type": "array"},
+                        "metadata": {"type": "object"},
+                    },
+                },
                 "constraints": {"type": "array"},
                 "duration_seconds": {"type": "integer"},
                 "interval_seconds": {"type": "integer"},
@@ -334,6 +350,7 @@ HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "max_iterations": {"type": "integer"},
                 "ends_at": {"type": "number"},
                 "next_run_at": {"type": "number"},
+                "mission_contract": {"type": "object"},
             },
         },
     },

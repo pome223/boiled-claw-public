@@ -206,16 +206,26 @@ def build_task_router(server: "GatewayServer") -> APIRouter:
             user_id=user_id,
             session_id=str(payload.session_id) if payload.session_id else None,
         )
+        mission_contract = payload.mission_contract
+        objective = str(payload.goal or "").strip()
+        if mission_contract is not None:
+            objective = mission_contract.objective
+        if not objective:
+            raise HTTPException(
+                status_code=400,
+                detail="goal or mission_contract.objective is required",
+            )
         result: SupervisorStartResult = await server.control_supervisor.start(
             user_id=user_id,
             owner_session_id=session.id,
-            objective=str(payload.goal or "").strip(),
+            objective=objective,
             constraints=normalize_constraints(payload.constraints),
             duration_seconds=payload.duration_seconds,
             interval_seconds=payload.interval_seconds,
             source="http",
             maintenance_goal=str(payload.maintenance_goal or "").strip() or None,
             request_id=None,
+            mission_contract=mission_contract,
         )
         return {
             "accepted": True,
@@ -226,6 +236,7 @@ def build_task_router(server: "GatewayServer") -> APIRouter:
             "max_iterations": result.max_iterations,
             "ends_at": result.ends_at,
             "next_run_at": result.next_run_at,
+            "mission_contract": result.mission_contract,
         }
 
     @router.post("/tasks/{task_id}/cancel", response_model=TaskCancelResponse)

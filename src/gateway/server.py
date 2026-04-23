@@ -3302,14 +3302,34 @@ class GatewayServer:
             )
             return result, task_id
 
-        result = await self.control_loop.run(
-            goal=goal,
-            user_id=user_id,
-            constraints=effective_constraints,
-            session_id=session_id,
-            initial_state=initial_state,
-            reset_if_terminal=reset_if_terminal,
-        )
+        try:
+            result = await self.control_loop.run(
+                goal=goal,
+                user_id=user_id,
+                constraints=effective_constraints,
+                session_id=session_id,
+                initial_state=initial_state,
+                reset_if_terminal=reset_if_terminal,
+            )
+        except Exception as exc:
+            failure_type = "policy_blocked" if isinstance(exc, PermissionError) else "unknown"
+            result = ExecutionResult(
+                request_id=f"http_{uuid.uuid4().hex[:12]}",
+                session_id=session_id,
+                user_id=user_id,
+                final_text=(
+                    f"Control loop blocked by policy: {exc}"
+                    if isinstance(exc, PermissionError)
+                    else f"Control loop failed before producing a result: {exc}"
+                ),
+                success=False,
+                metadata={
+                    "error": str(exc),
+                    "exception_type": type(exc).__name__,
+                    "normalized_failure_type": failure_type,
+                    "task_id": task_id,
+                },
+            )
         result.metadata["task_id"] = task_id
         needs_human = bool(result.metadata.get("needs_human"))
         approval_expired = (

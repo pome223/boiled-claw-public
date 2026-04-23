@@ -16,19 +16,24 @@ from urllib.parse import quote_plus, urlsplit
 
 from google.adk.tools import ToolContext
 
-from src.config.settings import get_settings
 from src.gateway.routing import targets_user_browser
 from src.runtime.state_keys import StateKeys
 from src.runtime.task_keywords import (
     SPREADSHEET_KEYWORDS,
     prefers_isolated_browser_for_goal,
 )
-from src.security.audit import AuditEventType, get_audit_logger
-from src.security.network import is_loopback_host
-from src.tools.context import resolve_tool_context
 
 _APPROVED_STATUSES = {"policy_approved", "human_approved", "auto_approved"}
 _IMPLICIT_PLAN_CAPABILITIES = {
+    "current_tab.info": {
+        "current_tab.navigate",
+    },
+    # Removed desktop.control.launch_app from view.windows / frontmost_app /
+    # wait.window implicit grants.  launch_app requires an explicit capability
+    # entry in the plan.  Plans that genuinely need launch_app (e.g. media
+    # playback tasks) receive it explicitly via _normalize_required_capabilities.
+    # Keeping the implicit grant was causing current-tab spreadsheet tasks to
+    # have launch_app implicitly allowed via desktop.view.frontmost_app.
     "desktop.view.windows": {
         "desktop.control.focus_window",
         "desktop.wait.window",
@@ -60,11 +65,97 @@ _CURRENT_BROWSER_NEW_TAB_HOTKEYS = {
     ("control", "t"),
     ("meta", "t"),
 }
+# Hotkeys safe for spreadsheet cell editing when new-tab mode is active.
+_CURRENT_BROWSER_NEWTAB_EDITING_HOTKEYS = {
+    ("escape",),
+    ("tab",),
+    ("enter",),
+    ("shift", "tab"),
+    ("down",), ("up",), ("left",), ("right",),
+    ("control", "f"), ("f", "meta"),
+    ("enter", "shift"),        # sorted form of Shift+Enter
+    ("control", "enter"), ("enter", "meta"),
+    ("control", "z"), ("meta", "z"),
+    ("control", "s"), ("meta", "s"),
+}
+_CURRENT_BROWSER_SPREADSHEET_CELL_READY_HOTKEYS = {
+    ("tab",),
+    ("enter",),
+    ("shift", "tab"),
+    ("down",),
+    ("up",),
+    ("left",),
+    ("right",),
+    ("enter", "shift"),
+    ("control", "enter"),
+    ("enter", "meta"),
+}
+_GOOGLE_SHEETS_OVERLAY_MARKERS = (
+    "introducing conversation history",
+    "generate a custom spreadsheet",
+    "ask gemini",
+    "gemini in workspace",
+    "build",
+)
+_GOOGLE_SHEETS_OVERLAY_DISMISS_SELECTORS = (
+    'button[aria-label="Got it"]',
+    '[role="button"][aria-label="Got it"]',
+    'button[aria-label="Close"]',
+    '[role="button"][aria-label="Close"]',
+    '[aria-label="Close"]',
+)
+_CURRENT_BROWSER_GOOGLE_SHEETS_URL_MARKERS = (
+    "docs.google.com/spreadsheets",
+    "sheets.new",
+)
+_CURRENT_BROWSER_GOOGLE_SHEETS_TITLE_MARKERS = (
+    "google sheets",
+    "spreadsheet",
+)
+_CURRENT_BROWSER_SPREADSHEET_TEXT_FIELD_ROLES = {
+    "axcombobox",
+    "axsearchfield",
+    "axtextarea",
+    "axtextfield",
+}
+_CURRENT_BROWSER_SPREADSHEET_SAFE_TEXT_TARGET_MARKERS = (
+    "cell-",
+    "formula",
+    "formula bar",
+    "fx",
+    "name box",
+    "name-box",
+    "name_box",
+    "セル参照",
+    "名前ボックス",
+)
+_CURRENT_BROWSER_SPREADSHEET_UNSAFE_TEXT_TARGET_MARKERS = (
+    "document title",
+    "file name",
+    "spreadsheet title",
+    "untitled spreadsheet",
+)
 _HOTKEY_ALIASES = {
     "arrowdown": "down",
+    "arrow_down": "down",
+    "down_arrow": "down",
+    "arrow-down": "down",
+    "down-arrow": "down",
     "arrowleft": "left",
+    "arrow_left": "left",
+    "left_arrow": "left",
+    "arrow-left": "left",
+    "left-arrow": "left",
     "arrowright": "right",
+    "arrow_right": "right",
+    "right_arrow": "right",
+    "arrow-right": "right",
+    "right-arrow": "right",
     "arrowup": "up",
+    "arrow_up": "up",
+    "up_arrow": "up",
+    "arrow-up": "up",
+    "up-arrow": "up",
     "cmd": "meta",
     "command": "meta",
     "control": "control",
@@ -77,9 +168,11 @@ _CURRENT_BROWSER_HOTKEY_REWRITES = {
     ("e", "meta"): ["meta", "l"],
     ("k", "meta"): ["meta", "l"],
 }
-# Keep current-tab planning coarse-grained for now, mirroring the existing
-# browser.navigate umbrella capability across this tool family.
+# Keep current-tab navigation/editing guarded by the existing umbrella
+# capability, while allowing read-only current-tab probes to use the narrower
+# current_tab.info capability.
 _CURRENT_TAB_CAPABILITY = "current_tab.navigate"
+_CURRENT_TAB_INFO_CAPABILITY = "current_tab.info"
 _KNOWN_BROWSER_APPS = {
     "Google Chrome",
     "Chromium",
@@ -105,6 +198,10 @@ _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS = (
     "boiled-claw Control UI",
     "boiled-claw",
 )
+_CURRENT_BROWSER_CONTROL_UI_URL_MARKERS = (
+    "localhost:18789/chat",
+    "127.0.0.1:18789/chat",
+)
 _ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS = 120
 _CURRENT_BROWSER_SEARCH_KEYWORDS = {
     "search",
@@ -125,6 +222,11 @@ _CURRENT_BROWSER_SAFE_SEARCH_HOST_MARKERS = (
     "www.google.com/search",
     "google.co.jp/search",
     "www.google.co.jp/search",
+)
+_CURRENT_TAB_EXTENSION_DISCONNECTED_KIND = "current_tab_extension_disconnected"
+_CURRENT_TAB_EXTENSION_DISCONNECTED_MARKERS = (
+    "current tab extension disconnected",
+    "extension disconnected",
 )
 _PLAYBACK_TASK_KEYWORDS = {
     "djay",
@@ -251,6 +353,279 @@ def _plan_allows_capability(
     return capability_name in required or bool(required & implied_by)
 
 
+def _result_succeeded(result: object) -> bool:
+    if not isinstance(result, dict):
+        return False
+    return bool(result.get("success") or result.get("ok"))
+
+
+def _error_text(result: object) -> str:
+    if isinstance(result, dict):
+        parts: list[str] = []
+        for key in ("error", "message", "detail", "reason"):
+            value = result.get(key)
+            if value:
+                parts.append(str(value))
+        return " ".join(parts).strip()
+    return str(result or "").strip()
+
+
+def _current_browser_tab_snapshot(
+    result: object,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {}
+    snapshot: dict[str, Any] = {"source": source}
+    for key in ("tab_id", "window_id"):
+        value = result.get(key)
+        if value is not None:
+            snapshot[key] = value
+    for key in ("url", "title"):
+        value = str(result.get(key) or "").strip()
+        if value:
+            snapshot[key] = value
+    url = str(snapshot.get("url") or "").strip()
+    title = str(snapshot.get("title") or "").strip()
+    if _is_current_browser_control_ui_tab(url, title):
+        snapshot["surface"] = "control_ui"
+    elif _is_current_browser_google_sheets_tab(url, title):
+        snapshot["surface"] = "google_sheets"
+    return snapshot
+
+
+def _is_current_browser_google_sheets_tab(url: str, title: str) -> bool:
+    lowered_url = url.lower()
+    lowered_title = title.lower()
+    return any(marker in lowered_url for marker in _CURRENT_BROWSER_GOOGLE_SHEETS_URL_MARKERS) or any(
+        marker in lowered_title for marker in _CURRENT_BROWSER_GOOGLE_SHEETS_TITLE_MARKERS
+    )
+
+
+def _record_current_browser_tab_state(
+    tool_context: ToolContext | None,
+    result: object,
+    *,
+    source: str,
+) -> None:
+    if tool_context is None or not _is_current_browser_task(tool_context):
+        return
+    if not _result_succeeded(result):
+        return
+
+    snapshot = _current_browser_tab_snapshot(result, source=source)
+    if not snapshot:
+        return
+
+    tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_LAST_OBSERVED_TAB] = snapshot
+
+    surface = str(snapshot.get("surface") or "").strip()
+    if surface == "control_ui":
+        tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_CONTROL_UI_TAB] = snapshot
+        return
+    if surface == "google_sheets":
+        if source == "current_tab.navigate":
+            _clear_current_browser_spreadsheet_target(tool_context)
+            # Fresh Google Sheets tabs land with A1 selected by default. Prime
+            # one selector-less type so the first header/value can go into the
+            # grid even if the model skips an explicit Name Box click.
+            _set_current_browser_spreadsheet_cell_edit_ready(tool_context, True)
+        elif source == "current_tab.activate":
+            _clear_current_browser_spreadsheet_target(tool_context)
+        tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_DESTINATION_TAB] = snapshot
+
+
+def _is_current_tab_extension_disconnected_result(result: object) -> bool:
+    text = _error_text(result).lower()
+    return any(marker in text for marker in _CURRENT_TAB_EXTENSION_DISCONNECTED_MARKERS)
+
+
+def _mark_current_tab_extension_disconnected(
+    tool_context: ToolContext | None,
+    raw_result: object | None = None,
+) -> None:
+    if tool_context is None:
+        return
+    tool_context.state[StateKeys.TEMP_CURRENT_TAB_EXTENSION_DISCONNECTED] = True
+    raw_error = _error_text(raw_result)
+    if raw_error:
+        tool_context.state[
+            StateKeys.TEMP_CURRENT_TAB_EXTENSION_DISCONNECTED_RAW_ERROR
+        ] = raw_error
+
+
+def _is_current_tab_extension_disconnected(
+    tool_context: ToolContext | None,
+) -> bool:
+    if tool_context is None:
+        return False
+    return bool(
+        tool_context.state.get(StateKeys.TEMP_CURRENT_TAB_EXTENSION_DISCONNECTED)
+    )
+
+
+def _current_tab_extension_disconnected_message() -> str:
+    return (
+        "Current Tab extension is not connected to the relay. Reload the "
+        "current_tab_adapter extension in chrome://extensions, then open its "
+        "Service Worker or popup so it reconnects to ws://127.0.0.1:8768. "
+        "No current-browser action was retried because this is a "
+        "transport-level failure."
+    )
+
+
+def _current_tab_extension_disconnected_error(tool_name: str) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "success": False,
+        "error": _current_tab_extension_disconnected_message(),
+        "tool": tool_name,
+        "transport_available": False,
+        "failure_kind": _CURRENT_TAB_EXTENSION_DISCONNECTED_KIND,
+        "non_retriable": True,
+        "retryable": False,
+        "abort_current_browser_action": True,
+    }
+
+
+def _is_non_retriable_transport_error(result: object) -> bool:
+    if isinstance(result, dict):
+        if result.get("non_retriable") is True:
+            return True
+        if result.get("failure_kind") == _CURRENT_TAB_EXTENSION_DISCONNECTED_KIND:
+            return True
+    return _is_current_tab_extension_disconnected_result(result)
+
+
+def _abort_current_browser_action_if_current_tab_unavailable(
+    tool_context: ToolContext | None,
+) -> None:
+    if tool_context is None or not _is_current_browser_task(tool_context):
+        return
+    if _is_current_tab_extension_disconnected(tool_context):
+        raise PermissionError(_current_tab_extension_disconnected_message())
+
+
+async def _call_current_tab_info(
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
+    if _is_current_tab_extension_disconnected(tool_context):
+        return _current_tab_extension_disconnected_error("host.current_tab.info")
+
+    from src.tools.current_tab import current_tab_info
+
+    result = await current_tab_info(tool_context=tool_context)
+    if _is_current_tab_extension_disconnected_result(result):
+        _mark_current_tab_extension_disconnected(tool_context, result)
+        return _current_tab_extension_disconnected_error("host.current_tab.info")
+    _record_current_browser_tab_state(
+        tool_context,
+        result,
+        source="current_tab.info",
+    )
+    return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
+
+async def _call_current_tab_activate(
+    tab_id: int,
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
+    if _is_current_tab_extension_disconnected(tool_context):
+        return _current_tab_extension_disconnected_error("host.current_tab.activate")
+
+    from src.tools.current_tab import current_tab_activate
+
+    result = await current_tab_activate(tab_id, tool_context=tool_context)
+    if _is_current_tab_extension_disconnected_result(result):
+        _mark_current_tab_extension_disconnected(tool_context, result)
+        return _current_tab_extension_disconnected_error("host.current_tab.activate")
+    _record_current_browser_tab_state(
+        tool_context,
+        result,
+        source="current_tab.activate",
+    )
+    return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
+
+async def _call_current_tab_navigate(
+    url: str,
+    *,
+    timeout_ms: int,
+    new_tab: bool,
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
+    if _is_current_tab_extension_disconnected(tool_context):
+        return _current_tab_extension_disconnected_error("host.current_tab.navigate")
+
+    from src.tools.current_tab import current_tab_navigate
+
+    result = await current_tab_navigate(
+        url,
+        timeout_ms=timeout_ms,
+        new_tab=new_tab,
+        tool_context=tool_context,
+    )
+    if _is_current_tab_extension_disconnected_result(result):
+        _mark_current_tab_extension_disconnected(tool_context, result)
+        return _current_tab_extension_disconnected_error("host.current_tab.navigate")
+    _record_current_browser_tab_state(
+        tool_context,
+        result,
+        source="current_tab.navigate",
+    )
+    return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
+
+async def _call_current_tab_extract_text(
+    selector: str | None,
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
+    if _is_current_tab_extension_disconnected(tool_context):
+        return _current_tab_extension_disconnected_error("host.current_tab.extract_text")
+
+    from src.tools.current_tab import current_tab_extract_text
+
+    result = await current_tab_extract_text(selector=selector, tool_context=tool_context)
+    if _is_current_tab_extension_disconnected_result(result):
+        _mark_current_tab_extension_disconnected(tool_context, result)
+        return _current_tab_extension_disconnected_error("host.current_tab.extract_text")
+    return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
+
+async def _call_current_tab_click(
+    selector: str,
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
+    if _is_current_tab_extension_disconnected(tool_context):
+        return _current_tab_extension_disconnected_error("host.current_tab.click")
+
+    from src.tools.current_tab import current_tab_click
+
+    result = await current_tab_click(selector, tool_context=tool_context)
+    if _is_current_tab_extension_disconnected_result(result):
+        _mark_current_tab_extension_disconnected(tool_context, result)
+        return _current_tab_extension_disconnected_error("host.current_tab.click")
+    return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
+
+async def _call_current_tab_fill(
+    selector: str,
+    text: str,
+    tool_context: ToolContext | None,
+) -> dict[str, Any]:
+    if _is_current_tab_extension_disconnected(tool_context):
+        return _current_tab_extension_disconnected_error("host.current_tab.fill")
+
+    from src.tools.current_tab import current_tab_fill
+
+    result = await current_tab_fill(selector, text, tool_context=tool_context)
+    if _is_current_tab_extension_disconnected_result(result):
+        _mark_current_tab_extension_disconnected(tool_context, result)
+        return _current_tab_extension_disconnected_error("host.current_tab.fill")
+    return result if isinstance(result, dict) else {"success": False, "error": str(result)}
+
+
 def _current_browser_new_tab_count(tool_context: ToolContext | None) -> int:
     if tool_context is None:
         return 0
@@ -352,8 +727,6 @@ async def _wait_for_current_browser_tab_verification(
     tool_context: ToolContext | None,
     previous_tab_id: Any | None = None,
 ) -> dict[str, Any]:
-    from src.tools.current_tab import current_tab_info
-
     try:
         expected_previous_tab_id = int(previous_tab_id)
     except (TypeError, ValueError):
@@ -361,10 +734,10 @@ async def _wait_for_current_browser_tab_verification(
 
     last_info: dict[str, Any] = {}
     for attempt in range(_CURRENT_BROWSER_NEW_TAB_VERIFY_ATTEMPTS):
-        info = await current_tab_info(tool_context=tool_context)
+        info = await _call_current_tab_info(tool_context)
         if isinstance(info, dict):
             last_info = info
-            if info.get("success"):
+            if _result_succeeded(info):
                 try:
                     current_tab_id = int(info.get("tab_id"))
                 except (TypeError, ValueError):
@@ -375,10 +748,8 @@ async def _wait_for_current_browser_tab_verification(
                     or current_tab_id != expected_previous_tab_id
                 ):
                     return info
-            else:
-                error_text = str(info.get("error") or "").lower()
-                if "disconnected" not in error_text:
-                    return info
+            elif _is_non_retriable_transport_error(info):
+                return info
         if attempt + 1 < _CURRENT_BROWSER_NEW_TAB_VERIFY_ATTEMPTS:
             await asyncio.sleep(_CURRENT_BROWSER_NEW_TAB_VERIFY_DELAY_SECONDS)
     return last_info
@@ -436,9 +807,15 @@ def _playback_app_name_hint(
 def _normalize_hotkeys(keys: list[str]) -> tuple[str, ...]:
     normalized = []
     for key in keys:
-        value = _HOTKEY_ALIASES.get(key.strip().lower(), key.strip().lower())
-        normalized.append(value)
-    return tuple(sorted(item for item in normalized if item))
+        # Split compound keys like "cmd+t" into ["cmd", "t"]
+        parts = key.split("+") if "+" in key else [key]
+        for part in parts:
+            value = _HOTKEY_ALIASES.get(part.strip().lower(), part.strip().lower())
+            normalized.append(value)
+    # De-duplicate: executors occasionally emit repeated keys like
+    # ["left", "left"] which have no meaningful hotkey semantics. Collapsing
+    # them to ("left",) lets the allow-list match cleanly.
+    return tuple(sorted({item for item in normalized if item}))
 
 
 def _rewrite_current_browser_hotkeys(keys: list[str]) -> list[str]:
@@ -467,6 +844,8 @@ def _current_browser_goal_text(tool_context: ToolContext | None) -> str:
 
 def _is_current_browser_search_task(tool_context: ToolContext | None) -> bool:
     goal = _current_browser_goal_text(tool_context).lower()
+    if _is_current_browser_spreadsheet_task(tool_context):
+        return False
     return any(keyword in goal for keyword in _CURRENT_BROWSER_SEARCH_KEYWORDS)
 
 
@@ -475,21 +854,178 @@ def _is_current_browser_spreadsheet_task(tool_context: ToolContext | None) -> bo
     return any(keyword in goal for keyword in SPREADSHEET_KEYWORDS)
 
 
-def _remember_current_browser_spreadsheet_target(
-    tool_context: ToolContext | None,
+def _spreadsheet_target_from_fields(
+    *,
+    app_name: str | None = None,
+    window_id: str | None = None,
+    role: str | None = None,
+    title: str | None = None,
+    identifier: str | None = None,
+    value_contains: str | None = None,
+) -> dict[str, Any]:
+    target: dict[str, Any] = {}
+    for key, value in (
+        ("app_name", app_name),
+        ("window_id", window_id),
+        ("role", role),
+        ("title", title),
+        ("identifier", identifier),
+        ("value_contains", value_contains),
+    ):
+        normalized = str(value or "").strip()
+        if normalized:
+            target[key] = normalized
+    return target
+
+
+def _normalize_current_browser_spreadsheet_target(
     target: Any,
-) -> None:
-    if tool_context is None or not _is_current_browser_spreadsheet_task(tool_context):
-        return
+) -> dict[str, Any]:
     if not isinstance(target, dict):
-        return
+        return {}
     normalized: dict[str, Any] = {}
-    for key in ("app_name", "window_id", "role", "title", "identifier"):
+    for key in (
+        "app_name",
+        "window_id",
+        "role",
+        "title",
+        "identifier",
+        "value_contains",
+    ):
         value = str(target.get(key) or "").strip()
         if value:
             normalized[key] = value
+    return normalized
+
+
+def _looks_like_safe_current_browser_spreadsheet_text_target(target: Any) -> bool:
+    normalized = _normalize_current_browser_spreadsheet_target(target)
+    if not normalized:
+        return False
+    marker_text = " ".join(
+        str(normalized.get(key) or "").strip().lower()
+        for key in ("title", "identifier", "value_contains")
+        if str(normalized.get(key) or "").strip()
+    )
+    if not marker_text:
+        return False
+    if any(marker in marker_text for marker in _CURRENT_BROWSER_SPREADSHEET_UNSAFE_TEXT_TARGET_MARKERS):
+        return False
+    if any(marker in marker_text for marker in _CURRENT_BROWSER_SPREADSHEET_SAFE_TEXT_TARGET_MARKERS):
+        return True
+    for token in (
+        str(normalized.get("title") or "").strip().lower(),
+        str(normalized.get("identifier") or "").strip().lower(),
+    ):
+        compact = token.replace("$", "").replace("!", "")
+        if 2 <= len(compact) <= 8 and any(ch.isalpha() for ch in compact) and any(
+            ch.isdigit() for ch in compact
+        ):
+            return True
+    return False
+
+
+def _is_current_browser_spreadsheet_text_field_target(target: Any) -> bool:
+    normalized = _normalize_current_browser_spreadsheet_target(target)
+    role = str(normalized.get("role") or "").strip().lower()
+    return role in _CURRENT_BROWSER_SPREADSHEET_TEXT_FIELD_ROLES
+
+
+def _guard_unsafe_current_browser_spreadsheet_text_target(
+    tool_context: ToolContext | None,
+    target: Any,
+    *,
+    action: str,
+) -> None:
+    if tool_context is None or not _is_current_browser_spreadsheet_task(tool_context):
+        return
+    if not _has_current_browser_google_sheets_destination(tool_context):
+        return
+    if not _is_current_browser_spreadsheet_text_field_target(target):
+        return
+    if _looks_like_safe_current_browser_spreadsheet_text_target(target):
+        return
+    raise PermissionError(
+        f"Blocked spreadsheet {action} because the selector points at a generic "
+        "text field, not a safe spreadsheet target. Do not click/type into the "
+        "document title or toolbar text inputs; type directly into the active "
+        "cell and use Tab/Enter to move."
+    )
+
+
+def _remember_current_browser_spreadsheet_target(
+    tool_context: ToolContext | None,
+    target: Any,
+    fallback: Any = None,
+) -> None:
+    if tool_context is None or not _is_current_browser_spreadsheet_task(tool_context):
+        return
+    normalized = _normalize_current_browser_spreadsheet_target(target)
+    if not _looks_like_safe_current_browser_spreadsheet_text_target(normalized):
+        normalized = _normalize_current_browser_spreadsheet_target(fallback)
+    if not _looks_like_safe_current_browser_spreadsheet_text_target(normalized):
+        return
     if normalized:
         tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET] = normalized
+
+
+def _clear_current_browser_spreadsheet_target(
+    tool_context: ToolContext | None,
+) -> None:
+    if tool_context is None:
+        return
+    _drop_tool_context_state_key(
+        tool_context,
+        StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET,
+    )
+
+
+def _drop_tool_context_state_key(
+    tool_context: ToolContext | None,
+    key: str,
+) -> None:
+    if tool_context is None:
+        return
+    state = tool_context.state
+    if hasattr(state, "pop"):
+        state.pop(key, None)
+        return
+
+    # google.adk.sessions.state.State exposes get/set but no delete/pop API.
+    # Remove the remembered target from both the committed value and pending
+    # delta so later type calls do not reuse a stale Name Box target.
+    raw_value = getattr(state, "_value", None)
+    if isinstance(raw_value, dict):
+        raw_value.pop(key, None)
+    raw_delta = getattr(state, "_delta", None)
+    if isinstance(raw_delta, dict):
+        raw_delta.pop(key, None)
+
+
+def _set_current_browser_spreadsheet_cell_edit_ready(
+    tool_context: ToolContext | None,
+    ready: bool,
+) -> None:
+    if tool_context is None:
+        return
+    key = StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_CELL_EDIT_READY
+    if ready:
+        tool_context.state[key] = True
+        return
+    _drop_tool_context_state_key(tool_context, key)
+
+
+def _current_browser_spreadsheet_cell_edit_ready(
+    tool_context: ToolContext | None,
+) -> bool:
+    if tool_context is None:
+        return False
+    return bool(
+        tool_context.state.get(
+            StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_CELL_EDIT_READY,
+            False,
+        )
+    )
 
 
 def _current_browser_spreadsheet_target(
@@ -500,12 +1036,48 @@ def _current_browser_spreadsheet_target(
     raw = tool_context.state.get(StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET)
     if not isinstance(raw, dict):
         return None
-    normalized: dict[str, Any] = {}
-    for key in ("app_name", "window_id", "role", "title", "identifier"):
-        value = str(raw.get(key) or "").strip()
-        if value:
-            normalized[key] = value
+    normalized = _normalize_current_browser_spreadsheet_target(raw)
     return normalized or None
+
+
+def _has_current_browser_google_sheets_destination(
+    tool_context: ToolContext | None,
+) -> bool:
+    if tool_context is None:
+        return False
+    raw = tool_context.state.get(StateKeys.TEMP_CURRENT_BROWSER_DESTINATION_TAB)
+    if not isinstance(raw, dict):
+        return False
+    surface = str(raw.get("surface") or "").strip().lower()
+    if surface == "google_sheets":
+        return True
+    url = str(raw.get("url") or "").strip()
+    title = str(raw.get("title") or "").strip()
+    return _is_current_browser_google_sheets_tab(url, title)
+
+
+async def _current_browser_spreadsheet_target_is_available(
+    target: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(target, dict) or not target:
+        return False
+    try:
+        from src.tools.desktop import desktop_wait_element
+
+        result = await desktop_wait_element(
+            app_name=str(target.get("app_name") or "").strip() or None,
+            window_id=str(target.get("window_id") or "").strip() or None,
+            role=str(target.get("role") or "").strip() or None,
+            title=str(target.get("title") or "").strip() or None,
+            identifier=str(target.get("identifier") or "").strip() or None,
+            value_contains=str(target.get("value_contains") or "").strip() or None,
+            timeout_seconds=0.35,
+            poll_interval_seconds=0.1,
+            tool_context=None,
+        )
+    except Exception:
+        return False
+    return bool(isinstance(result, dict) and result.get("matched"))
 
 
 def _is_safe_current_browser_destination(
@@ -549,12 +1121,14 @@ async def _assert_safe_current_browser_target(
     ):
         return
 
-    from src.tools.current_tab import current_tab_info
+    activation = await _activate_current_browser_task_tab(tool_context)
+    if _is_non_retriable_transport_error(activation):
+        raise PermissionError(_current_tab_extension_disconnected_message())
 
-    await _activate_current_browser_task_tab(tool_context)
-
-    info = await current_tab_info(tool_context=tool_context)
-    if not isinstance(info, dict) or not info.get("success"):
+    info = await _call_current_tab_info(tool_context)
+    if _is_non_retriable_transport_error(info):
+        raise PermissionError(_current_tab_extension_disconnected_message())
+    if not isinstance(info, dict) or not _result_succeeded(info):
         raise PermissionError(
             "Current-browser text/click actions require current_tab.info to verify the "
             "destination tab before interacting with page forms."
@@ -588,11 +1162,25 @@ def _looks_like_url(text: str) -> bool:
     return lowered.startswith(("http://", "https://")) or "://" in lowered
 
 
+def _looks_like_search_url(text: str) -> bool:
+    lowered = text.lower()
+    return "google.com/search?q=" in lowered or "google.co.jp/search?q=" in lowered
+
+
+def _looks_like_blocked_spreadsheet_payload(text: str) -> bool:
+    stripped = text.strip()
+    if not stripped:
+        return False
+    return _looks_like_search_url(stripped) or (_looks_like_url(stripped) and len(stripped) >= 24)
+
+
 def _rewrite_current_browser_address_bar_text(
     text: str,
     tool_context: ToolContext | None,
 ) -> str:
     if tool_context is None:
+        return text
+    if _is_current_browser_spreadsheet_task(tool_context):
         return text
     focused = bool(tool_context.state.get(_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY))
     tool_context.state[_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY] = False
@@ -609,59 +1197,6 @@ def _rewrite_current_browser_address_bar_text(
     if not focused and len(stripped) > _ADDRESS_BAR_FALLBACK_QUERY_MAX_CHARS:
         return text
     return f"https://www.google.com/search?q={quote_plus(stripped)}"
-
-
-def _matches_gateway_control_ui_url(url: str) -> bool:
-    parsed = urlsplit(url)
-    host = (parsed.hostname or "").strip()
-    path = parsed.path.rstrip("/") or "/"
-    if not host or path != "/chat":
-        return False
-
-    settings = get_settings()
-    expected_host = (settings.gateway_host or "").strip().lower()
-    expected_port = int(settings.gateway_port)
-    actual_host = host.lower()
-    actual_port = parsed.port
-    if actual_port is None:
-        actual_port = 443 if parsed.scheme == "https" else 80
-
-    if actual_host == expected_host and actual_port == expected_port:
-        return True
-    if is_loopback_host(host) and is_loopback_host(settings.gateway_host):
-        return actual_port == expected_port
-    return False
-
-
-def _is_loopback_control_ui_chat_url(url: str) -> bool:
-    parsed = urlsplit(url)
-    host = (parsed.hostname or "").strip()
-    path = parsed.path.rstrip("/") or "/"
-    return bool(host) and path == "/chat" and is_loopback_host(host)
-
-
-def _audit_current_browser_navigation_redirect(
-    *,
-    tool_context: ToolContext | None,
-    url: str,
-    result: str,
-    metadata: dict[str, Any] | None = None,
-) -> None:
-    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
-    get_audit_logger().log(
-        event_type=AuditEventType.BROWSER_NAVIGATE,
-        user_id=ctx.get("user_id") or None,
-        session_id=ctx.get("session_id") or None,
-        action="redirect_to_current_tab",
-        resource=url,
-        result=result,
-        metadata={
-            "requested_tool": "browser.navigate",
-            "effective_tool": "current_tab.navigate",
-            "reason": "current_browser_task",
-            **(metadata or {}),
-        },
-    )
 
 
 async def _focus_control_ui_browser_window(
@@ -681,12 +1216,10 @@ async def _focus_control_ui_browser_window(
 
 
 def _is_current_browser_control_ui_tab(url: str, title: str) -> bool:
+    lowered_url = url.lower()
     lowered_title = title.lower()
-    if _matches_gateway_control_ui_url(url) or _is_loopback_control_ui_chat_url(url):
-        return True
-    return any(
-        hint.lower() in lowered_title
-        for hint in _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS
+    return any(marker in lowered_url for marker in _CURRENT_BROWSER_CONTROL_UI_URL_MARKERS) or any(
+        hint.lower() in lowered_title for hint in _CURRENT_BROWSER_CONTROL_UI_TITLE_HINTS
     )
 
 
@@ -699,10 +1232,10 @@ async def _activate_current_browser_task_tab(
     if target_tab_id is None:
         return None
 
-    from src.tools.current_tab import current_tab_activate, current_tab_info
-
-    current_info = await current_tab_info(tool_context=tool_context)
-    if isinstance(current_info, dict) and current_info.get("success"):
+    current_info = await _call_current_tab_info(tool_context)
+    if _is_non_retriable_transport_error(current_info):
+        return current_info
+    if isinstance(current_info, dict) and _result_succeeded(current_info):
         try:
             current_tab_id = int(current_info.get("tab_id"))
         except (TypeError, ValueError):
@@ -718,8 +1251,8 @@ async def _activate_current_browser_task_tab(
         if not _is_current_browser_control_ui_tab(current_url, current_title):
             return current_info
 
-    activated = await current_tab_activate(target_tab_id, tool_context=tool_context)
-    if isinstance(activated, dict) and activated.get("success"):
+    activated = await _call_current_tab_activate(target_tab_id, tool_context)
+    if isinstance(activated, dict) and _result_succeeded(activated):
         tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID] = target_tab_id
         return activated
     return activated if isinstance(activated, dict) else None
@@ -733,10 +1266,8 @@ async def _should_open_current_browser_task_tab(
     if not _plan_allows_capability(tool_context, _CURRENT_TAB_CAPABILITY):
         return False
 
-    from src.tools.current_tab import current_tab_info
-
-    current_info = await current_tab_info(tool_context=tool_context)
-    if not isinstance(current_info, dict) or not current_info.get("success"):
+    current_info = await _call_current_tab_info(tool_context)
+    if not isinstance(current_info, dict) or not _result_succeeded(current_info):
         return False
 
     try:
@@ -852,27 +1383,15 @@ async def guarded_browser_navigate(
     if _is_current_browser_task(tool_context) and _plan_allows_capability(
         tool_context, _CURRENT_TAB_CAPABILITY
     ):
-        try:
-            result = await guarded_current_tab_navigate(url, tool_context=tool_context)
-        except PermissionError as exc:
-            _audit_current_browser_navigation_redirect(
-                tool_context=tool_context,
-                url=url,
-                result="blocked",
-                metadata={"error": str(exc)},
+        if _is_current_tab_extension_disconnected(tool_context):
+            return _current_tab_extension_disconnected_error(
+                "browser.navigate/current_tab.navigate"
             )
-            raise
-        _audit_current_browser_navigation_redirect(
-            tool_context=tool_context,
-            url=url,
-            result="redirected" if result.get("success") else "failed",
-            metadata={
-                "current_tab_success": bool(result.get("success")),
-                "tab_id": result.get("tab_id"),
-                "window_id": result.get("window_id"),
-                **({"error": result.get("error")} if result.get("error") else {}),
-            },
-        )
+        result = await guarded_current_tab_navigate(url, tool_context=tool_context)
+        if _is_non_retriable_transport_error(result):
+            return _current_tab_extension_disconnected_error(
+                "browser.navigate/current_tab.navigate"
+            )
         return result
 
     _check_approval(tool_context, "browser.navigate")
@@ -886,11 +1405,9 @@ async def guarded_current_tab_info(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
-        _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
-        _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
-
-    from src.tools.current_tab import current_tab_info
-    return await current_tab_info(tool_context=tool_context)
+        _check_approval(tool_context, _CURRENT_TAB_INFO_CAPABILITY)
+        _check_capability_in_plan(tool_context, _CURRENT_TAB_INFO_CAPABILITY)
+    return await _call_current_tab_info(tool_context)
 
 
 async def guarded_current_tab_navigate(
@@ -898,27 +1415,94 @@ async def guarded_current_tab_navigate(
     timeout_ms: int = 15000,
     tool_context: ToolContext | None = None,
 ) -> dict:
-    open_new_tab = False
+    # Always open in a new tab so the Control UI tab is never overwritten.
+    open_new_tab = True
     if tool_context is not None:
         _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
-        await _activate_current_browser_task_tab(tool_context)
+        if _is_current_tab_extension_disconnected(tool_context):
+            return _current_tab_extension_disconnected_error("host.current_tab.navigate")
+        activation = await _activate_current_browser_task_tab(tool_context)
+        if _is_non_retriable_transport_error(activation):
+            return activation
         open_new_tab = await _should_open_current_browser_task_tab(tool_context)
+        if _is_current_tab_extension_disconnected(tool_context):
+            return _current_tab_extension_disconnected_error("host.current_tab.navigate")
 
-    from src.tools.current_tab import current_tab_navigate
-    result = await current_tab_navigate(
+    result = await _call_current_tab_navigate(
         url,
         timeout_ms=timeout_ms,
         new_tab=open_new_tab,
         tool_context=tool_context,
     )
-    if tool_context is not None and isinstance(result, dict) and result.get("success"):
+    if tool_context is not None and isinstance(result, dict) and _result_succeeded(result):
         if open_new_tab:
             tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_NEW_TAB_COUNT] = (
                 _current_browser_new_tab_count(tool_context) + 1
             )
         _remember_current_browser_opened_tab(tool_context, result.get("tab_id"))
+        await _dismiss_google_sheets_overlays(tool_context, url, result)
     return result
+
+
+async def _dismiss_google_sheets_overlays(
+    tool_context: ToolContext | None,
+    url: str,
+    nav_result: dict,
+) -> None:
+    """Close the Gemini/"Build" side panel that Google Sheets auto-opens on
+    new spreadsheets.
+
+    On a fresh /spreadsheets/create or /spreadsheets/d/.../edit load, Google
+    Sheets now opens a Gemini-in-Workspace overlay whose text input captures
+    keyboard focus. Subsequent desktop.control.hotkey / type calls silently
+    go to that overlay instead of the grid, leaving cells empty.
+
+    Dismiss it with a single Escape keypress right after navigation, but only
+    for current-browser spreadsheet tasks and only when the resulting tab
+    actually landed on a Google Sheets URL.
+    """
+    if tool_context is None or not _is_current_browser_spreadsheet_task(tool_context):
+        return
+
+    landed_url = ""
+    if isinstance(nav_result, dict):
+        landed_url = str(nav_result.get("url") or "").strip()
+    if not landed_url:
+        landed_url = url or ""
+
+    lowered = landed_url.lower()
+    if not ("docs.google.com/spreadsheets" in lowered or "sheets.new" in lowered):
+        return
+
+    # Give the Gemini panel a moment to appear before we try to dismiss it.
+    await asyncio.sleep(1.5)
+
+    extracted = await _call_current_tab_extract_text(None, tool_context)
+    if _is_non_retriable_transport_error(extracted):
+        return
+    overlay_text = str(extracted.get("text") or "") if isinstance(extracted, dict) else ""
+
+    if overlay_text:
+        lowered_text = overlay_text.lower()
+        if not any(marker in lowered_text for marker in _GOOGLE_SHEETS_OVERLAY_MARKERS):
+            return
+
+    await _ensure_current_browser_frontmost(tool_context)
+
+    for selector in _GOOGLE_SHEETS_OVERLAY_DISMISS_SELECTORS:
+        clicked = await _call_current_tab_click(selector, tool_context)
+        if _is_non_retriable_transport_error(clicked):
+            return
+        if _result_succeeded(clicked):
+            await asyncio.sleep(0.15)
+
+    try:
+        from src.tools.desktop import desktop_control_hotkey
+
+        await desktop_control_hotkey(keys=["escape"], tool_context=None)
+    except Exception:
+        return
 
 
 async def guarded_current_tab_extract_text(
@@ -928,10 +1512,14 @@ async def guarded_current_tab_extract_text(
     if tool_context is not None:
         _check_approval(tool_context, _CURRENT_TAB_CAPABILITY)
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
-        await _activate_current_browser_task_tab(tool_context)
-
-    from src.tools.current_tab import current_tab_extract_text
-    return await current_tab_extract_text(selector=selector, tool_context=tool_context)
+        if _is_current_tab_extension_disconnected(tool_context):
+            return _current_tab_extension_disconnected_error(
+                "host.current_tab.extract_text"
+            )
+        activation = await _activate_current_browser_task_tab(tool_context)
+        if _is_non_retriable_transport_error(activation):
+            return activation
+    return await _call_current_tab_extract_text(selector, tool_context)
 
 
 async def guarded_current_tab_click(
@@ -948,9 +1536,9 @@ async def guarded_current_tab_click(
                 f"Current status: '{status}'"
             )
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
-
-    from src.tools.current_tab import current_tab_click
-    return await current_tab_click(selector, tool_context=tool_context)
+        if _is_current_tab_extension_disconnected(tool_context):
+            return _current_tab_extension_disconnected_error("host.current_tab.click")
+    return await _call_current_tab_click(selector, tool_context)
 
 
 async def guarded_current_tab_fill(
@@ -968,9 +1556,9 @@ async def guarded_current_tab_fill(
                 f"Current status: '{status}'"
             )
         _check_capability_in_plan(tool_context, _CURRENT_TAB_CAPABILITY)
-
-    from src.tools.current_tab import current_tab_fill
-    return await current_tab_fill(selector, text, tool_context=tool_context)
+        if _is_current_tab_extension_disconnected(tool_context):
+            return _current_tab_extension_disconnected_error("host.current_tab.fill")
+    return await _call_current_tab_fill(selector, text, tool_context)
 
 
 async def guarded_browser_extract_text(
@@ -1102,6 +1690,14 @@ async def guarded_desktop_ax_find(
     index: int = 0,
     tool_context: ToolContext | None = None,
 ) -> dict:
+    selector_target = _spreadsheet_target_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+    )
     if tool_context is not None:
         _check_approval(tool_context, "desktop.ax.find")
         _check_capability_in_plan(tool_context, "desktop.ax.find")
@@ -1117,7 +1713,11 @@ async def guarded_desktop_ax_find(
         index=index,
     )
     if isinstance(result, dict) and result.get("matched"):
-        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+        _remember_current_browser_spreadsheet_target(
+            tool_context,
+            result.get("target"),
+            fallback=selector_target,
+        )
     return result
 
 
@@ -1133,6 +1733,14 @@ async def guarded_desktop_wait_element(
     poll_interval_seconds: float = 0.2,
     tool_context: ToolContext | None = None,
 ) -> dict:
+    selector_target = _spreadsheet_target_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+    )
     if tool_context is not None:
         _check_approval(tool_context, "desktop.wait.element")
         _check_capability_in_plan(tool_context, "desktop.wait.element")
@@ -1150,7 +1758,11 @@ async def guarded_desktop_wait_element(
         poll_interval_seconds=poll_interval_seconds,
     )
     if isinstance(result, dict) and result.get("matched"):
-        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+        _remember_current_browser_spreadsheet_target(
+            tool_context,
+            result.get("target"),
+            fallback=selector_target,
+        )
     return result
 
 
@@ -1186,9 +1798,23 @@ async def guarded_desktop_control_click(
     index: int = 0,
     tool_context: ToolContext | None = None,
 ) -> dict:
+    selector_target = _spreadsheet_target_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+    )
     if tool_context is not None:
+        _abort_current_browser_action_if_current_tab_unavailable(tool_context)
         if _is_current_browser_task(tool_context):
             await _assert_safe_current_browser_target(tool_context)
+        _guard_unsafe_current_browser_spreadsheet_text_target(
+            tool_context,
+            selector_target,
+            action="click",
+        )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -1212,8 +1838,60 @@ async def guarded_desktop_control_click(
         index=index,
     )
     if isinstance(result, dict) and result.get("success"):
-        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+        _remember_current_browser_spreadsheet_target(
+            tool_context,
+            result.get("target"),
+            fallback=selector_target,
+        )
     return result
+
+
+async def _ensure_current_browser_frontmost(
+    tool_context: ToolContext | None,
+) -> str | None:
+    """Bring the current-browser app to the OS-frontmost window before a
+    desktop.control.type / hotkey fires.
+
+    desktop.control.hotkey has no selector — it injects global key events,
+    which land on whichever app is frontmost. For current-browser tasks
+    that app MUST be the browser, otherwise cell-navigation keys (Tab,
+    arrows, Enter) and typed text silently get absorbed by whichever OS
+    window happens to be in front (VS Code, Terminal, Control UI tab, ...).
+
+    Called with tool_context=None on the inner desktop.control.focus_window
+    call so we don't re-trigger approval / capability checks; the outer
+    guarded_desktop_control_{type,hotkey} has already verified the plan
+    grants the enclosing capability.
+    """
+    if tool_context is None or not _is_current_browser_task(tool_context):
+        return None
+
+    # Prefer the remembered spreadsheet target's app_name if we have one.
+    remembered = _current_browser_spreadsheet_target(tool_context) or {}
+    candidate = (remembered.get("app_name") or "").strip()
+
+    if not candidate:
+        try:
+            from src.tools.desktop import desktop_view_windows
+            windows = await desktop_view_windows(include_minimized=False)
+        except Exception:
+            windows = {}
+        if isinstance(windows, dict):
+            for window in windows.get("windows", []):
+                app = str(window.get("app_name") or "").strip()
+                if app in _KNOWN_BROWSER_APPS:
+                    candidate = app
+                    break
+
+    if not candidate:
+        candidate = "Google Chrome"
+
+    try:
+        from src.tools.desktop import desktop_control_focus_window
+        await desktop_control_focus_window(app_name=candidate, tool_context=None)
+    except Exception:
+        return None
+    return candidate
 
 
 async def guarded_desktop_control_type(
@@ -1227,15 +1905,60 @@ async def guarded_desktop_control_type(
     index: int = 0,
     tool_context: ToolContext | None = None,
 ) -> dict:
+    explicit_target = any((app_name, window_id, role, title, identifier, value_contains))
+    selector_target = _spreadsheet_target_from_fields(
+        app_name=app_name,
+        window_id=window_id,
+        role=role,
+        title=title,
+        identifier=identifier,
+        value_contains=value_contains,
+    )
     if tool_context is not None:
+        _abort_current_browser_action_if_current_tab_unavailable(tool_context)
         if _is_current_browser_spreadsheet_task(tool_context):
+            if not _has_current_browser_google_sheets_destination(tool_context):
+                try:
+                    await _call_current_tab_info(tool_context)
+                except Exception:
+                    pass
             remembered_target = _current_browser_spreadsheet_target(tool_context)
-            if remembered_target and not any((app_name, window_id, role, title, identifier, value_contains)):
+            if remembered_target and not explicit_target:
+                target_available = await _current_browser_spreadsheet_target_is_available(
+                    remembered_target
+                )
+                if not target_available:
+                    _clear_current_browser_spreadsheet_target(tool_context)
+                    remembered_target = None
+            cell_edit_ready = _current_browser_spreadsheet_cell_edit_ready(tool_context)
+            if remembered_target and not explicit_target:
                 app_name = remembered_target.get("app_name") or app_name
                 window_id = remembered_target.get("window_id") or window_id
                 role = remembered_target.get("role") or role
                 title = remembered_target.get("title") or title
                 identifier = remembered_target.get("identifier") or identifier
+                value_contains = remembered_target.get("value_contains") or value_contains
+            if not explicit_target and not remembered_target and not cell_edit_ready:
+                raise PermissionError(
+                    "Blocked spreadsheet typing because no remembered safe text "
+                    "target or active-cell-ready state is established. Type into "
+                    "the already selected cell when possible; otherwise use "
+                    "desktop.ax.find/click only on an explicitly labeled Name Box, "
+                    "then press Enter/Tab into the target cell before typing."
+                )
+            if (
+                _has_current_browser_google_sheets_destination(tool_context)
+                and _looks_like_blocked_spreadsheet_payload(text)
+            ):
+                raise PermissionError(
+                    "Blocked spreadsheet typing because the payload looks like a "
+                    "browser/search URL instead of spreadsheet cell data."
+                )
+            _guard_unsafe_current_browser_spreadsheet_text_target(
+                tool_context,
+                selector_target,
+                action="typing",
+            )
         if (
             _is_current_browser_task(tool_context)
             and not any((app_name, window_id, role, title, identifier, value_contains))
@@ -1250,6 +1973,9 @@ async def guarded_desktop_control_type(
                 f"Current status: '{status}'"
             )
         _check_capability_in_plan(tool_context, "desktop.control.type")
+        # Ensure the browser app is OS-frontmost so AX-injected typing lands
+        # on the right window rather than whatever was previously in front.
+        await _ensure_current_browser_frontmost(tool_context)
 
     from src.tools.desktop import desktop_control_type
     result = await desktop_control_type(
@@ -1263,7 +1989,13 @@ async def guarded_desktop_control_type(
         index=index,
     )
     if isinstance(result, dict) and result.get("success"):
-        _remember_current_browser_spreadsheet_target(tool_context, result.get("target"))
+        _remember_current_browser_spreadsheet_target(
+            tool_context,
+            result.get("target"),
+            fallback=selector_target,
+        )
+        if _is_current_browser_spreadsheet_task(tool_context) and not explicit_target:
+            _set_current_browser_spreadsheet_cell_edit_ready(tool_context, False)
     return result
 
 
@@ -1380,16 +2112,36 @@ async def guarded_desktop_control_hotkey(
     verify_new_tab_after_hotkey = False
     previous_tab_id: int | None = None
     new_tab_count = 0
+    normalized_keys: tuple[str, ...] = ()
+    spreadsheet_input_primed = False
     if tool_context is not None:
+        _abort_current_browser_action_if_current_tab_unavailable(tool_context)
         if _is_current_browser_task(tool_context):
             effective_keys = _rewrite_current_browser_hotkeys(keys)
             normalized_keys = _normalize_hotkeys(effective_keys)
             allow_new_tab = _allows_current_browser_new_tab(tool_context)
+            # Allow spreadsheet cell-editing hotkeys (Tab / arrows / Enter /
+            # Shift+Tab / Cmd+S / Cmd+Z / Escape) for current-browser
+            # spreadsheet tasks. Tab etc. are cell-navigation inside Google
+            # Sheets, not tab-switching. The approved plan must still grant
+            # desktop.control.hotkey at the step contract level (enforced by
+            # _check_capability_in_plan below).
+            allow_spreadsheet_editing = _is_current_browser_spreadsheet_task(
+                tool_context
+            )
             if (
                 normalized_keys not in _CURRENT_BROWSER_ALLOWED_HOTKEYS
                 and not (
                     allow_new_tab
                     and normalized_keys in _CURRENT_BROWSER_NEW_TAB_HOTKEYS
+                )
+                and not (
+                    allow_new_tab
+                    and normalized_keys in _CURRENT_BROWSER_NEWTAB_EDITING_HOTKEYS
+                )
+                and not (
+                    allow_spreadsheet_editing
+                    and normalized_keys in _CURRENT_BROWSER_NEWTAB_EDITING_HOTKEYS
                 )
             ):
                 raise PermissionError(
@@ -1416,6 +2168,11 @@ async def guarded_desktop_control_hotkey(
                 tool_context.state[_CURRENT_BROWSER_ADDRESS_BAR_STATE_KEY] = (
                     normalized_keys != ("enter",)
                 )
+        if _is_current_browser_spreadsheet_task(tool_context):
+            spreadsheet_input_primed = bool(
+                _current_browser_spreadsheet_target(tool_context)
+                or _current_browser_spreadsheet_cell_edit_ready(tool_context)
+            )
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(
@@ -1423,12 +2180,16 @@ async def guarded_desktop_control_hotkey(
                 f"Current status: '{status}'"
             )
         _check_capability_in_plan(tool_context, "desktop.control.hotkey")
+        # Ensure the browser app is OS-frontmost. Hotkeys have no selector —
+        # without this, Tab / arrows / Enter land on whichever app is
+        # frontmost, silently missing Google Sheets.
+        await _ensure_current_browser_frontmost(tool_context)
 
         if verify_new_tab_after_hotkey:
-            from src.tools.current_tab import current_tab_info
-
-            previous_info = await current_tab_info(tool_context=tool_context)
-            if isinstance(previous_info, dict) and previous_info.get("success"):
+            previous_info = await _call_current_tab_info(tool_context)
+            if _is_non_retriable_transport_error(previous_info):
+                raise PermissionError(_current_tab_extension_disconnected_message())
+            if isinstance(previous_info, dict) and _result_succeeded(previous_info):
                 try:
                     previous_tab_id = int(previous_info.get("tab_id"))
                 except (TypeError, ValueError):
@@ -1437,6 +2198,27 @@ async def guarded_desktop_control_hotkey(
     from src.tools.desktop import desktop_control_hotkey
     result = await desktop_control_hotkey(keys=effective_keys)
 
+    if (
+        tool_context is not None
+        and _is_current_browser_spreadsheet_task(tool_context)
+        and isinstance(result, dict)
+        and (result.get("success") or result.get("ok"))
+        and normalized_keys in _CURRENT_BROWSER_NEWTAB_EDITING_HOTKEYS
+    ):
+        # A remembered spreadsheet target usually points at the Name Box used
+        # to jump to A1/B2/etc. Once a spreadsheet editing hotkey commits or
+        # moves focus, later text should go to the active grid cell instead of
+        # being forced back into that stale text field.
+        _clear_current_browser_spreadsheet_target(tool_context)
+        _set_current_browser_spreadsheet_cell_edit_ready(
+            tool_context,
+            (
+                spreadsheet_input_primed
+                or _has_current_browser_google_sheets_destination(tool_context)
+            )
+            and normalized_keys in _CURRENT_BROWSER_SPREADSHEET_CELL_READY_HOTKEYS,
+        )
+
     if verify_new_tab_after_hotkey and isinstance(result, dict) and (
         result.get("success") or result.get("ok")
     ):
@@ -1444,6 +2226,8 @@ async def guarded_desktop_control_hotkey(
             tool_context,
             previous_tab_id=previous_tab_id,
         )
+        if _is_non_retriable_transport_error(info):
+            raise PermissionError(_current_tab_extension_disconnected_message())
         if not isinstance(info, dict) or not info.get("success"):
             raise PermissionError(
                 "Failed to verify the newly opened browser tab. Refusing to "
@@ -1473,6 +2257,7 @@ async def guarded_desktop_control_scroll(
     tool_context: ToolContext | None = None,
 ) -> dict:
     if tool_context is not None:
+        _abort_current_browser_action_if_current_tab_unavailable(tool_context)
         status = tool_context.state.get(StateKeys.APPROVAL_STATUS, "")
         if status != "human_approved":
             raise PermissionError(

@@ -5,6 +5,7 @@ import pytest
 from src.control_loop.root_workflow import ExecutionResult
 from src.gateway.control_supervisor import ControlLoopSupervisor, build_maintenance_goal
 from src.runtime.durable_execution_schema import GuardrailBudgetPolicy
+from src.runtime.mission_contract import MissionContract, build_mission_contract
 from src.runtime.task_store import TaskStore
 
 
@@ -91,9 +92,99 @@ async def test_control_supervisor_completes_and_records_child_tasks(tmp_path):
     assert len(parent["artifacts"]["progress"]["child_task_ids"]) == 2
     assert child_calls[0][0].startswith("ctrlsup_")
     assert child_calls[0][1] == "sess-owner"
-    assert child_calls[0][2] == build_maintenance_goal("Keep the session healthy")
+    assert child_calls[0][2] == build_maintenance_goal(
+        "Keep the session healthy",
+        MissionContract.model_validate(started.mission_contract),
+    )
     assert session_events[0][1] == "accepted"
     assert session_events[-1][1] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_persists_mission_contract_in_live_artifacts(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    child_goals: list[str] = []
+    mission_contract = build_mission_contract(
+        contract_id="mission-live-test",
+        objective="Keep the current-tab sheet healthy",
+        allowed_actions=["current_tab.read", "current_tab.fill"],
+        forbidden_actions=["switch away from the target sheet"],
+        abort_conditions=["human approval required"],
+        completion_criteria=["target cell evidence is visible"],
+        evidence_requirements=["post-action screenshot"],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_goals.append(kwargs["goal"])
+        child_task = store.create(
+            kind="control_loop",
+            title="iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+            artifacts={"result": {"success": True, "final_text": "ok"}},
+        )
+        return (
+            ExecutionResult(
+                request_id="req-1",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy objective should not win",
+        constraints=["legacy constraint"],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=1,
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["title"] == "Keep the current-tab sheet healthy"
+    assert parent["artifacts"]["mission_contract"]["contract_id"] == "mission-live-test"
+    assert parent["metadata"]["mission_contract_id"] == "mission-live-test"
+    assert "Mission contract:" in child_goals[0]
+    assert "target cell evidence is visible" in child_goals[0]
+    durable = parent["artifacts"]["durable_execution"]
+    assert durable["mission_contract"]["contract_id"] == "mission-live-test"
+    assert durable["task_graph"]["metadata"]["mission_contract_id"] == "mission-live-test"
+    node = durable["task_graph"]["nodes"][0]
+    assert node["completion_criteria"] == ["target cell evidence is visible"]
+    assert node["metadata"]["evidence_requirements"] == ["post-action screenshot"]
+    assert node["artifacts"][0]["kind"] == "mission_contract"
+    queue_entry = durable["scheduler_state"]["completed_queue"][0]
+    assert queue_entry["metadata"]["mission_contract_id"] == "mission-live-test"
 
 
 @pytest.mark.asyncio
@@ -412,3 +503,57 @@ async def test_control_supervisor_weak_evidence_waits_for_approval(tmp_path):
     assert durable["scheduler_state"]["waiting_for_approval_queue"][0]["node_id"].endswith("/maintain-objective")
     assert durable["escalations"][0]["approval_request_id"].startswith("approval:")
     assert durable["resume_state"]["reason"] == "awaiting_approval"
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_classifies_child_policy_exception(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        raise PermissionError("Capability 'current_tab.navigate' is not in the approved plan.")
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="Keep the current browser session healthy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=2,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "pending"
+    assert parent["artifacts"]["result"]["failure_type"] == "policy_blocked"
+    assert parent["artifacts"]["result"]["scheduler_queue"] == "waiting_for_approval"
+    assert parent["artifacts"]["progress"]["last_child_task_id"].endswith(
+        "/supervisor-exception-1"
+    )
+    durable = parent["artifacts"]["durable_execution"]
+    assert durable["job_runs"][0]["verifier_verdict"]["failure_type"] == "policy_blocked"
+    assert durable["scheduler_state"]["waiting_for_approval_queue"][0]["reason"] == (
+        "human_approval_required"
+    )

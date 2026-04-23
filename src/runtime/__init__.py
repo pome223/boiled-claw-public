@@ -41,6 +41,11 @@ from src.runtime.durable_execution_schema import (
     SchedulerQueueKind,
     SchedulerQueueState,
 )
+from src.runtime.mission_contract import (
+    MissionContract,
+    build_mission_contract,
+    normalize_mission_contract,
+)
 from src.runtime.policy_schema import (
     ApprovalMode,
     ApprovalDecisionStatus,
@@ -93,6 +98,9 @@ __all__ = [
     "SchedulerQueueEntry",
     "SchedulerQueueKind",
     "SchedulerQueueState",
+    "MissionContract",
+    "build_mission_contract",
+    "normalize_mission_contract",
     # policy
     "ApprovalMode",
     "ApprovalDecisionStatus",

@@ -122,7 +122,7 @@ The next substrate slice for #84, #85, and #87 is now explicit too: each eval ru
 In Phase 0 these are **eval-derived substrate artifacts**, not live scheduler-backed runtime state yet. They make the contract explicit now, so later scheduler / recovery work can consume the same shapes without inventing a new surface.
 The next follow-on slice for #86, #88, #89, and #90 stays inside that same Phase 0 contract: eval runs now also emit **eval-derived orchestration artifacts** for scheduler queues, recovery policy/decision, guardrail budget state, and durable human escalation records.
 These are still not a live worker loop. They are the durable report shapes that a future scheduler / recovery engine can consume without changing the external artifact contract.
-The next private follow-up after that teaches the long-running `ControlLoopSupervisor` to consume the same recovery and budget policy at runtime. That path still uses a supervisor-owned loop instead of a standalone scheduler service, but it now distinguishes `blocked` from generic `failed` when guardrails exhaust or recovery cannot proceed, so operators and UI consumers should treat `blocked` as a first-class terminal state.
+The next private follow-up after that teaches the long-running `ControlLoopSupervisor` to consume the same recovery and budget policy at runtime. That path still uses a supervisor-owned loop instead of a standalone scheduler service, but it now distinguishes `blocked` from generic `failed` when guardrails exhaust or recovery cannot proceed, so operators and UI consumers should treat `blocked` as a first-class terminal state. The live supervisor now accepts a first-class `mission_contract`, persists it beside the task and `durable_execution`, and projects the contract into task graph node criteria plus scheduler queue metadata.
 The next Google Sheets vertical slice for #92 and #93 now uses that same contract directly: `evals/current_tab_google_sheets.yaml` is a `long_running_vertical_slice`, and the Control UI task detail renders long-running state, scheduler queues, checkpoints, approval waits, and budget exhaustion from the persisted eval report.
 The next physical design slice for #94, #95, #96, and #97 applies the same contract-first rule to simulation-first adapters: each validation run now persists a `mission_contract`, `verifier_result`, `telemetry_health`, `action_envelope`, `governor_decision`, and offline `replay_plan`.
 These are still policy-bounded physical runtime artifacts, not a claim that boiled-claw now owns a live motor-controller stack.
@@ -159,6 +159,7 @@ boiled-claw eval classify --trajectory-id 42 --failure-type focus_mismatch
 
 Phase 0 eval reports now surface:
 
+- top-level `durable_execution.mission_contract` for contract-backed live supervisor tasks
 - top-level `durable_execution.task_graph`
 - top-level `durable_execution.resume_state`
 - one `run_jobs[]` record per matched trajectory
@@ -183,6 +184,7 @@ Each `run_jobs[]` entry is expected to expose:
 
 Top-level `durable_execution` is expected to expose:
 
+- `mission_contract`
 - `task_graph`
 - `resume_state`
 - `scheduler_state`
@@ -878,7 +880,7 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 - `GET /tasks` / `GET /tasks/{task_id}` - Persistent workflow task objects
 - `GET /tasks/{task_id}/timeline` / `POST /tasks/{task_id}/replay` / `GET /tasks/{task_id}/compare` - Task timeline, replay, and comparison surfaces for control-loop runs (`POST /tasks/{task_id}/replay` accepts optional JSON `{ "from_step": "<step_id>" }` for tail replay; compare payload includes `step_compare.rows[]`)
 - `GET /tasks/analytics` - Cross-session step failure ranking, replay improvement rates, and task overview stats
-- `POST /tasks/supervisors/control-loop` / `POST /tasks/{task_id}/cancel` - Opt-in long-running supervisor that repeatedly runs child control-loop tasks against a stable maintenance goal, plus graceful stop for the current iteration boundary
+- `POST /tasks/supervisors/control-loop` / `POST /tasks/{task_id}/cancel` - Opt-in long-running supervisor that repeatedly runs child control-loop tasks from a stable goal or first-class `mission_contract`, plus graceful stop for the current iteration boundary
 - `GET /runtime/resources` / `GET /runtime/resources/{resource_id}` - Runtime substrate resources
 - `GET /runtime/capabilities` / `POST /runtime/capabilities/invoke` - Canonical capability registry and invoke surface
 - `GET /tools/policy` - Tool policy list
@@ -896,6 +898,23 @@ curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
     "user_id": "web_user",
     "goal": "Keep the desktop playback session healthy for the next hour",
     "constraints": ["Prefer minimal intervention and stop on unexpected approval prompts."],
+    "duration_seconds": 3600,
+    "interval_seconds": 60
+  }'
+
+# Or start from an explicit Mission Contract.
+curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
+  -H "Content-Type: application/json" \
+  -d '{
+    "user_id": "web_user",
+    "mission_contract": {
+      "objective": "Keep the current-tab sheet healthy for the next hour",
+      "allowed_actions": ["current_tab.read", "current_tab.fill", "desktop.screenshot"],
+      "forbidden_actions": ["leave the target sheet"],
+      "abort_conditions": ["human approval required", "guardrail budget exhausted"],
+      "completion_criteria": ["target cell evidence is visible"],
+      "evidence_requirements": ["post-action screenshot", "verifier verdict"]
+    },
     "duration_seconds": 3600,
     "interval_seconds": 60
   }'

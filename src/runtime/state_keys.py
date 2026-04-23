@@ -40,4 +40,14 @@ class StateKeys:
     TEMP_CURRENT_BROWSER_NEW_TAB_COUNT = "temp:current_browser_new_tab_count"
     TEMP_CURRENT_BROWSER_OPENED_TAB_IDS = "temp:current_browser_opened_tab_ids"
     TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID = "temp:current_browser_active_tab_id"
+    TEMP_CURRENT_BROWSER_LAST_OBSERVED_TAB = "temp:current_browser_last_observed_tab"
+    TEMP_CURRENT_BROWSER_CONTROL_UI_TAB = "temp:current_browser_control_ui_tab"
+    TEMP_CURRENT_BROWSER_DESTINATION_TAB = "temp:current_browser_destination_tab"
     TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET = "temp:current_browser_spreadsheet_target"
+    TEMP_CURRENT_BROWSER_SPREADSHEET_CELL_EDIT_READY = (
+        "temp:current_browser_spreadsheet_cell_edit_ready"
+    )
+    TEMP_CURRENT_TAB_EXTENSION_DISCONNECTED = "temp:current_tab_extension_disconnected"
+    TEMP_CURRENT_TAB_EXTENSION_DISCONNECTED_RAW_ERROR = (
+        "temp:current_tab_extension_disconnected_raw_error"
+    )

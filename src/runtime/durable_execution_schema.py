@@ -100,6 +100,7 @@ class DurableTaskNode(BaseModel):
     replay_references: list[dict[str, Any]] = Field(default_factory=list)
     checkpoint_refs: list[str] = Field(default_factory=list)
     verifier_verdict: DurableVerifierVerdict | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     def is_open(self) -> bool:
         if self.scheduler_queue == SchedulerQueueKind.COMPLETED:

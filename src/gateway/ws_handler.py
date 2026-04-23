@@ -217,8 +217,11 @@ def build_websocket_router(server: "GatewayServer") -> APIRouter:
                 context={"endpoint": "websocket"},
             )
         finally:
-            await server.manager.abort(session_id)
-            server.manager.disconnect(session_id)
+            server.manager.disconnect(
+                session_id,
+                preserve_pending=True,
+                preserve_user=True,
+            )
             server.audit_logger.log(
                 event_type=AuditEventType.SESSION_END,
                 user_id=user_id,
