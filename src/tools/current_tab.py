@@ -5,6 +5,7 @@ from __future__ import annotations
 import uuid
 from collections.abc import Mapping
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from google.adk.agents.context import Context as ToolContext
 
@@ -13,6 +14,7 @@ from src.bridges.host_bridge_exec import execute_host_bridge_call
 from src.bridges.host_bridge_schema import (
     HostCurrentTabClickRequest,
     HostCurrentTabActivateRequest,
+    HostCurrentTabListTabsRequest,
     HostCurrentTabExtractTextRequest,
     HostCurrentTabFillRequest,
     HostCurrentTabInfoRequest,
@@ -116,6 +118,24 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
+def _normalize_current_tab_url(url: str) -> str:
+    normalized = str(url or "").strip()
+    if not normalized:
+        return normalized
+    try:
+        parsed = urlparse(normalized)
+    except Exception:
+        return normalized
+    if parsed.scheme:
+        return normalized
+    lowered = normalized.lower()
+    if lowered == "sheets.new":
+        return "https://sheets.new"
+    if lowered.startswith("docs.google.com/spreadsheets"):
+        return f"https://{normalized}"
+    return normalized
+
+
 async def current_tab_info(
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
@@ -167,23 +187,24 @@ async def current_tab_navigate(
     new_tab: bool = False,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
+    normalized_url = _normalize_current_tab_url(url)
     approval_error, approval_token = await _check_current_tab_policy(
         "current_tab_navigate",
-        {"url": url, "timeout_ms": timeout_ms},
+        {"url": normalized_url, "timeout_ms": timeout_ms},
         tool_context,
     )
     if approval_error:
-        return _current_tab_error_payload(approval_error, url=url)
+        return _current_tab_error_payload(approval_error, url=normalized_url)
 
     settings = get_settings()
     if not settings.host_bridge_enabled:
-        return _current_tab_error_payload(_host_bridge_unavailable_error(), url=url)
+        return _current_tab_error_payload(_host_bridge_unavailable_error(), url=normalized_url)
 
     from src.tools.browser import _validate_url
 
-    valid, reason = _validate_url(url)
+    valid, reason = _validate_url(normalized_url)
     if not valid:
-        return _current_tab_error_payload(reason or "Invalid URL", url=url)
+        return _current_tab_error_payload(reason or "Invalid URL", url=normalized_url)
 
     ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
     request = HostCurrentTabNavigateRequest(
@@ -192,7 +213,7 @@ async def current_tab_navigate(
         user_id=ctx.get("user_id") or "standalone-user",
         agent_name=ctx.get("agent_name") or "unknown_agent",
         approval_token=approval_token,
-        url=url,
+        url=normalized_url,
         timeout_ms=timeout_ms,
         new_tab=new_tab,
         target_tab_id=_optional_int(
@@ -213,7 +234,7 @@ async def current_tab_navigate(
         get_client=get_host_bridge_client,
         invoke=lambda client, req: client.current_tab_navigate(req),
         ok_getter=lambda response: response.ok,
-        error_payload=lambda error: _current_tab_error_payload(error, url=url),
+        error_payload=lambda error: _current_tab_error_payload(error, url=normalized_url),
         metadata={"executor": "host_bridge"},
     )
     if result is None:
@@ -223,6 +244,66 @@ async def current_tab_navigate(
         "window_id": result.window_id,
         "url": result.url,
         "title": result.title,
+        "success": result.ok,
+        **({"error": result.error} if result.error else {}),
+    }
+
+
+async def current_tab_list_tabs(
+    tool_context: Optional[ToolContext] = None,
+) -> dict[str, Any]:
+    """Read-only enumeration of all open Chrome tabs via the extension relay.
+
+    No side effects on focus or window state. Used by the verification path to
+    discover candidate destination tabs (e.g. a Google Sheets tab opened
+    earlier) without disturbing the currently-focused Control UI tab.
+    """
+    approval_error, approval_token = await _check_current_tab_policy(
+        "current_tab_list_tabs",
+        {},
+        tool_context,
+    )
+    if approval_error:
+        return _current_tab_error_payload(approval_error)
+
+    settings = get_settings()
+    if not settings.host_bridge_enabled:
+        return _current_tab_error_payload(_host_bridge_unavailable_error())
+
+    ctx = resolve_tool_context(tool_context) if tool_context is not None else {}
+    request = HostCurrentTabListTabsRequest(
+        request_id=f"host-current-tab-list-{uuid.uuid4().hex[:12]}",
+        session_id=ctx.get("session_id") or "standalone-session",
+        user_id=ctx.get("user_id") or "standalone-user",
+        agent_name=ctx.get("agent_name") or "unknown_agent",
+        approval_token=approval_token,
+    )
+    result, payload = await execute_host_bridge_call(
+        request=request,
+        tool_name="host.current_tab.list_tabs",
+        args={},
+        get_client=get_host_bridge_client,
+        invoke=lambda client, req: client.current_tab_list_tabs(req),
+        ok_getter=lambda response: response.ok,
+        error_payload=lambda error: _current_tab_error_payload(error),
+        metadata={"executor": "host_bridge"},
+    )
+    if result is None:
+        return payload
+    tabs_dump: list[dict[str, Any]] = []
+    for entry in result.tabs:
+        tabs_dump.append(
+            {
+                "tab_id": entry.tab_id,
+                "window_id": entry.window_id,
+                "url": entry.url,
+                "title": entry.title,
+                "active": entry.active,
+                "index": entry.index,
+            }
+        )
+    return {
+        "tabs": tabs_dump,
         "success": result.ok,
         **({"error": result.error} if result.error else {}),
     }
@@ -265,14 +346,18 @@ async def current_tab_activate(
     )
     if result is None:
         return payload
-    return {
+    activate_payload: dict[str, Any] = {
         "tab_id": result.tab_id,
         "window_id": result.window_id,
         "url": result.url,
         "title": result.title,
         "success": result.ok,
-        **({"error": result.error} if result.error else {}),
     }
+    if result.error:
+        activate_payload["error"] = result.error
+    if getattr(result, "window_focus_error", None):
+        activate_payload["window_focus_error"] = result.window_focus_error
+    return activate_payload
 
 
 async def current_tab_click(

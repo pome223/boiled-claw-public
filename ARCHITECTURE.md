@@ -59,6 +59,13 @@ eval-derived substrate artifact として出している。
 Control UI 側では `/tasks/{id}` の persisted report をそのまま描画し、
 task graph / scheduler queues / approval waits / latest checkpoints / budget exhaustion を operator が確認できるようにする。
 
+次の live mission runtime slice では、同じ contract を `ControlLoopSupervisor` の入口に上げる。
+`mission_contract` は goal / constraints 互換入力から生成するか、HTTP API に直接渡せる。
+supervisor は standalone scheduler daemon ではなく supervisor-owned live worker のままだが、
+task artifact / durable_execution / task_graph metadata / scheduler queue metadata に同じ
+`mission_contract` を永続化し、completion criteria / evidence requirements / abort conditions を
+各 live task node から追えるようにする。
+
 その次の #94 / #95 / #96 / #97 は、physical AI 側も同じ contract-first で進める slice として扱う。
 ここで追加するのは live robotics runtime ではなく、simulation-first adapter が永続化する
 

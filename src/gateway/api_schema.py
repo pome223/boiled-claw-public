@@ -5,6 +5,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from src.runtime.replay_schema import StepComparePayload, TaskReplayRequest, TaskResultSnapshot
+from src.runtime.mission_contract import MissionContract
 
 
 class PaginationPayload(BaseModel):
@@ -110,7 +111,8 @@ class ControlSupervisorRequest(BaseModel):
 
     user_id: str | None = None
     session_id: str | None = None
-    goal: str = Field(min_length=1)
+    goal: str | None = None
+    mission_contract: MissionContract | None = None
     constraints: list[str] = Field(default_factory=list)
     duration_seconds: int = Field(default=3600, ge=60, le=86_400)
     interval_seconds: int = Field(default=60, ge=5, le=3_600)
@@ -128,6 +130,7 @@ class ControlSupervisorAcceptedResponse(BaseModel):
     max_iterations: int
     ends_at: float
     next_run_at: float
+    mission_contract: dict[str, Any] | None = None
 
 
 class TaskCancelResponse(BaseModel):

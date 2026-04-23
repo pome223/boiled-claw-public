@@ -192,6 +192,10 @@ _CAPABILITY_MODE_BY_NAME: dict[str, str] = {
     "current_tab.click": "execute",
     "current_tab.fill": "execute",
 }
+_MISSION_ALLOWED_ACTION_ALIASES: dict[str, set[str]] = {
+    "current_tab.read": {"current_tab.info", "current_tab.extract_text"},
+    "current_tab.inspect": {"current_tab.info"},
+}
 
 _CURRENT_BROWSER_GOOGLE_SHEETS_CREATE_URL = (
     "https://docs.google.com/spreadsheets/create"
@@ -210,6 +214,82 @@ def _text_contains_keyword(text: str, keyword: str) -> bool:
 
 def _contains_any(text: str, keywords: AbstractSet[str]) -> bool:
     return any(_text_contains_keyword(text, keyword) for keyword in keywords)
+
+
+def _mission_contract_allowed_capabilities(goal: str) -> set[str]:
+    allowed: set[str] = set()
+    for line in str(goal or "").splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("- allowed_actions:"):
+            continue
+        _, raw_value = stripped.split(":", 1)
+        try:
+            parsed = json.loads(raw_value.strip())
+            values = parsed if isinstance(parsed, list) else [parsed]
+        except json.JSONDecodeError:
+            values = raw_value.split(",")
+        for value in values:
+            action = str(value or "").strip()
+            if not action:
+                continue
+            if action in _CAPABILITY_MODE_BY_NAME:
+                allowed.add(action)
+            allowed.update(_MISSION_ALLOWED_ACTION_ALIASES.get(action, set()))
+    return allowed
+
+
+def _apply_mission_allowed_capabilities(plan: dict, allowed_caps: set[str]) -> None:
+    if not allowed_caps:
+        return
+    required_caps = [
+        cap if isinstance(cap, dict) else {"name": str(cap)}
+        for cap in plan.get("required_capabilities", [])
+    ]
+    for capability_name in sorted(allowed_caps):
+        _ensure_capability(required_caps, capability_name)
+    plan["required_capabilities"] = [
+        cap
+        for cap in required_caps
+        if str(cap.get("name", "")).strip() in allowed_caps
+    ]
+
+    steps = plan.get("steps")
+    if not isinstance(steps, list):
+        return
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        capabilities = step.get("capabilities")
+        fallback_capability = next(iter(allowed_caps)) if len(allowed_caps) == 1 else None
+        if not isinstance(capabilities, list):
+            if fallback_capability:
+                step["capabilities"] = [
+                    {
+                        "name": fallback_capability,
+                        "mode": _CAPABILITY_MODE_BY_NAME.get(
+                            fallback_capability,
+                            "execute",
+                        ),
+                    }
+                ]
+            continue
+        filtered = [
+            cap
+            for cap in capabilities
+            if isinstance(cap, dict)
+            and str(cap.get("name", "")).strip() in allowed_caps
+        ]
+        if not filtered and fallback_capability:
+            filtered = [
+                {
+                    "name": fallback_capability,
+                    "mode": _CAPABILITY_MODE_BY_NAME.get(
+                        fallback_capability,
+                        "execute",
+                    ),
+                }
+            ]
+        step["capabilities"] = filtered
 
 
 def _targets_current_browser(goal: str) -> bool:
@@ -474,10 +554,15 @@ def _normalize_desktop_plan_steps(plan: dict, goal: str) -> None:
         ),
         None,
     )
-    if _plan_needs_visual_evidence_capture(plan, goal) and not any(
+    # Only inject a visual-evidence capture step when there is an actual
+    # playback action step in the plan.  For non-playback tasks (e.g.
+    # spreadsheet editing) the "再生状態を確認" description would confuse
+    # the executor into calling desktop.control.launch_app, so we skip the
+    # injection entirely and rely on required_capabilities + screenshot
+    # handling in _normalize_required_capabilities instead.
+    if playback_index is not None and _plan_needs_visual_evidence_capture(plan, goal) and not any(
         _step_has_any_capability(step, {"desktop.ax.snapshot", "desktop.view.screenshot"})
-        for index, step in enumerate(steps)
-        if playback_index is None or index > playback_index
+        for step in steps[playback_index + 1:]
     ):
         dependency_step_id = str(steps[-1].get("step_id") or "").strip()
         verify_step_id = _next_step_id(existing_ids, "verify_visual_state")
@@ -563,6 +648,8 @@ def _normalize_desktop_plan_steps(plan: dict, goal: str) -> None:
             if not _step_has_current_browser_spreadsheet_entry_hint(step):
                 continue
             _ensure_step_capability(step, "desktop.control.click")
+            _ensure_step_capability(step, "desktop.control.type")
+            _ensure_step_capability(step, "desktop.control.hotkey")
             _ensure_step_capability(step, "desktop.ax.find")
             _ensure_step_capability(step, "desktop.wait.element")
             _rewrite_current_browser_spreadsheet_entry_description(step)
@@ -786,6 +873,8 @@ def _step_needs_current_browser_navigation_rewrite(
 def _step_needs_spreadsheet_navigation_rewrite(
     step: dict[str, object],
 ) -> bool:
+    if _step_has_current_browser_spreadsheet_entry_hint(step):
+        return False
     return _step_has_current_browser_spreadsheet_navigation_hint(step) and _contains_any(
         _step_text_haystack(step),
         _CURRENT_BROWSER_SPREADSHEET_OPEN_ACTION_KEYWORDS,
@@ -872,10 +961,12 @@ def _rewrite_current_browser_spreadsheet_entry_description(
 ) -> None:
     description = str(step.get("description") or "").strip()
     guidance = (
-        "Google Sheets の編集グリッドが表示されたら、最初の入力セル"
-        "（例: A1）を desktop.wait.element と desktop.ax.find で特定して"
-        "クリックし、セルにフォーカスが入ったことを確認してから結果を入力する。"
-        " ツールバーやダイアログには入力しない。"
+        "Google Sheets はcanvasベースのため、まず空の新規シートなら A1 が"
+        "選択済みとみなして desktop.control.type で直接値を入力し、Tab"
+        "（次の列）または Enter（次の行）で次のセルへ移動する。ファイル名"
+        "タイトル欄やツールバーのテキスト入力欄はクリックしない。アクティブ"
+        "セルに入力できない場合だけ、Name Box（名前ボックス / セル参照入力欄）"
+        "と明示的に分かる要素に限って使う。ツールバーやダイアログには入力しない。"
     )
     if guidance not in description:
         description = f"{description} {guidance}".strip()
@@ -924,6 +1015,22 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
                 for cap in required_caps
                 if str(cap.get("name", "")) != "desktop.control.hotkey"
             ]
+
+    # Plans that include current_tab.* capabilities use the host-bridge relay
+    # and therefore do NOT need to launch or re-focus the browser.  Remove
+    # desktop.control.launch_app unconditionally when the plan is current-tab
+    # based, regardless of whether the goal text uses current-browser keywords.
+    has_current_tab_caps = any(
+        str(cap.get("name", "")).startswith("current_tab.")
+        for cap in required_caps
+    )
+    if has_current_tab_caps:
+        required_caps = [
+            cap
+            for cap in required_caps
+            if str(cap.get("name", "")) != "desktop.control.launch_app"
+        ]
+
     cap_names = {str(cap.get("name", "")) for cap in required_caps}
 
     if prefers_isolated_browser:
@@ -1013,7 +1120,24 @@ def _normalize_required_capabilities(plan: dict, goal: str) -> dict:
             # explicit instead of failing mid-run on an unapproved capability.
             _ensure_capability(required_caps, "desktop.control.launch_app")
 
+    # Spreadsheet text-entry tasks need desktop.control.type and
+    # desktop.control.hotkey regardless of whether the goal contains
+    # current-browser keywords.  The planner often omits type/hotkey from
+    # required_capabilities for Sheets tasks, causing the executor to fail
+    # with "Capability 'desktop.control.type' is not in the approved plan."
+    if (
+        _contains_any(normalized_goal, SPREADSHEET_KEYWORDS)
+        and _needs_text_entry(normalized_goal)
+        and not prefers_isolated_browser
+    ):
+        _ensure_capability(required_caps, "desktop.control.type")
+        _ensure_capability(required_caps, "desktop.control.hotkey")
+
     plan["required_capabilities"] = required_caps
+    _apply_mission_allowed_capabilities(
+        plan,
+        _mission_contract_allowed_capabilities(goal or plan.get("goal", "")),
+    )
     return plan
 
 def policy_judge_callback(

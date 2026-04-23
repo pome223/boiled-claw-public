@@ -31,6 +31,7 @@ from src.runtime.durable_execution_schema import (
     SchedulerQueueKind,
     SchedulerQueueState,
 )
+from src.runtime.mission_contract import MissionContract, normalize_mission_contract
 from src.runtime.orchestration_policy import (
     append_scheduler_queue_entry,
     budget_exhaustion_reasons,
@@ -51,17 +52,53 @@ from src.tools.tasks import (
 _SUPERVISOR_AGENT_NAME = "control_supervisor"
 
 
-def build_maintenance_goal(objective: str) -> str:
+def _format_mission_contract_section(mission_contract: MissionContract | None) -> str:
+    if mission_contract is None:
+        return ""
+
+    lines = [
+        "Mission contract:",
+        f"- contract_id: {mission_contract.contract_id}",
+        f"- objective: {mission_contract.objective}",
+    ]
+    sections = [
+        ("allowed_actions", mission_contract.allowed_actions),
+        ("forbidden_actions", mission_contract.forbidden_actions),
+        ("abort_conditions", mission_contract.abort_conditions),
+        ("completion_criteria", mission_contract.completion_criteria),
+        ("evidence_requirements", mission_contract.evidence_requirements),
+    ]
+    for label, values in sections:
+        if values:
+            lines.append(f"- {label}: {', '.join(values)}")
+    return "\n".join(lines)
+
+
+def _append_mission_contract_section(
+    goal: str,
+    mission_contract: MissionContract | None,
+) -> str:
+    section = _format_mission_contract_section(mission_contract)
+    if not section:
+        return goal
+    return f"{goal.rstrip()}\n\n{section}"
+
+
+def build_maintenance_goal(
+    objective: str,
+    mission_contract: MissionContract | None = None,
+) -> str:
     normalized = str(objective or "").strip()
     if not normalized:
         raise ValueError("objective is required")
-    return (
+    goal = (
         "Maintain the following long-running objective for the active session.\n"
         f"Objective: {normalized}\n\n"
         "Inspect the current state, keep the objective satisfied, and perform only the "
         "next minimal action required. If the objective already looks healthy, prefer "
         "verification over disruptive changes."
     )
+    return _append_mission_contract_section(goal, mission_contract)
 
 
 RunControlLoopWithTaskFn = Callable[..., Awaitable[tuple[ExecutionResult, str]]]
@@ -87,8 +124,16 @@ def _queue_entry_for_node(
     available_at: datetime | None,
     failure_type: str | None,
     chosen_action: RecoveryActionType | None,
+    mission_contract: MissionContract | None = None,
     escalation_id: str | None = None,
 ) -> SchedulerQueueEntry:
+    metadata: dict[str, Any] = {
+        "failure_type": str(failure_type or ""),
+        "chosen_action": chosen_action.value if chosen_action is not None else "",
+    }
+    if mission_contract is not None:
+        metadata["mission_contract_id"] = mission_contract.contract_id
+        metadata["abort_conditions"] = list(mission_contract.abort_conditions)
     return SchedulerQueueEntry(
         entry_id=f"{node_id}/queue",
         node_id=node_id,
@@ -96,10 +141,7 @@ def _queue_entry_for_node(
         checkpoint_id=checkpoint_id,
         available_at=available_at,
         escalation_id=escalation_id,
-        metadata={
-            "failure_type": str(failure_type or ""),
-            "chosen_action": chosen_action.value if chosen_action is not None else "",
-        },
+        metadata=metadata,
     )
 
 
@@ -148,8 +190,10 @@ def _artifact_refs_for_result(
     child_task_id: str,
     result: ExecutionResult,
     failure_type: str | None,
+    mission_contract: MissionContract,
 ) -> list[DurableArtifactRef]:
     refs = [
+        _mission_contract_artifact_ref(mission_contract),
         DurableArtifactRef(
             kind="task",
             ref=child_task_id,
@@ -177,6 +221,21 @@ def _artifact_refs_for_result(
             )
         )
     return refs
+
+
+def _mission_contract_artifact_ref(
+    mission_contract: MissionContract,
+) -> DurableArtifactRef:
+    return DurableArtifactRef(
+        kind="mission_contract",
+        ref=mission_contract.contract_id,
+        label="mission_contract",
+        metadata={
+            "objective": mission_contract.objective,
+            "completion_criteria": list(mission_contract.completion_criteria),
+            "evidence_requirements": list(mission_contract.evidence_requirements),
+        },
+    )
 
 
 def _build_live_verifier_verdict(
@@ -219,6 +278,7 @@ class SupervisorStartResult:
     max_iterations: int
     ends_at: float
     next_run_at: float
+    mission_contract: dict[str, Any] | None = None
 
 
 @dataclass
@@ -264,6 +324,7 @@ class ControlLoopSupervisor:
         maintenance_goal: Optional[str] = None,
         request_id: Optional[str] = None,
         max_iterations: Optional[int] = None,
+        mission_contract: MissionContract | dict[str, Any] | None = None,
     ) -> SupervisorStartResult:
         started_at = self._now()
         resolved_duration = max(1, int(duration_seconds))
@@ -273,22 +334,39 @@ class ControlLoopSupervisor:
             math.ceil(resolved_duration / max(resolved_interval, 1)),
         )
         control_session_id = f"ctrlsup_{uuid.uuid4().hex[:12]}"
-        loop_goal = (
-            str(maintenance_goal or "").strip()
-            or build_maintenance_goal(objective)
+        resolved_contract = normalize_mission_contract(
+            mission_contract,
+            objective=objective,
+            constraints=constraints,
+            contract_id=f"mission:{control_session_id}",
+            metadata={
+                "source": source,
+                "request_id": request_id,
+                "owner_session_id": owner_session_id,
+            },
         )
+        resolved_objective = resolved_contract.objective
+        raw_loop_goal = str(maintenance_goal or "").strip()
+        loop_goal = (
+            _append_mission_contract_section(raw_loop_goal, resolved_contract)
+            if raw_loop_goal
+            else build_maintenance_goal(resolved_objective, resolved_contract)
+        )
+        mission_contract_payload = resolved_contract.model_dump(mode="json")
         ends_at = started_at + float(resolved_duration)
         task = self._create_task_record(
             kind="control_supervisor",
-            title=objective,
+            title=resolved_objective,
             status="running",
             owner_session_id=owner_session_id,
             owner_user_id=user_id,
             artifacts={
+                "mission_contract": mission_contract_payload,
                 "supervisor": {
-                    "objective": objective,
+                    "objective": resolved_objective,
                     "loop_goal": loop_goal,
                     "constraints": list(constraints),
+                    "mission_contract_id": resolved_contract.contract_id,
                     "duration_seconds": resolved_duration,
                     "interval_seconds": resolved_interval,
                     "control_session_id": control_session_id,
@@ -306,11 +384,12 @@ class ControlLoopSupervisor:
                     "stop_requested": False,
                 },
                 "durable_execution": self._initial_durable_execution_payload(
-                    objective=objective,
+                    objective=resolved_objective,
                     loop_goal=loop_goal,
                     control_session_id=control_session_id,
                     created_at=started_at,
                     next_run_at=started_at,
+                    mission_contract=resolved_contract,
                 ),
             },
             metadata={
@@ -318,6 +397,7 @@ class ControlLoopSupervisor:
                 "request_id": request_id,
                 "type": "control_supervisor",
                 "control_session_id": control_session_id,
+                "mission_contract_id": resolved_contract.contract_id,
             },
         )
         task_id = str(task["task_id"])
@@ -327,13 +407,14 @@ class ControlLoopSupervisor:
                 task_id=task_id,
                 owner_session_id=owner_session_id,
                 user_id=user_id,
-                objective=objective,
+                objective=resolved_objective,
                 loop_goal=loop_goal,
                 constraints=list(constraints),
                 control_session_id=control_session_id,
                 interval_seconds=resolved_interval,
                 max_iterations=resolved_max_iterations,
                 ends_at=ends_at,
+                mission_contract=resolved_contract,
                 stop_requested=stop_requested,
             ),
             name=f"control-supervisor:{task_id}",
@@ -363,6 +444,7 @@ class ControlLoopSupervisor:
             max_iterations=resolved_max_iterations,
             ends_at=ends_at,
             next_run_at=started_at,
+            mission_contract=mission_contract_payload,
         )
 
     async def request_stop(self, task_id: str) -> dict[str, Any] | None:
@@ -420,6 +502,7 @@ class ControlLoopSupervisor:
         control_session_id: str,
         created_at: float,
         next_run_at: float | None,
+        mission_contract: MissionContract,
     ) -> dict[str, Any]:
         graph_id = f"control_supervisor:{control_session_id}"
         node_id = _supervisor_node_id(control_session_id)
@@ -428,7 +511,16 @@ class ControlLoopSupervisor:
             title=objective,
             description=loop_goal,
             status=DurableTaskNodeStatus.READY,
+            completion_criteria=list(mission_contract.completion_criteria),
+            artifacts=[_mission_contract_artifact_ref(mission_contract)],
             scheduler_queue=SchedulerQueueKind.READY,
+            metadata={
+                "mission_contract_id": mission_contract.contract_id,
+                "allowed_actions": list(mission_contract.allowed_actions),
+                "forbidden_actions": list(mission_contract.forbidden_actions),
+                "abort_conditions": list(mission_contract.abort_conditions),
+                "evidence_requirements": list(mission_contract.evidence_requirements),
+            },
         )
         queue_state = SchedulerQueueState()
         append_scheduler_queue_entry(
@@ -443,6 +535,7 @@ class ControlLoopSupervisor:
                 ),
                 failure_type=None,
                 chosen_action=None,
+                mission_contract=mission_contract,
             ),
         )
         return {
@@ -450,6 +543,7 @@ class ControlLoopSupervisor:
             "graph_id": graph_id,
             "node_id": node_id,
             "node": node,
+            "mission_contract": mission_contract,
             "queue_state": queue_state,
             "job_runs": [],
             "checkpoints": [],
@@ -473,6 +567,7 @@ class ControlLoopSupervisor:
         # transitions remain in `job_runs`, `checkpoints`, and task timeline events.
         created_at = _utc_datetime(runtime_state["created_at"])
         node: DurableTaskNode = runtime_state["node"]
+        mission_contract: MissionContract = runtime_state["mission_contract"]
         task_graph = DurableTaskGraph(
             graph_id=runtime_state["graph_id"],
             goal=objective,
@@ -482,6 +577,7 @@ class ControlLoopSupervisor:
             metadata={
                 "runtime_mode": "live_supervisor_phase0",
                 "scheduler_phase": "live_worker",
+                "mission_contract_id": mission_contract.contract_id,
             },
         )
         checkpoints: list[DurableCheckpoint] = runtime_state["checkpoints"]
@@ -504,6 +600,7 @@ class ControlLoopSupervisor:
                 reason="resume_from_open_task",
             )
         return {
+            "mission_contract": mission_contract.model_dump(mode="json"),
             "task_graph": task_graph.model_dump(mode="json"),
             "job_runs": [
                 item.model_dump(mode="json") for item in runtime_state["job_runs"]
@@ -533,6 +630,7 @@ class ControlLoopSupervisor:
         control_session_id: str,
         created_at: float,
         next_run_at: float | None,
+        mission_contract: MissionContract,
     ) -> dict[str, Any]:
         runtime_state = self._initial_runtime_state(
             objective=objective,
@@ -540,6 +638,7 @@ class ControlLoopSupervisor:
             control_session_id=control_session_id,
             created_at=created_at,
             next_run_at=next_run_at,
+            mission_contract=mission_contract,
         )
         return self._serialize_runtime_state(runtime_state, objective=objective)
 
@@ -561,6 +660,27 @@ class ControlLoopSupervisor:
         result.metadata.update(classification)
         return classification
 
+    def _child_exception_result(
+        self,
+        *,
+        exc: Exception,
+        user_id: str,
+        session_id: str,
+    ) -> ExecutionResult:
+        failure_type = "policy_blocked" if isinstance(exc, PermissionError) else "unknown"
+        return ExecutionResult(
+            request_id=f"supervisor_{uuid.uuid4().hex[:12]}",
+            session_id=session_id,
+            user_id=user_id,
+            final_text=f"Child control-loop failed before durable result: {exc}",
+            success=False,
+            metadata={
+                "error": str(exc),
+                "exception_type": type(exc).__name__,
+                "normalized_failure_type": failure_type,
+            },
+        )
+
     def _record_runtime_iteration(
         self,
         runtime_state: dict[str, Any],
@@ -573,6 +693,7 @@ class ControlLoopSupervisor:
         next_run_at: float | None,
         has_more_iterations: bool,
     ) -> dict[str, Any]:
+        mission_contract: MissionContract = runtime_state["mission_contract"]
         classification = self._runtime_failure_classification(result)
         failure_type = classification["normalized_failure_type"]
         verifier_verdict = _build_live_verifier_verdict(
@@ -668,6 +789,7 @@ class ControlLoopSupervisor:
             available_at=available_at,
             failure_type=failure_type,
             chosen_action=chosen_action,
+            mission_contract=mission_contract,
             escalation_id=(
                 escalation_record.escalation_id if escalation_record is not None else None
             ),
@@ -686,10 +808,21 @@ class ControlLoopSupervisor:
         node.scheduler_queue = next_queue
         node.verifier_verdict = verifier_verdict
         node.checkpoint_refs.append(checkpoint_id)
+        node.completion_criteria = list(mission_contract.completion_criteria)
+        node.metadata.update(
+            {
+                "mission_contract_id": mission_contract.contract_id,
+                "allowed_actions": list(mission_contract.allowed_actions),
+                "forbidden_actions": list(mission_contract.forbidden_actions),
+                "abort_conditions": list(mission_contract.abort_conditions),
+                "evidence_requirements": list(mission_contract.evidence_requirements),
+            }
+        )
         node.artifacts = _artifact_refs_for_result(
             child_task_id=child_task_id,
             result=result,
             failure_type=failure_type,
+            mission_contract=mission_contract,
         )
 
         if result.success:
@@ -704,6 +837,7 @@ class ControlLoopSupervisor:
             metadata={
                 "runtime_mode": "live_supervisor_phase0",
                 "scheduler_phase": "live_worker",
+                "mission_contract_id": mission_contract.contract_id,
             },
         )
         checkpoint = DurableCheckpoint(
@@ -803,6 +937,7 @@ class ControlLoopSupervisor:
         interval_seconds: int,
         max_iterations: int,
         ends_at: float,
+        mission_contract: MissionContract,
         stop_requested: asyncio.Event,
     ) -> None:
         child_task_ids: list[str] = []
@@ -813,6 +948,7 @@ class ControlLoopSupervisor:
             control_session_id=control_session_id,
             created_at=self._now(),
             next_run_at=self._now(),
+            mission_contract=mission_contract,
         )
         self._append_task_event_record(
             task_id,
@@ -868,18 +1004,26 @@ class ControlLoopSupervisor:
                         },
                     )
 
-                    result, child_task_id = await self._run_control_loop_with_task(
-                        user_id=user_id,
-                        session_id=control_session_id,
-                        owner_session_id=owner_session_id,
-                        goal=loop_goal,
-                        constraints=constraints,
-                        request_id=None,
-                        source="supervisor",
-                        preserve_control_ui_tab=False,
-                        parent_task_id=task_id,
-                        reset_if_terminal=False,
-                    )
+                    try:
+                        result, child_task_id = await self._run_control_loop_with_task(
+                            user_id=user_id,
+                            session_id=control_session_id,
+                            owner_session_id=owner_session_id,
+                            goal=loop_goal,
+                            constraints=constraints,
+                            request_id=None,
+                            source="supervisor",
+                            preserve_control_ui_tab=False,
+                            parent_task_id=task_id,
+                            reset_if_terminal=False,
+                        )
+                    except Exception as exc:
+                        child_task_id = f"{task_id}/supervisor-exception-{iteration}"
+                        result = self._child_exception_result(
+                            exc=exc,
+                            user_id=user_id,
+                            session_id=control_session_id,
+                        )
                     child_task_ids.append(child_task_id)
                     completed_iterations = iteration
                     has_more_iterations = (

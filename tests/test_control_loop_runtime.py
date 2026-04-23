@@ -28,6 +28,13 @@ from src.control_loop.root_workflow import (
     _build_verification_inputs,
     _demote_browser_text_entry_report,
     _extract_latest_agent_json_output,
+    _has_sheets_candidate_window,
+    _is_destination_bound_for_spreadsheet,
+    _is_spreadsheet_task,
+    _parse_opened_tab_ids,
+    _select_destination_tab_candidate,
+    _should_fail_for_target_context_mismatch,
+    _verification_needs_destination_tab_backfill,
     _infer_tail_replay_from_step,
     _promote_visual_playback_report,
     _retarget_browser_text_entry_repair,
@@ -276,6 +283,32 @@ async def test_guarded_browser_fill_uses_browser_navigate_capability(monkeypatch
     assert result["success"] is True
     assert seen["selector"] == "textarea"
     assert seen["text"] == "Hello World"
+
+
+@pytest.mark.asyncio
+async def test_guarded_current_tab_info_accepts_read_only_capability(monkeypatch):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.APPROVAL_STATUS: "policy_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "current_tab.info"}]
+            },
+        }
+    )
+    seen = {}
+
+    async def _fake_info(tool_context=None):
+        seen["tool_context"] = tool_context
+        return {"success": True, "url": "http://127.0.0.1:18789/chat"}
+
+    monkeypatch.setattr("src.tools.current_tab.current_tab_info", _fake_info)
+
+    result = await guarded_tools_module.guarded_current_tab_info(
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["tool_context"] is tool_context
 
 
 @pytest.mark.asyncio
@@ -634,6 +667,13 @@ async def test_guarded_desktop_control_type_reuses_remembered_spreadsheet_target
         seen.update(kwargs)
         return {"success": True, "target": {"identifier": "cell-a1"}}
 
+    async def _fake_target_is_available(_target):
+        return True
+
+    monkeypatch.setattr(
+        "src.control_loop.guarded_tools._current_browser_spreadsheet_target_is_available",
+        _fake_target_is_available,
+    )
     monkeypatch.setattr("src.tools.desktop.desktop_control_type", _fake_type)
 
     result = await guarded_tools_module.guarded_desktop_control_type(
@@ -644,6 +684,55 @@ async def test_guarded_desktop_control_type_reuses_remembered_spreadsheet_target
     assert result["success"] is True
     assert seen["identifier"] == "cell-a1"
     assert seen["window_id"] == "w7"
+
+
+@pytest.mark.asyncio
+async def test_guarded_current_tab_navigate_primes_spreadsheet_cell_ready_from_ok_result(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "このブラウザで新々刀の名刀を調べて Google Spreadsheet にまとめて",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "current_tab.navigate"}]
+            },
+        }
+    )
+
+    async def fake_current_tab_navigate(
+        url,
+        timeout_ms=15000,
+        new_tab=False,
+        tool_context=None,
+    ):
+        return {
+            "ok": True,
+            "tab_id": 315,
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit?gid=0#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+        }
+
+    monkeypatch.setattr(
+        "src.tools.current_tab.current_tab_navigate",
+        fake_current_tab_navigate,
+    )
+
+    result = await guarded_tools_module.guarded_current_tab_navigate(
+        url="https://docs.google.com/spreadsheets/create",
+        tool_context=tool_context,
+    )
+
+    assert result["ok"] is True
+    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS] == [315]
+    assert (
+        tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_CELL_EDIT_READY]
+        is True
+    )
+    assert (
+        tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_DESTINATION_TAB]["surface"]
+        == "google_sheets"
+    )
 
 
 @pytest.mark.asyncio
@@ -686,6 +775,114 @@ async def test_guarded_desktop_click_remembers_spreadsheet_target(monkeypatch):
         "role": "AXTextField",
         "identifier": "cell-a1",
     }
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_click_blocks_unsafe_spreadsheet_title_field_target(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "石油の一週間の値動きを調べて、google spreadsheetに記載して",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.click"}]
+            },
+            StateKeys.TEMP_CURRENT_BROWSER_DESTINATION_TAB: {
+                "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+                "title": "Untitled spreadsheet - Google Sheets",
+                "surface": "google_sheets",
+            },
+        }
+    )
+
+    async def _fake_click(**_kwargs):
+        raise AssertionError("desktop click should have been blocked")
+
+    monkeypatch.setattr("src.tools.desktop.desktop_control_click", _fake_click)
+
+    with pytest.raises(PermissionError, match="document title"):
+        await guarded_tools_module.guarded_desktop_control_click(
+            app_name="Google Chrome",
+            window_id="w7",
+            role="AXTextField",
+            title="Untitled spreadsheet",
+            tool_context=tool_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_type_blocks_unsafe_spreadsheet_title_field_target(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "石油の一週間の値動きを調べて、google spreadsheetに記載して",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.control.type"}]
+            },
+            StateKeys.TEMP_CURRENT_BROWSER_DESTINATION_TAB: {
+                "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+                "title": "Untitled spreadsheet - Google Sheets",
+                "surface": "google_sheets",
+            },
+        }
+    )
+
+    async def _fake_type(**_kwargs):
+        raise AssertionError("desktop type should have been blocked")
+
+    monkeypatch.setattr("src.tools.desktop.desktop_control_type", _fake_type)
+
+    with pytest.raises(PermissionError, match="document title"):
+        await guarded_tools_module.guarded_desktop_control_type(
+            text="特徴",
+            app_name="Google Chrome",
+            window_id="w7",
+            role="AXTextField",
+            title="Untitled spreadsheet",
+            tool_context=tool_context,
+        )
+
+
+@pytest.mark.asyncio
+async def test_guarded_desktop_ax_find_does_not_remember_unsafe_spreadsheet_title_field_target(
+    monkeypatch,
+):
+    tool_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: "石油の一週間の値動きを調べて、google spreadsheetに記載して",
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {
+                "required_capabilities": [{"name": "desktop.ax.find"}]
+            },
+        }
+    )
+
+    async def _fake_find(**_kwargs):
+        return {
+            "matched": True,
+            "target": {
+                "app_name": "Google Chrome",
+                "window_id": "w7",
+                "role": "AXTextField",
+                "title": "特徴",
+            },
+        }
+
+    monkeypatch.setattr("src.tools.desktop.desktop_ax_find", _fake_find)
+
+    result = await guarded_tools_module.guarded_desktop_ax_find(
+        app_name="Google Chrome",
+        window_id="w7",
+        role="AXTextField",
+        title="特徴",
+        tool_context=tool_context,
+    )
+
+    assert result["matched"] is True
+    assert StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET not in tool_context.state
 
 
 @pytest.mark.asyncio
@@ -815,6 +1012,47 @@ def test_policy_judge_expands_current_browser_capabilities():
     assert "desktop.control.click" in approval_required
 
 
+def test_policy_judge_applies_mission_contract_allowed_actions():
+    callback_context = SimpleNamespace(
+        state={
+            StateKeys.TASK_GOAL: (
+                "Maintain the following long-running objective for the active session.\n"
+                "Objective: Keep the current browser session healthy\n\n"
+                "Mission contract:\n"
+                "- contract_id: mission-ui-smoke-001\n"
+                "- allowed_actions: current_tab.info\n"
+                "- forbidden_actions: navigate away, type into the page, take screenshots"
+            ),
+            StateKeys.TEMP_PLANNER_DRAFT: {
+                "plan_id": "mission-contract-info-only",
+                "goal": "Keep the current browser session healthy",
+                "risk_level": "low",
+                "required_capabilities": [
+                    {"name": "desktop.view.screenshot", "mode": "read"},
+                ],
+                "steps": [
+                    {
+                        "step_id": "inspect",
+                        "capabilities": [
+                            {"name": "desktop.view.screenshot", "mode": "read"},
+                            {"name": "current_tab.info", "mode": "read"},
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+
+    policy_judge_callback(callback_context)
+
+    approved = callback_context.state[StateKeys.PLAN_APPROVED]
+    required = {cap["name"] for cap in approved["required_capabilities"]}
+    step_caps = {cap["name"] for cap in approved["steps"][0]["capabilities"]}
+    assert callback_context.state[StateKeys.APPROVAL_STATUS] == "policy_approved"
+    assert required == {"current_tab.info"}
+    assert step_caps == {"current_tab.info"}
+
+
 def test_policy_judge_keeps_current_browser_safety_for_current_browser_spreadsheet_goal():
     callback_context = SimpleNamespace(
         state={
@@ -868,6 +1106,7 @@ def test_policy_judge_keeps_current_browser_safety_for_current_browser_spreadshe
     assert edit_capabilities == {
         "desktop.control.click",
         "desktop.control.type",
+        "desktop.control.hotkey",
         "desktop.ax.find",
         "desktop.wait.element",
     }
@@ -985,8 +1224,12 @@ def test_policy_judge_adds_current_tab_navigate_without_playback_false_positive(
     )
 
     assert "current_tab.navigate" in required
-    assert "desktop.control.type" not in required
-    assert "desktop.control.hotkey" not in required
+    # Goal is a current-browser spreadsheet text-entry task ("スプレッドシートに記入"),
+    # so desktop.control.type / hotkey are now injected at the required level
+    # (see _normalize_required_capabilities). Individual nav-only steps still
+    # keep just current_tab.navigate — the step-level asserts below cover that.
+    assert "desktop.control.type" in required
+    assert "desktop.control.hotkey" in required
     assert "capture_pre_playback_state" not in step_ids
     assert "verify_visual_state" not in step_ids
     assert {
@@ -1313,6 +1556,7 @@ def test_policy_judge_strips_using_ctrl_cmd_t_and_new_tab_phrasing_from_current_
     assert open_step["description"].startswith("Navigate to https://docs.google.com/spreadsheets/create")
     assert {cap["name"] for cap in input_step["capabilities"]} == {
         "desktop.control.type",
+        "desktop.control.hotkey",
         "desktop.control.click",
         "desktop.ax.find",
         "desktop.wait.element",
@@ -1423,16 +1667,20 @@ def test_policy_judge_removes_current_browser_new_tab_step_and_focuses_sheet_inp
     assert "open_new_tab" not in step_ids
     assert "verify_visual_state" not in step_ids
     assert "capture_current_tab_state" in step_ids
-    assert "desktop.control.hotkey" not in required
+    # Spreadsheet text-entry goal now injects desktop.control.hotkey at the
+    # required level so the executor can commit cells with Enter/Tab etc.
+    assert "desktop.control.hotkey" in required
     assert search_step["depends_on"] == ["focus_browser"]
     assert {cap["name"] for cap in input_step["capabilities"]} == {
         "desktop.control.type",
+        "desktop.control.hotkey",
         "desktop.control.click",
         "desktop.ax.find",
         "desktop.wait.element",
     }
     assert "A1" in input_step["description"]
-    assert "フォーカス" in input_step["description"]
+    assert "ファイル名タイトル欄" in input_step["description"]
+    assert "A1 が選択済み" in input_step["description"]
 
 
 def test_policy_judge_keeps_type_for_current_browser_spreadsheet_entry_step():
@@ -1504,6 +1752,7 @@ def test_policy_judge_keeps_type_for_current_browser_spreadsheet_entry_step():
     assert {cap["name"] for cap in input_step["capabilities"]} == {
         "desktop.control.click",
         "desktop.control.type",
+        "desktop.control.hotkey",
         "desktop.ax.find",
         "desktop.wait.element",
         "current_tab.navigate",
@@ -1748,6 +1997,181 @@ def test_browser_text_entry_report_is_demoted_without_destination_evidence():
     assert demoted["repair_actions"][0]["target_step_ids"] == ["capture_current_tab_state"]
 
 
+def test_browser_text_entry_report_is_demoted_when_spreadsheet_extract_is_only_blank_ui():
+    report = {
+        "status": "pass",
+        "overall_score": 1.0,
+        "confidence": 0.95,
+        "criterion_results": [
+            {
+                "name": "data_recorded",
+                "passed": True,
+                "score": 1.0,
+                "explanation": "typed successfully",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": None,
+        "summary": "typed successfully",
+        "repair_actions": [],
+    }
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 281,
+            "text_excerpt": (
+                "Untitled spreadsheet Share Ask Gemini File Edit View "
+                "Sheet1 Turn on screen reader support Generate a custom spreadsheet Build"
+            ),
+        },
+        "desktop": {"screenshot_paths": []},
+        "artifact_refs": [],
+    }
+
+    assert _should_demote_browser_text_entry_report(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+    demoted = _demote_browser_text_entry_report(
+        report=report,
+        verification_inputs=verification_inputs,
+    )
+
+    assert demoted["status"] == "fail"
+    assert demoted["failure_type"] == "insufficient_evidence"
+    assert "non-boilerplate spreadsheet cell evidence" in demoted["summary"]
+
+
+def test_browser_text_entry_report_keeps_pass_when_spreadsheet_extract_contains_cell_data():
+    report = {
+        "status": "pass",
+        "overall_score": 1.0,
+        "confidence": 0.95,
+        "criterion_results": [
+            {
+                "name": "data_recorded",
+                "passed": True,
+                "score": 1.0,
+                "explanation": "typed successfully",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": None,
+        "summary": "typed successfully",
+        "repair_actions": [],
+    }
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 412,
+            "text_excerpt": (
+                "Untitled spreadsheet Sheet1 刀工名 特徴 "
+                "水心子正秀 復古刀論で知られる 源清麿 幕末の名工"
+            ),
+        },
+        "desktop": {"screenshot_paths": []},
+        "artifact_refs": [],
+    }
+
+    assert _should_demote_browser_text_entry_report(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is False
+
+
+def test_browser_text_entry_report_demotes_when_only_artifact_ref_is_sheet_url():
+    report = {
+        "status": "pass",
+        "overall_score": 1.0,
+        "confidence": 0.95,
+        "criterion_results": [
+            {
+                "name": "sheet_verification",
+                "passed": True,
+                "score": 1.0,
+                "explanation": "sheet url captured",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": None,
+        "summary": "sheet url captured",
+        "repair_actions": [],
+    }
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 281,
+            "text_excerpt": (
+                "Untitled spreadsheet Share Ask Gemini File Edit View "
+                "Sheet1 Turn on screen reader support Generate a custom spreadsheet Build"
+            ),
+        },
+        "desktop": {"screenshot_paths": []},
+        "artifact_refs": [
+            "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+        ],
+    }
+
+    assert _should_demote_browser_text_entry_report(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+
+def test_browser_text_entry_report_demotes_when_sheet_url_pairs_with_non_sheet_excerpt():
+    report = {
+        "status": "pass",
+        "overall_score": 1.0,
+        "confidence": 0.95,
+        "criterion_results": [
+            {
+                "name": "format_verification",
+                "passed": True,
+                "score": 1.0,
+                "explanation": "sheet filled correctly",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": None,
+        "summary": "sheet filled correctly",
+        "repair_actions": [],
+    }
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 9010,
+            "text_excerpt": (
+                "刀剣の知識を学べる 刀剣の専門サイトです 名古屋刀剣博物館公式サイト "
+                "日本刀の刀匠・刀工 新々刀の刀工 代表的な刀工15名について解説します"
+            ),
+        },
+        "desktop": {"screenshot_paths": ["/tmp/final_spreadsheet.png"]},
+        "artifact_refs": ["/tmp/final_spreadsheet.png"],
+    }
+
+    assert _should_demote_browser_text_entry_report(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+
 def test_browser_text_entry_partial_pass_retargets_repair_to_capture_current_tab_state():
     report = {
         "status": "partial_pass",
@@ -1798,6 +2222,139 @@ def test_browser_text_entry_partial_pass_retargets_repair_to_capture_current_tab
     assert retargeted["status"] == "partial_pass"
     assert retargeted["repair_actions"][0]["target_step_ids"] == ["capture_current_tab_state"]
     assert "capture_current_tab_state" in retargeted["summary"]
+
+
+def test_browser_text_entry_partial_pass_retargets_when_spreadsheet_extract_is_only_blank_ui():
+    report = {
+        "status": "partial_pass",
+        "overall_score": 0.7,
+        "confidence": 0.8,
+        "criterion_results": [
+            {
+                "name": "data_recorded",
+                "passed": False,
+                "score": 0.4,
+                "explanation": "evidence missing",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": "insufficient_evidence",
+        "summary": "not enough evidence",
+        "repair_actions": [],
+    }
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 281,
+            "text_excerpt": (
+                "Untitled spreadsheet Share Ask Gemini File Edit View "
+                "Sheet1 Turn on screen reader support Generate a custom spreadsheet Build"
+            ),
+        },
+        "desktop": {"screenshot_paths": []},
+        "artifact_refs": [],
+    }
+
+    assert _should_retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+    retargeted = _retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    )
+
+    assert retargeted["repair_actions"][0]["target_step_ids"] == ["capture_current_tab_state"]
+    assert "non-boilerplate spreadsheet cell evidence" in retargeted["summary"]
+
+
+def test_browser_text_entry_partial_pass_retargets_when_only_artifact_ref_is_sheet_url():
+    report = {
+        "status": "partial_pass",
+        "overall_score": 0.7,
+        "confidence": 0.8,
+        "criterion_results": [
+            {
+                "name": "sheet_verification",
+                "passed": True,
+                "score": 1.0,
+                "explanation": "sheet url captured",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": "insufficient_evidence",
+        "summary": "not enough evidence",
+        "repair_actions": [],
+    }
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 281,
+            "text_excerpt": (
+                "Untitled spreadsheet Share Ask Gemini File Edit View "
+                "Sheet1 Turn on screen reader support Generate a custom spreadsheet Build"
+            ),
+        },
+        "desktop": {"screenshot_paths": []},
+        "artifact_refs": [
+            "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+        ],
+    }
+
+    assert _should_retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+
+def test_browser_text_entry_partial_pass_retargets_when_sheet_url_pairs_with_non_sheet_excerpt():
+    report = {
+        "status": "partial_pass",
+        "overall_score": 0.7,
+        "confidence": 0.8,
+        "criterion_results": [
+            {
+                "name": "format_verification",
+                "passed": False,
+                "score": 0.4,
+                "explanation": "evidence missing",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": "insufficient_evidence",
+        "summary": "not enough evidence",
+        "repair_actions": [],
+    }
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc123/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 9010,
+            "text_excerpt": (
+                "刀剣の知識を学べる 刀剣の専門サイトです 名古屋刀剣博物館公式サイト "
+                "日本刀の刀匠・刀工 新々刀の刀工 代表的な刀工15名について解説します"
+            ),
+        },
+        "desktop": {"screenshot_paths": []},
+        "artifact_refs": [],
+    }
+
+    assert _should_retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
 
 
 def test_policy_judge_adds_ax_snapshot_for_generic_desktop_ui_plan():
@@ -2685,7 +3242,7 @@ async def test_guarded_desktop_control_hotkey_allows_new_tab_when_preserving_con
 
 
 @pytest.mark.asyncio
-async def test_guarded_desktop_control_hotkey_retries_current_tab_verification_after_disconnect(
+async def test_guarded_desktop_control_hotkey_fails_closed_after_disconnect_during_verification(
     monkeypatch,
 ):
     tool_context = SimpleNamespace(
@@ -2752,14 +3309,13 @@ async def test_guarded_desktop_control_hotkey_retries_current_tab_verification_a
         fake_current_tab_info,
     )
 
-    result = await guarded_tools_module.guarded_desktop_control_hotkey(
-        keys=["cmd", "t"],
-        tool_context=tool_context,
-    )
+    with pytest.raises(PermissionError, match="Current Tab extension is not connected"):
+        await guarded_tools_module.guarded_desktop_control_hotkey(
+            keys=["cmd", "t"],
+            tool_context=tool_context,
+        )
 
-    assert result == {"ok": True, "keys": ["cmd", "t"]}
-    assert calls["count"] == 3
-    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS] == [22]
+    assert calls["count"] == 2
 
 
 @pytest.mark.asyncio
@@ -3538,245 +4094,6 @@ async def test_guarded_browser_navigate_redirects_to_current_tab_for_current_bro
 
 
 @pytest.mark.asyncio
-async def test_guarded_browser_navigate_redirect_audits_current_tab_redirect(
-    monkeypatch,
-):
-    tool_context = SimpleNamespace(
-        state={
-            StateKeys.TASK_GOAL: "このブラウザで石油の一週間の値動きを調べて google spreadsheet に記載して",
-            StateKeys.APPROVAL_STATUS: "human_approved",
-            StateKeys.PLAN_APPROVED: {
-                "required_capabilities": [{"name": "current_tab.navigate"}],
-            },
-        }
-    )
-    audit_calls: list[dict[str, object]] = []
-
-    async def fake_current_tab_navigate(url, timeout_ms=15000, new_tab=False, tool_context=None):
-        return {
-            "success": True,
-            "tab_id": 55,
-            "window_id": 9,
-            "url": url,
-            "title": "Google Sheets",
-        }
-
-    class _FakeAuditLogger:
-        def log(self, **kwargs):
-            audit_calls.append(kwargs)
-            return kwargs
-
-    monkeypatch.setattr("src.tools.current_tab.current_tab_navigate", fake_current_tab_navigate)
-    monkeypatch.setattr(
-        guarded_tools_module,
-        "get_audit_logger",
-        lambda: _FakeAuditLogger(),
-    )
-
-    result = await guarded_tools_module.guarded_browser_navigate(
-        url="https://docs.google.com/spreadsheets/create",
-        tool_context=tool_context,
-    )
-
-    assert result["success"] is True
-    assert len(audit_calls) == 1
-    assert audit_calls[0]["action"] == "redirect_to_current_tab"
-    assert audit_calls[0]["result"] == "redirected"
-    assert audit_calls[0]["metadata"]["requested_tool"] == "browser.navigate"
-    assert audit_calls[0]["metadata"]["effective_tool"] == "current_tab.navigate"
-    assert audit_calls[0]["metadata"]["tab_id"] == 55
-
-
-@pytest.mark.asyncio
-async def test_current_browser_spreadsheet_flow_preserves_control_ui_and_reuses_task_tab(
-    monkeypatch,
-):
-    tool_context = SimpleNamespace(
-        state={
-            StateKeys.TASK_GOAL: "このブラウザで石油の一週間の値動きを調べて google spreadsheet に記載して",
-            StateKeys.APPROVAL_STATUS: "human_approved",
-            StateKeys.PLAN_APPROVED: {
-                "required_capabilities": [
-                    {"name": "current_tab.navigate"},
-                    {"name": "desktop.ax.find"},
-                    {"name": "desktop.control.click"},
-                    {"name": "desktop.control.type"},
-                ],
-            },
-        }
-    )
-    navigate_calls: list[dict[str, object]] = []
-    activate_calls: list[int] = []
-    type_calls: list[dict[str, object]] = []
-    info_responses = iter(
-        [
-            {
-                "success": True,
-                "tab_id": 10,
-                "url": "http://127.0.0.1:29999/chat",
-                "title": "boiled-claw Control UI",
-            },
-            {
-                "success": True,
-                "tab_id": 10,
-                "url": "http://127.0.0.1:29999/chat",
-                "title": "boiled-claw Control UI",
-            },
-            {
-                "success": True,
-                "tab_id": 71,
-                "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
-                "title": "Untitled spreadsheet - Google Sheets",
-            },
-            {
-                "success": True,
-                "tab_id": 71,
-                "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
-                "title": "Untitled spreadsheet - Google Sheets",
-            },
-            {
-                "success": True,
-                "tab_id": 71,
-                "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
-                "title": "Untitled spreadsheet - Google Sheets",
-            },
-            {
-                "success": True,
-                "tab_id": 10,
-                "url": "http://127.0.0.1:29999/chat",
-                "title": "boiled-claw Control UI",
-            },
-        ]
-    )
-
-    async def fake_current_tab_info(tool_context=None):
-        return next(info_responses)
-
-    async def fake_current_tab_navigate(url, timeout_ms=15000, new_tab=False, tool_context=None):
-        navigate_calls.append({"url": url, "new_tab": new_tab})
-        return {
-            "success": True,
-            "tab_id": 71,
-            "window_id": 1,
-            "url": url,
-            "title": "Untitled spreadsheet - Google Sheets",
-        }
-
-    async def fake_current_tab_activate(tab_id, tool_context=None):
-        activate_calls.append(tab_id)
-        return {
-            "success": True,
-            "tab_id": tab_id,
-            "window_id": 1,
-            "url": "https://docs.google.com/spreadsheets/d/demo/edit#gid=0",
-            "title": "Untitled spreadsheet - Google Sheets",
-        }
-
-    async def fake_current_tab_extract_text(selector=None, tool_context=None):
-        return {
-            "success": True,
-            "selector": selector or "body",
-            "text": "日付\t終値\n2026/04/09\t100.72",
-            "length": 22,
-        }
-
-    async def fake_desktop_ax_find(**kwargs):
-        return {
-            "matched": True,
-            "target": {
-                "app_name": "Google Chrome",
-                "window_id": "1",
-                "role": "AXCell",
-                "title": "Sheet1",
-                "identifier": "A1",
-            },
-        }
-
-    async def fake_desktop_control_click(**kwargs):
-        return {
-            "success": True,
-            "target": {
-                "app_name": "Google Chrome",
-                "window_id": "1",
-                "role": "AXCell",
-                "title": "Sheet1",
-                "identifier": "A1",
-            },
-        }
-
-    async def fake_desktop_control_type(**kwargs):
-        type_calls.append(kwargs)
-        return {
-            "success": True,
-            "target": {
-                "app_name": kwargs.get("app_name"),
-                "window_id": kwargs.get("window_id"),
-                "role": kwargs.get("role"),
-                "title": kwargs.get("title"),
-                "identifier": kwargs.get("identifier"),
-            },
-        }
-
-    monkeypatch.setattr("src.tools.current_tab.current_tab_info", fake_current_tab_info)
-    monkeypatch.setattr("src.tools.current_tab.current_tab_navigate", fake_current_tab_navigate)
-    monkeypatch.setattr("src.tools.current_tab.current_tab_activate", fake_current_tab_activate)
-    monkeypatch.setattr(
-        "src.tools.current_tab.current_tab_extract_text",
-        fake_current_tab_extract_text,
-    )
-    monkeypatch.setattr("src.tools.desktop.desktop_ax_find", fake_desktop_ax_find)
-    monkeypatch.setattr("src.tools.desktop.desktop_control_click", fake_desktop_control_click)
-    monkeypatch.setattr("src.tools.desktop.desktop_control_type", fake_desktop_control_type)
-
-    navigate_result = await guarded_tools_module.guarded_browser_navigate(
-        url="https://docs.google.com/spreadsheets/create",
-        tool_context=tool_context,
-    )
-    find_result = await guarded_tools_module.guarded_desktop_ax_find(
-        role="AXCell",
-        identifier="A1",
-        tool_context=tool_context,
-    )
-    click_result = await guarded_tools_module.guarded_desktop_control_click(
-        tool_context=tool_context,
-    )
-    type_result = await guarded_tools_module.guarded_desktop_control_type(
-        text="日付\t終値\n2026/04/09\t100.72",
-        tool_context=tool_context,
-    )
-    extract_result = await guarded_tools_module.guarded_current_tab_extract_text(
-        selector="body",
-        tool_context=tool_context,
-    )
-
-    assert navigate_result["success"] is True
-    assert find_result["matched"] is True
-    assert click_result["success"] is True
-    assert type_result["success"] is True
-    assert extract_result["success"] is True
-    assert navigate_calls == [
-        {
-            "url": "https://docs.google.com/spreadsheets/create",
-            "new_tab": True,
-        }
-    ]
-    assert activate_calls == [71, 71]
-    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_OPENED_TAB_IDS] == [71]
-    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_ACTIVE_TAB_ID] == 71
-    assert tool_context.state[StateKeys.TEMP_CURRENT_BROWSER_SPREADSHEET_TARGET] == {
-        "app_name": "Google Chrome",
-        "window_id": "1",
-        "role": "AXCell",
-        "title": "Sheet1",
-        "identifier": "A1",
-    }
-    assert len(type_calls) == 1
-    assert type_calls[0]["app_name"] == "Google Chrome"
-    assert type_calls[0]["identifier"] == "A1"
-    assert "2026/04/09" in extract_result["text"]
-
-
-@pytest.mark.asyncio
 async def test_control_loop_resumes_after_human_approval(monkeypatch, tmp_path):
     session_service = InMemorySessionService()
     candidate_store = CandidateStore(
@@ -4075,3 +4392,769 @@ async def test_control_loop_allows_goal_change_after_terminal_report():
     assert session.state.get(StateKeys.APPROVAL_STATUS) is None
     assert session.state.get(StateKeys.VERIFY_LAST_REPORT) is None
     assert session.state.get(StateKeys.TEMP_REPAIR_PATCH) is None
+
+
+# ── target_context_mismatch regression tests ────────────────────────────────
+#
+# These tests pin the generalized "destination-bound evidence" rule: for a
+# spreadsheet task, verifier evidence captured from a non-destination tab
+# (Control UI fallback, an unrelated website, a new-tab page, etc.) must never
+# certify success regardless of how much text the tab contains or how the
+# hotkey calls returned.  A prior narrower fix ("ignore Control UI text")
+# handled only one surface; these tests pin the generalized rule.
+
+
+def _spreadsheet_task_goal() -> str:
+    return "新々刀の名刀で有名なものを調べてGoogle Spreadsheetにまとめて"
+
+
+def _passing_report() -> dict:
+    return {
+        "status": "pass",
+        "overall_score": 1.0,
+        "confidence": 0.95,
+        "criterion_results": [
+            {
+                "name": "data_recorded",
+                "passed": True,
+                "score": 1.0,
+                "explanation": "typed successfully",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": None,
+        "summary": "typed successfully",
+        "repair_actions": [],
+    }
+
+
+def test_is_spreadsheet_task_matches_japanese_goal():
+    assert _is_spreadsheet_task(_spreadsheet_task_goal()) is True
+    assert _is_spreadsheet_task("check my email") is False
+    assert _is_spreadsheet_task(None) is False
+    assert _is_spreadsheet_task("") is False
+
+
+def test_is_destination_bound_for_spreadsheet_recognizes_sheets_but_not_others():
+    sheets_tab = {
+        "url": "https://docs.google.com/spreadsheets/d/abc/edit",
+        "title": "Untitled spreadsheet - Google Sheets",
+    }
+    control_ui_tab = {
+        "url": "http://localhost:18789/chat",
+        "title": "boiled-claw Control UI",
+    }
+    other_site = {"url": "https://example.com/", "title": "Example Domain"}
+    new_tab = {"url": "about:blank", "title": "New Tab"}
+
+    assert _is_destination_bound_for_spreadsheet(sheets_tab) is True
+    assert _is_destination_bound_for_spreadsheet(control_ui_tab) is False
+    assert _is_destination_bound_for_spreadsheet(other_site) is False
+    assert _is_destination_bound_for_spreadsheet(new_tab) is False
+
+
+def test_has_sheets_candidate_window_detects_sheets_like_titles():
+    assert _has_sheets_candidate_window([
+        "Untitled spreadsheet - Google Sheets - Google Chrome",
+    ]) is True
+    assert _has_sheets_candidate_window([
+        "boiled-claw Control UI - Google Chrome",
+        "Gmail - Google Chrome",
+    ]) is False
+    assert _has_sheets_candidate_window(None) is False
+    assert _has_sheets_candidate_window([]) is False
+
+
+def test_target_context_mismatch_demotes_pass_with_control_ui_fallback_tab():
+    """Regression: when host.current_tab.activate fails and capture_current_tab_state
+    falls back to the Control UI tab, the verifier must not certify a pass even
+    though the tab has a URL, title, and rich text."""
+    verification_inputs = {
+        "goal": _spreadsheet_task_goal(),
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "http://localhost:18789/chat",
+            "title": "boiled-claw Control UI",
+            "extract_text_succeeded": True,
+            "text_length": 1711,
+            "text_excerpt": (
+                "boiled-claw Control UI Connected WebSocket chat Send Plan "
+                "Execute Verify Repair Task goal is visible in the left panel"
+            ),
+        },
+        "desktop": {
+            "screenshot_paths": [],
+            "focus_succeeded": False,
+            "hotkey_succeeded": True,
+            "window_titles": [
+                "boiled-claw Control UI - Google Chrome",
+                "Untitled spreadsheet - Google Sheets - Google Chrome",
+            ],
+        },
+        "artifact_refs": [],
+    }
+
+    assert _should_fail_for_target_context_mismatch(
+        verification_inputs["goal"],
+        verification_inputs["current_tab"],
+        verification_inputs["desktop"],
+    ) is True
+    assert _should_demote_browser_text_entry_report(
+        report=_passing_report(),
+        verification_inputs=verification_inputs,
+    ) is True
+
+    demoted = _demote_browser_text_entry_report(
+        report=_passing_report(),
+        verification_inputs=verification_inputs,
+    )
+    assert demoted["status"] == "fail"
+    assert demoted["failure_type"] == "insufficient_evidence"
+    assert "target_context_mismatch" in demoted["summary"]
+
+
+def test_target_context_mismatch_demotes_pass_with_unrelated_site_tab():
+    """Regression: a non-Sheets, non-Control-UI fallback (e.g. google.com/search)
+    must also be rejected. The generalization must not be Control-UI-specific."""
+    verification_inputs = {
+        "goal": _spreadsheet_task_goal(),
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://www.google.com/search?q=shin-shinto+swords",
+            "title": "shin-shinto swords - Google Search",
+            "extract_text_succeeded": True,
+            "text_length": 4200,
+            "text_excerpt": (
+                "新々刀 - Wikipedia 幕末期に作られた日本刀 水心子正秀 源清麿 "
+                "特徴 復古刀論 search results about famous swords"
+            ),
+        },
+        "desktop": {
+            "screenshot_paths": [],
+            "focus_succeeded": False,
+            "hotkey_succeeded": True,
+            "window_titles": [],
+        },
+        "artifact_refs": [],
+    }
+
+    assert _should_fail_for_target_context_mismatch(
+        verification_inputs["goal"],
+        verification_inputs["current_tab"],
+        verification_inputs["desktop"],
+    ) is True
+    assert _should_demote_browser_text_entry_report(
+        report=_passing_report(),
+        verification_inputs=verification_inputs,
+    ) is True
+
+
+def test_target_context_mismatch_keeps_pass_when_destination_bound_with_cell_data():
+    """Positive control: a proper Sheets tab with authored cell data should still
+    pass through the destination-bound rule."""
+    verification_inputs = {
+        "goal": _spreadsheet_task_goal(),
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+            "title": "新々刀の名刀 - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 412,
+            "text_excerpt": (
+                "新々刀の名刀 Sheet1 刀工名 特徴 "
+                "水心子正秀 復古刀論で知られる 源清麿 幕末の名工"
+            ),
+        },
+        "desktop": {
+            "screenshot_paths": ["/tmp/sheet_after.png"],
+            "focus_succeeded": True,
+            "hotkey_succeeded": True,
+            "window_titles": [
+                "新々刀の名刀 - Google Sheets - Google Chrome",
+            ],
+        },
+        "artifact_refs": [],
+    }
+
+    assert _should_fail_for_target_context_mismatch(
+        verification_inputs["goal"],
+        verification_inputs["current_tab"],
+        verification_inputs["desktop"],
+    ) is False
+    assert _should_demote_browser_text_entry_report(
+        report=_passing_report(),
+        verification_inputs=verification_inputs,
+    ) is False
+
+
+def test_focus_failed_alone_blocks_pass_for_spreadsheet_task():
+    """Regression: hotkey_succeeded=True without focus_succeeded=True is NOT
+    evidence that keystrokes reached the target. Without independent visual
+    evidence, such a state must not certify a pass even when the current_tab
+    is destination-bound. (Covers the 'activate succeeded but keys went to the
+    wrong app' class of failures.)"""
+    verification_inputs = {
+        "goal": _spreadsheet_task_goal(),
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        # Destination-bound tab, but extract_text wasn't captured — no text
+        # evidence, and no screenshots/artifacts. Only hotkey_succeeded=True.
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": False,
+            "text_length": 0,
+            "text_excerpt": "",
+        },
+        "desktop": {
+            "screenshot_paths": [],
+            "focus_succeeded": False,
+            "hotkey_succeeded": True,
+            "window_titles": [
+                "Untitled spreadsheet - Google Sheets - Google Chrome",
+            ],
+        },
+        "artifact_refs": [],
+    }
+
+    assert _should_demote_browser_text_entry_report(
+        report=_passing_report(),
+        verification_inputs=verification_inputs,
+    ) is True
+
+    demoted = _demote_browser_text_entry_report(
+        report=_passing_report(),
+        verification_inputs=verification_inputs,
+    )
+    assert demoted["status"] == "fail"
+    assert "focus_succeeded=false" in demoted["summary"]
+
+
+def test_target_context_mismatch_retargets_repair_to_capture_current_tab_state():
+    """Regression: when a partial_pass is produced for a spreadsheet task whose
+    current_tab is non-destination-bound, the repair action must retarget to
+    `capture_current_tab_state` so the next attempt re-validates the tab,
+    rather than re-executing the same (misdirected) text entry."""
+    report = {
+        "status": "partial_pass",
+        "overall_score": 0.55,
+        "confidence": 0.6,
+        "criterion_results": [
+            {
+                "name": "data_recorded",
+                "passed": False,
+                "score": 0.4,
+                "explanation": "insufficient",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": "insufficient_evidence",
+        "summary": "insufficient",
+        "repair_actions": [
+            {
+                "action_id": "retry_type",
+                "action_type": "retry",
+                "description": "retype the cell values",
+                "target_step_ids": ["type_into_sheet"],
+                "priority": 2,
+            }
+        ],
+    }
+    verification_inputs = {
+        "goal": _spreadsheet_task_goal(),
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "current_tab": {
+            "url": "http://localhost:18789/chat",
+            "title": "boiled-claw Control UI",
+            "extract_text_succeeded": True,
+            "text_length": 1711,
+            "text_excerpt": "Control UI send plan execute verify repair",
+        },
+        "desktop": {
+            "screenshot_paths": [],
+            "focus_succeeded": False,
+            "hotkey_succeeded": True,
+            "window_titles": [],
+        },
+        "artifact_refs": [],
+    }
+
+    assert _should_retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+    retargeted = _retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    )
+    assert retargeted["repair_actions"][0]["target_step_ids"] == [
+        "capture_current_tab_state"
+    ]
+    assert "target_context_mismatch" in retargeted["summary"]
+
+
+# ── B2: destination_tab capture regression tests ──────────────────────────
+
+
+def test_parse_opened_tab_ids_handles_mixed_inputs():
+    assert _parse_opened_tab_ids(None) == set()
+    assert _parse_opened_tab_ids([1, "2", 3.0]) == {1, 2, 3}
+    assert _parse_opened_tab_ids({4, 5}) == {4, 5}
+    assert _parse_opened_tab_ids("nope") == set()
+    assert _parse_opened_tab_ids([1, "bad", None, 7]) == {1, 7}
+
+
+def test_verification_needs_destination_tab_backfill_requires_spreadsheet_goal():
+    # Non-spreadsheet task should never request destination_tab backfill.
+    assert _verification_needs_destination_tab_backfill(
+        {"goal": "search for something unrelated"}
+    ) is False
+    # Spreadsheet task with no destination_tab yet → backfill needed.
+    assert _verification_needs_destination_tab_backfill(
+        {"goal": "Google Spreadsheetにまとめて"}
+    ) is True
+    # Spreadsheet task with destination_tab already populated → skip.
+    assert _verification_needs_destination_tab_backfill(
+        {
+            "goal": "Google Spreadsheetにまとめて",
+            "destination_tab": {
+                "url": "https://docs.google.com/spreadsheets/d/abc/edit",
+                "title": "Untitled spreadsheet - Google Sheets",
+            },
+        }
+    ) is False
+    # destination_tab present but missing url → still needs backfill.
+    assert _verification_needs_destination_tab_backfill(
+        {
+            "goal": "Google Spreadsheetにまとめて",
+            "destination_tab": {"title": "partial"},
+        }
+    ) is True
+
+
+def test_select_destination_tab_candidate_prefers_opened_sheets_tab():
+    tabs = [
+        {"tab_id": 10, "url": "http://127.0.0.1:18789/chat", "title": "Control UI"},
+        {"tab_id": 11, "url": "https://docs.google.com/spreadsheets/d/abc/edit",
+         "title": "Untitled spreadsheet - Google Sheets"},
+        {"tab_id": 12, "url": "https://example.com/", "title": "Example"},
+    ]
+    selected = _select_destination_tab_candidate(
+        tabs,
+        goal="Google Spreadsheetにまとめて",
+        opened_tab_ids={11, 12},
+    )
+    assert selected is not None
+    assert selected["tab_id"] == 11
+
+
+def test_select_destination_tab_candidate_falls_back_to_any_sheets_tab():
+    # No opened_tab_ids overlap with the Sheets tab — still select it because
+    # it matches the spreadsheet destination signal.
+    tabs = [
+        {"tab_id": 10, "url": "http://127.0.0.1:18789/chat", "title": "Control UI"},
+        {"tab_id": 11, "url": "https://docs.google.com/spreadsheets/d/abc/edit",
+         "title": "Untitled spreadsheet - Google Sheets"},
+    ]
+    selected = _select_destination_tab_candidate(
+        tabs,
+        goal="Google Spreadsheetにまとめて",
+        opened_tab_ids=set(),
+    )
+    assert selected is not None
+    assert selected["tab_id"] == 11
+
+
+def test_select_destination_tab_candidate_returns_none_when_no_match():
+    tabs = [
+        {"tab_id": 10, "url": "http://127.0.0.1:18789/chat", "title": "Control UI"},
+        {"tab_id": 12, "url": "https://example.com/", "title": "Example"},
+    ]
+    selected = _select_destination_tab_candidate(
+        tabs,
+        goal="Google Spreadsheetにまとめて",
+        opened_tab_ids=set(),
+    )
+    assert selected is None
+
+
+def test_select_destination_tab_candidate_for_non_spreadsheet_prefers_opened_tab():
+    tabs = [
+        {"tab_id": 10, "url": "http://127.0.0.1:18789/chat", "title": "Control UI"},
+        {"tab_id": 11, "url": "https://example.com/", "title": "Example"},
+    ]
+    selected = _select_destination_tab_candidate(
+        tabs,
+        goal="research weather",
+        opened_tab_ids={11},
+    )
+    assert selected is not None
+    assert selected["tab_id"] == 11
+
+
+@pytest.mark.asyncio
+async def test_backfill_reuses_current_tab_when_it_is_destination(monkeypatch):
+    """If the focused tab is already the Sheets tab, destination_tab mirrors
+    it without issuing list_tabs / extract_text calls."""
+    async def fake_info():
+        return {
+            "tab_id": 11,
+            "window_id": 1,
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "success": True,
+        }
+
+    list_tabs_called = {"count": 0}
+
+    async def fake_list_tabs():
+        list_tabs_called["count"] += 1
+        return {"tabs": [], "success": True}
+
+    import src.control_loop.root_workflow as rw
+    monkeypatch.setattr("src.tools.current_tab.current_tab_info", fake_info)
+    monkeypatch.setattr(
+        "src.tools.current_tab.current_tab_list_tabs", fake_list_tabs
+    )
+
+    verification_inputs: dict[str, Any] = {
+        "current_browser_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+    }
+    result = await _backfill_current_tab_verification_inputs(
+        verification_inputs,
+        opened_tab_ids={11},
+    )
+    assert result["destination_tab"]["tab_id"] == 11
+    assert result["destination_tab"]["destination_bound"] is True
+    assert result["destination_tab"]["discovery"] == "current_tab_is_destination"
+    # Shortcut: no list_tabs call needed when current_tab IS the destination.
+    assert list_tabs_called["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_captures_destination_when_focused_tab_is_control_ui(monkeypatch):
+    """Focused tab is Control UI, but a Sheets tab exists — capture it
+    read-only via list_tabs + targeted extract_text, no activate."""
+    activate_called = {"count": 0}
+
+    async def fake_info():
+        return {
+            "tab_id": 10,
+            "window_id": 1,
+            "url": "http://127.0.0.1:18789/chat",
+            "title": "boiled-claw Control UI",
+            "success": True,
+        }
+
+    async def fake_list_tabs():
+        return {
+            "tabs": [
+                {"tab_id": 10, "url": "http://127.0.0.1:18789/chat",
+                 "title": "Control UI", "active": True, "window_id": 1,
+                 "index": 0},
+                {"tab_id": 11,
+                 "url": "https://docs.google.com/spreadsheets/d/abc/edit",
+                 "title": "Untitled spreadsheet - Google Sheets",
+                 "active": False, "window_id": 2, "index": 0},
+            ],
+            "success": True,
+        }
+
+    async def fake_extract_for_tab(tab_id):
+        assert tab_id == 11  # must be the destination, not the focused tab
+        return {
+            "text": "新々刀 名刀 研究",
+            "length": 12,
+            "success": True,
+        }
+
+    async def fake_activate(*args, **kwargs):
+        activate_called["count"] += 1
+        raise AssertionError("activate must not be called (pure read-only capture)")
+
+    import src.control_loop.root_workflow as rw
+    monkeypatch.setattr("src.tools.current_tab.current_tab_info", fake_info)
+    monkeypatch.setattr(
+        "src.tools.current_tab.current_tab_list_tabs", fake_list_tabs
+    )
+    monkeypatch.setattr(rw, "_extract_text_for_tab", fake_extract_for_tab)
+    monkeypatch.setattr(
+        "src.tools.current_tab.current_tab_activate", fake_activate
+    )
+
+    verification_inputs: dict[str, Any] = {
+        "current_browser_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+    }
+    result = await _backfill_current_tab_verification_inputs(
+        verification_inputs,
+        opened_tab_ids={11},
+    )
+    # current_tab is Control UI
+    assert result["current_tab"]["url"] == "http://127.0.0.1:18789/chat"
+    assert result["current_tab"]["destination_bound"] is False
+    # destination_tab is the Sheets tab, with text captured via target_tab_id
+    assert result["destination_tab"]["tab_id"] == 11
+    assert result["destination_tab"]["url"].startswith(
+        "https://docs.google.com/spreadsheets"
+    )
+    assert result["destination_tab"]["destination_bound"] is True
+    assert result["destination_tab"]["discovery"] == "opened_tab_ids"
+    assert result["destination_tab"]["extract_text_succeeded"] is True
+    assert "新々刀" in result["destination_tab"]["text_excerpt"]
+    # No activate ever issued.
+    assert activate_called["count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_leaves_destination_tab_unset_when_no_candidate(monkeypatch):
+    async def fake_info():
+        return {
+            "tab_id": 10,
+            "window_id": 1,
+            "url": "http://127.0.0.1:18789/chat",
+            "title": "boiled-claw Control UI",
+            "success": True,
+        }
+
+    async def fake_list_tabs():
+        return {
+            "tabs": [
+                {"tab_id": 10, "url": "http://127.0.0.1:18789/chat",
+                 "title": "Control UI", "active": True, "window_id": 1,
+                 "index": 0},
+            ],
+            "success": True,
+        }
+
+    monkeypatch.setattr("src.tools.current_tab.current_tab_info", fake_info)
+    monkeypatch.setattr(
+        "src.tools.current_tab.current_tab_list_tabs", fake_list_tabs
+    )
+
+    verification_inputs: dict[str, Any] = {
+        "current_browser_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+    }
+    result = await _backfill_current_tab_verification_inputs(
+        verification_inputs,
+        opened_tab_ids=set(),
+    )
+    assert "destination_tab" not in result
+
+
+# ── B3: destination_tab-aware verifier rules ──────────────────────────────
+
+
+_B3_SHEETS_EXCERPT = (
+    "Untitled spreadsheet Sheet1 刀工名 特徴 "
+    "水心子正秀 復古刀論で知られる 源清麿 幕末の名工"
+)
+_B3_BOILERPLATE_EXCERPT = (
+    "Untitled spreadsheet Share Ask Gemini File Edit View "
+    "Sheet1 Turn on screen reader support Generate a custom spreadsheet Build"
+)
+_B3_CONTROL_UI_TAB = {
+    "url": "http://127.0.0.1:18789/chat",
+    "title": "Control UI",
+    "extract_text_succeeded": True,
+    "text_length": 120,
+    "text_excerpt": "chat message history",
+}
+
+
+def _b3_pass_report():
+    return {
+        "status": "pass",
+        "overall_score": 1.0,
+        "confidence": 0.95,
+        "criterion_results": [
+            {
+                "name": "data_recorded",
+                "passed": True,
+                "score": 1.0,
+                "explanation": "ok",
+                "evidence_refs": [],
+            }
+        ],
+        "failure_type": None,
+        "summary": "ok",
+        "repair_actions": [],
+    }
+
+
+def test_b3_destination_tab_with_cell_text_keeps_pass_despite_control_ui_current_tab():
+    """destination_tab carrying meaningful Sheets text clears the pass even when
+    current_tab is Control UI (the B2-read flow)."""
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+        "current_tab": dict(_B3_CONTROL_UI_TAB),
+        "destination_tab": {
+            "tab_id": 12,
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+            "title": "名刀 - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 400,
+            "text_excerpt": _B3_SHEETS_EXCERPT,
+        },
+        "desktop": {"screenshot_paths": [], "focus_succeeded": False},
+        "artifact_refs": [],
+    }
+    assert _should_fail_for_target_context_mismatch(
+        verification_inputs["goal"],
+        verification_inputs["current_tab"],
+        verification_inputs["desktop"],
+        destination_tab=verification_inputs["destination_tab"],
+    ) is False
+    assert _should_demote_browser_text_entry_report(
+        report=_b3_pass_report(),
+        verification_inputs=verification_inputs,
+    ) is False
+
+
+def test_b3_destination_tab_url_only_does_not_pass_spreadsheet_task():
+    """destination_tab URL alone (no non-boilerplate text) must not certify a pass."""
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+        "current_tab": dict(_B3_CONTROL_UI_TAB),
+        "destination_tab": {
+            "tab_id": 12,
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+            "title": "Untitled - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": len(_B3_BOILERPLATE_EXCERPT),
+            "text_excerpt": _B3_BOILERPLATE_EXCERPT,
+        },
+        "desktop": {"screenshot_paths": ["/tmp/shot.png"], "focus_succeeded": True},
+        "artifact_refs": [],
+    }
+    assert _should_demote_browser_text_entry_report(
+        report=_b3_pass_report(),
+        verification_inputs=verification_inputs,
+    ) is True
+    assert _should_retarget_browser_text_entry_repair(
+        report={
+            **_b3_pass_report(),
+            "status": "fail",
+            "failure_type": "insufficient_evidence",
+        },
+        verification_inputs=verification_inputs,
+    ) is True
+
+
+def test_b3_no_destination_tab_spreadsheet_task_still_fails_with_only_screenshot():
+    """Screenshot alone is not enough when destination_tab is missing: URL-only must
+    not pass for spreadsheet tasks."""
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+        "current_tab": dict(_B3_CONTROL_UI_TAB),
+        # no destination_tab at all
+        "desktop": {"screenshot_paths": ["/tmp/shot.png"], "focus_succeeded": True},
+        "artifact_refs": [],
+    }
+    assert _should_demote_browser_text_entry_report(
+        report=_b3_pass_report(),
+        verification_inputs=verification_inputs,
+    ) is True
+
+
+def test_b3_retarget_repair_surfaces_destination_tab_missing_evidence():
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+        "current_tab": dict(_B3_CONTROL_UI_TAB),
+        "destination_tab": {
+            "tab_id": 12,
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+            "title": "Untitled - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": len(_B3_BOILERPLATE_EXCERPT),
+            "text_excerpt": _B3_BOILERPLATE_EXCERPT,
+        },
+        "desktop": {"screenshot_paths": ["/tmp/shot.png"], "focus_succeeded": True},
+        "artifact_refs": [],
+    }
+    repair = _retarget_browser_text_entry_repair(
+        report={
+            **_b3_pass_report(),
+            "status": "fail",
+            "failure_type": "insufficient_evidence",
+        },
+        verification_inputs=verification_inputs,
+    )
+    assert "destination_tab" in repair["summary"]
+    assert repair["repair_actions"][0]["target_step_ids"] == [
+        "capture_current_tab_state"
+    ]
+
+
+def test_b3_sparse_google_sheets_extract_retargets_repair_to_capture_step():
+    verification_inputs = {
+        "current_browser_goal": True,
+        "text_entry_goal": True,
+        "goal": "Google Spreadsheetにまとめて",
+        "current_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 2404,
+            "text_excerpt": (
+                "Untitled spreadsheet Share Ask Gemini FileEditViewInsertFormatDataToolsGeminiExtensionsHelp "
+                "123 Default 備前伝の最高峰 Sheet1 備前伝の最高峰 Turn on screen reader support"
+            ),
+        },
+        "destination_tab": {
+            "url": "https://docs.google.com/spreadsheets/d/abc/edit#gid=0",
+            "title": "Untitled spreadsheet - Google Sheets",
+            "extract_text_succeeded": True,
+            "text_length": 2404,
+            "text_excerpt": (
+                "Untitled spreadsheet Share Ask Gemini FileEditViewInsertFormatDataToolsGeminiExtensionsHelp "
+                "123 Default 備前伝の最高峰 Sheet1 備前伝の最高峰 Turn on screen reader support"
+            ),
+        },
+        "desktop": {"screenshot_paths": [], "focus_succeeded": True},
+        "artifact_refs": [],
+    }
+    report = {
+        **_b3_pass_report(),
+        "status": "fail",
+        "failure_type": "insufficient_evidence",
+        "repair_actions": [
+            {
+                "action_id": "retry_input_data",
+                "action_type": "retry_step",
+                "description": "retry spreadsheet typing",
+                "target_step_ids": ["input_data_1", "input_data_2"],
+                "priority": 1,
+            }
+        ],
+    }
+
+    assert _should_retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    ) is True
+
+    retargeted = _retarget_browser_text_entry_repair(
+        report=report,
+        verification_inputs=verification_inputs,
+    )
+
+    assert retargeted["repair_actions"][0]["target_step_ids"] == [
+        "capture_current_tab_state"
+    ]
+    assert "sparse active-cell text" in retargeted["summary"]
