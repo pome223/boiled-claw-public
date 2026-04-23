@@ -33,6 +33,10 @@ class ComputerTrajectoryStore:
                     verification_json TEXT,
                     request_json TEXT,
                     observation_json TEXT,
+                    preliminary_failure_type TEXT,
+                    normalized_failure_type TEXT,
+                    classified_by_json TEXT,
+                    operator_override TEXT,
                     created_at REAL NOT NULL
                 )
                 """
@@ -49,6 +53,44 @@ class ComputerTrajectoryStore:
                 ON computer_trajectories(status)
                 """
             )
+            columns = {
+                row[1]
+                for row in cursor.execute("PRAGMA table_info(computer_trajectories)").fetchall()
+            }
+            if "preliminary_failure_type" not in columns:
+                cursor.execute(
+                    """
+                    ALTER TABLE computer_trajectories
+                    ADD COLUMN preliminary_failure_type TEXT
+                    """
+                )
+            if "normalized_failure_type" not in columns:
+                cursor.execute(
+                    """
+                    ALTER TABLE computer_trajectories
+                    ADD COLUMN normalized_failure_type TEXT
+                    """
+                )
+            if "classified_by_json" not in columns:
+                cursor.execute(
+                    """
+                    ALTER TABLE computer_trajectories
+                    ADD COLUMN classified_by_json TEXT
+                    """
+                )
+            if "operator_override" not in columns:
+                cursor.execute(
+                    """
+                    ALTER TABLE computer_trajectories
+                    ADD COLUMN operator_override TEXT
+                    """
+                )
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_computer_trajectories_failure_type
+                ON computer_trajectories(normalized_failure_type)
+                """
+            )
             conn.commit()
 
     def record(
@@ -61,6 +103,10 @@ class ComputerTrajectoryStore:
         verification: dict[str, Any] | None,
         request: dict[str, Any],
         observation: dict[str, Any],
+        preliminary_failure_type: str | None = None,
+        normalized_failure_type: str | None = None,
+        classified_by: list[str] | None = None,
+        operator_override: str | None = None,
     ) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -74,9 +120,13 @@ class ComputerTrajectoryStore:
                     verification_json,
                     request_json,
                     observation_json,
+                    preliminary_failure_type,
+                    normalized_failure_type,
+                    classified_by_json,
+                    operator_override,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     action,
@@ -86,6 +136,10 @@ class ComputerTrajectoryStore:
                     json.dumps(verification, ensure_ascii=True) if verification is not None else None,
                     json.dumps(request, ensure_ascii=True),
                     json.dumps(observation, ensure_ascii=True),
+                    preliminary_failure_type,
+                    normalized_failure_type,
+                    json.dumps(classified_by or [], ensure_ascii=True),
+                    operator_override,
                     time.time(),
                 ),
             )
@@ -104,7 +158,12 @@ class ComputerTrajectoryStore:
             "verification": json.loads(row[5]) if row[5] else None,
             "request": json.loads(row[6]) if row[6] else {},
             "observation": json.loads(row[7]) if row[7] else {},
-            "created_at": row[8],
+            "preliminary_failure_type": row[8],
+            "normalized_failure_type": row[9],
+            "failure_type": row[9] or row[8],
+            "classified_by": json.loads(row[10]) if row[10] else [],
+            "operator_override": row[11],
+            "created_at": row[12],
         }
 
     def get(self, trajectory_id: int) -> dict[str, Any] | None:
@@ -113,7 +172,8 @@ class ComputerTrajectoryStore:
             cursor.execute(
                 """
                 SELECT id, action, status, final_surface, attempts_json, verification_json,
-                       request_json, observation_json, created_at
+                       request_json, observation_json, preliminary_failure_type,
+                       normalized_failure_type, classified_by_json, operator_override, created_at
                 FROM computer_trajectories
                 WHERE id = ?
                 """,
@@ -131,7 +191,8 @@ class ComputerTrajectoryStore:
                 cursor.execute(
                     """
                     SELECT id, action, status, final_surface, attempts_json, verification_json,
-                           request_json, observation_json, created_at
+                           request_json, observation_json, preliminary_failure_type,
+                           normalized_failure_type, classified_by_json, operator_override, created_at
                     FROM computer_trajectories
                     WHERE status = ?
                     ORDER BY created_at DESC
@@ -143,7 +204,8 @@ class ComputerTrajectoryStore:
                 cursor.execute(
                     """
                     SELECT id, action, status, final_surface, attempts_json, verification_json,
-                           request_json, observation_json, created_at
+                           request_json, observation_json, preliminary_failure_type,
+                           normalized_failure_type, classified_by_json, operator_override, created_at
                     FROM computer_trajectories
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -152,6 +214,37 @@ class ComputerTrajectoryStore:
                 )
             rows = cursor.fetchall()
         return [self._row_to_trajectory(row) for row in rows]
+
+    def update_failure_classification(
+        self,
+        trajectory_id: int,
+        *,
+        preliminary_failure_type: str | None,
+        normalized_failure_type: str | None,
+        classified_by: list[str] | None = None,
+        operator_override: str | None = None,
+    ) -> bool:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE computer_trajectories
+                SET preliminary_failure_type = ?,
+                    normalized_failure_type = ?,
+                    classified_by_json = ?,
+                    operator_override = ?
+                WHERE id = ?
+                """,
+                (
+                    preliminary_failure_type,
+                    normalized_failure_type,
+                    json.dumps(classified_by or [], ensure_ascii=True),
+                    operator_override,
+                    trajectory_id,
+                ),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
 
 
 _trajectory_store: ComputerTrajectoryStore | None = None

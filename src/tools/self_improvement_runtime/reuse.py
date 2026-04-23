@@ -6,11 +6,27 @@ from typing import Any, Awaitable, Callable, Optional
 
 from google.adk.agents.context import Context as ToolContext
 
+from src.runtime.promoted_capabilities import load_promoted_capability_specs
+from src.skills.base import get_skill_registry
+from src.skills.promoted import ensure_promoted_skills_loaded
 from src.tools.self_improvement_runtime.common import compact_text, read_state
+from src.tools.self_improvement_runtime.promotion import (
+    REUSE_MEMORY_KINDS,
+    promotion_search_kind_filter,
+)
+from src.tools.self_improvement_runtime.security import evaluate_promotion_deployability
 
 
 MemorySearchFn = Callable[..., Awaitable[dict[str, Any]]]
 MemoryStoreGetter = Callable[[], Any]
+
+
+_KIND_PRIORITY = {
+    "approved_skill": 40,
+    "capability_patch": 30,
+    "approved_improvement": 20,
+    "policy_patch": 10,
+}
 
 
 def trajectory_failure_reason(trajectory: dict[str, Any]) -> str:
@@ -163,7 +179,7 @@ def prefilter_reuse_suggestions(
     try:
         candidates = get_memory_store_fn().search(
             query=None,
-            kinds=["approved_improvement"],
+            kinds=list(REUSE_MEMORY_KINDS),
             limit=max(limit * 10, 50),
         )
     except Exception:
@@ -182,6 +198,7 @@ def prefilter_reuse_suggestions(
             {
                 "memory_id": item.get("id"),
                 "content": item.get("content"),
+                "kind": item.get("kind"),
                 "score": float(score),
                 "created_at": item.get("created_at"),
                 "tags": item.get("tags") or [],
@@ -216,46 +233,139 @@ async def find_reuse_suggestions(
         get_memory_store_fn=get_memory_store_fn,
     )
     if len(prefiltered) >= bounded_limit:
-        return {"query": query, "results": prefiltered}
-
-    search = await memory_search_fn(
-        query=query,
-        kind="approved_improvement",
-        limit=bounded_limit,
-        tool_context=tool_context,
-    )
-    if not search.get("success"):
-        return {
-            "query": query,
-            "results": [],
-            "error": search.get("error") or "failed to search approved improvements",
-        }
+        enriched = await _enrich_reuse_results(prefiltered)
+        return {"query": query, "results": enriched}
 
     results_by_id: dict[Any, dict[str, Any]] = {
         item.get("memory_id"): item for item in prefiltered if item.get("memory_id") is not None
     }
-    for item in search.get("results") or []:
+    search_error: str | None = None
+    try:
+        search = await memory_search_fn(
+            query=query,
+            kind=promotion_search_kind_filter(),
+            limit=bounded_limit,
+            tool_context=tool_context,
+        )
+    except Exception as exc:
+        search = {"success": False, "error": str(exc)}
+
+    if not search.get("success"):
+        search_error = search.get("error") or "failed to search approved improvements"
+    else:
+        for item in search.get("results") or []:
+            if not isinstance(item, dict):
+                continue
+            payload = {
+                "memory_id": item.get("id"),
+                "content": item.get("content"),
+                "kind": item.get("kind"),
+                "score": item.get("score"),
+                "created_at": item.get("created_at"),
+                "tags": item.get("tags") or [],
+                "metadata": item.get("metadata") or {},
+                "match_type": "semantic",
+            }
+            memory_id = payload.get("memory_id")
+            if memory_id in results_by_id:
+                continue
+            results_by_id[memory_id] = payload
+
+    if not results_by_id:
+        payload = {
+            "query": query,
+            "results": [],
+        }
+        if search_error:
+            payload["error"] = search_error
+        return payload
+
+    results = await _enrich_reuse_results(list(results_by_id.values()))
+    payload = {"query": query, "results": results[:bounded_limit]}
+    if search_error:
+        payload["error"] = search_error
+    return payload
+
+
+def _kind_priority(kind: str) -> int:
+    return _KIND_PRIORITY.get(str(kind or "").strip(), 0)
+
+
+async def _enrich_reuse_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    await ensure_promoted_skills_loaded(refresh=True)
+    registry = get_skill_registry()
+    promoted_capability_specs = await load_promoted_capability_specs()
+    enriched: list[dict[str, Any]] = []
+    for item in results:
         if not isinstance(item, dict):
             continue
-        payload = {
-            "memory_id": item.get("id"),
-            "content": item.get("content"),
-            "score": item.get("score"),
-            "created_at": item.get("created_at"),
-            "tags": item.get("tags") or [],
-            "metadata": item.get("metadata") or {},
-            "match_type": "semantic",
-        }
-        memory_id = payload.get("memory_id")
-        if memory_id in results_by_id:
-            continue
-        results_by_id[memory_id] = payload
-    results = list(results_by_id.values())
-    results.sort(
-        key=lambda item: (float(item.get("score") or 0.0), float(item.get("created_at") or 0.0)),
+        payload = dict(item)
+        metadata = payload.get("metadata")
+        metadata = metadata if isinstance(metadata, dict) else {}
+        gate = evaluate_promotion_deployability(
+            promotion_kind=payload.get("kind"),
+            metadata=metadata,
+        )
+        artifact = gate["artifact"]
+        runtime_registration: dict[str, Any] | None = None
+        if payload.get("kind") == "approved_skill":
+            skill_name = str(artifact.get("skill_name") or "").strip()
+            runtime_registration = {
+                "kind": "skill",
+                "name": skill_name,
+                "registered": bool(skill_name and registry.get_skill(skill_name)),
+                "deployable": gate["deployable"],
+            }
+        elif payload.get("kind") == "capability_patch":
+            capability_name = str(artifact.get("capability_name") or "").strip()
+            runtime_registration = {
+                "kind": "capability",
+                "name": capability_name,
+                "registered": capability_name in promoted_capability_specs,
+                "deployable": gate["deployable"],
+            }
+        payload["promotion_artifact"] = artifact
+        payload["deployment_gate"] = gate
+        if runtime_registration is not None:
+            payload["runtime_registration"] = runtime_registration
+        enriched.append(payload)
+
+    enriched.sort(
+        key=lambda item: (
+            1
+            if (
+                isinstance(item.get("runtime_registration"), dict)
+                and item["runtime_registration"].get("registered")
+                and isinstance(item.get("deployment_gate"), dict)
+                and item["deployment_gate"].get("deployable")
+            )
+            else 0,
+            _kind_priority(str(item.get("kind") or "")),
+            float(item.get("score") or 0.0),
+            float(item.get("created_at") or 0.0),
+        ),
         reverse=True,
     )
-    return {"query": query, "results": results[:bounded_limit]}
+    return enriched
+
+
+def preferred_runtime_reuse(reuse: dict[str, Any]) -> dict[str, Any] | None:
+    results = reuse.get("results") if isinstance(reuse, dict) else None
+    if not isinstance(results, list):
+        return None
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        runtime_registration = item.get("runtime_registration")
+        gate = item.get("deployment_gate")
+        if (
+            isinstance(runtime_registration, dict)
+            and runtime_registration.get("registered")
+            and isinstance(gate, dict)
+            and gate.get("deployable")
+        ):
+            return item
+    return None
 
 
 def reuse_guidance_lines(reuse: dict[str, Any], *, limit: int = 3) -> list[str]:
@@ -267,12 +377,28 @@ def reuse_guidance_lines(reuse: dict[str, Any], *, limit: int = 3) -> list[str]:
     for item in results[: max(1, min(limit, 5))]:
         if not isinstance(item, dict):
             continue
+        runtime_registration = item.get("runtime_registration")
+        if (
+            isinstance(runtime_registration, dict)
+            and runtime_registration.get("registered")
+            and isinstance(item.get("deployment_gate"), dict)
+            and item["deployment_gate"].get("deployable")
+        ):
+            name = runtime_registration.get("name") or "unknown"
+            if runtime_registration.get("kind") == "skill":
+                guidance.append(f"- Reuse registered approved skill {name} before inventing a new fix.")
+                continue
+            if runtime_registration.get("kind") == "capability":
+                guidance.append(f"- Reuse registered promoted capability {name} before inventing a new fix.")
+                continue
         content = compact_text(str(item.get("content") or ""), limit=160)
         if not content:
             continue
         metadata = item.get("metadata")
         metadata = metadata if isinstance(metadata, dict) else {}
         qualifiers = []
+        if item.get("kind"):
+            qualifiers.append(f"kind={item['kind']}")
         if metadata.get("trajectory_key"):
             qualifiers.append(str(metadata["trajectory_key"]))
         elif metadata.get("selector"):
@@ -335,6 +461,23 @@ def build_repair_prompt(
     guidance = reuse_guidance_text(reuse)
     if guidance:
         lines.extend(["", guidance])
+    preferred = preferred_runtime_reuse(reuse)
+    if isinstance(preferred, dict):
+        runtime_registration = preferred.get("runtime_registration")
+        artifact = preferred.get("promotion_artifact")
+        if isinstance(runtime_registration, dict) and isinstance(artifact, dict):
+            content_preview = str(artifact.get("content_preview") or "").strip()
+            if content_preview:
+                lines.extend(
+                    [
+                        "",
+                        "Registered approved reuse content:",
+                        f"- mode: {runtime_registration.get('kind')}",
+                        f"- name: {runtime_registration.get('name')}",
+                        "",
+                        content_preview,
+                    ]
+                )
     return "\n".join(lines)
 
 
@@ -343,6 +486,7 @@ __all__ = [
     "find_reuse_suggestions",
     "improvement_summary_with_reuse",
     "prefilter_reuse_suggestions",
+    "preferred_runtime_reuse",
     "state_reuse_hints",
     "trajectory_demo_goal",
     "trajectory_failure_reason",

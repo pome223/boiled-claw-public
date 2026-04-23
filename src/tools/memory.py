@@ -18,7 +18,14 @@ from src.security.audit import AuditEventType, get_audit_logger
 from src.tools.context import resolve_tool_context
 
 DEFAULT_VECTOR_DIM = 768
-VALID_MEMORY_KINDS = {"fact", "trajectory", "approved_improvement"}
+VALID_MEMORY_KINDS = {
+    "fact",
+    "trajectory",
+    "approved_improvement",
+    "approved_skill",
+    "capability_patch",
+    "policy_patch",
+}
 
 
 def _safe_json_loads(value: Optional[str], fallback: Any) -> Any:

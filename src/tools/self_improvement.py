@@ -94,6 +94,8 @@ async def self_improvement_package_candidate(
     repo_path: Optional[str] = None,
     timeout_seconds: int = 0,
     record_as_approved: bool = False,
+    promotion_kind: str = "approved_improvement_memory",
+    approval_dependencies: list[str] | None = None,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
     return await _package_candidate_impl(
@@ -103,6 +105,8 @@ async def self_improvement_package_candidate(
         repo_path_value=repo_path,
         timeout_seconds=timeout_seconds,
         record_as_approved=record_as_approved,
+        promotion_kind=promotion_kind,
+        approval_dependencies=approval_dependencies,
         tool_context=tool_context,
         run_benchmarks_fn=self_improvement_run_benchmarks,
         memory_store_fn=memory_store,
@@ -165,6 +169,8 @@ async def self_improvement_demo_from_trajectory(
     improvement_summary: Optional[str] = None,
     timeout_seconds: int = 0,
     record_as_approved: bool = False,
+    promotion_kind: str = "approved_improvement_memory",
+    approval_dependencies: list[str] | None = None,
     auto_cleanup: bool = False,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
@@ -180,6 +186,8 @@ async def self_improvement_demo_from_trajectory(
         improvement_summary=improvement_summary,
         timeout_seconds=timeout_seconds,
         record_as_approved=record_as_approved,
+        promotion_kind=promotion_kind,
+        approval_dependencies=approval_dependencies,
         auto_cleanup=auto_cleanup,
         tool_context=tool_context,
     )
@@ -196,6 +204,8 @@ async def self_improvement_search_from_trajectory(
     improvement_summary: Optional[str] = None,
     timeout_seconds: int = 0,
     record_winner_as_approved: bool = False,
+    promotion_kind: str = "approved_improvement_memory",
+    approval_dependencies: list[str] | None = None,
     cleanup_losers: bool = True,
     auto_cleanup: bool = False,
     tool_context: Optional[ToolContext] = None,
@@ -212,6 +222,8 @@ async def self_improvement_search_from_trajectory(
         improvement_summary=improvement_summary,
         timeout_seconds=timeout_seconds,
         record_winner_as_approved=record_winner_as_approved,
+        promotion_kind=promotion_kind,
+        approval_dependencies=approval_dependencies,
         cleanup_losers=cleanup_losers,
         auto_cleanup=auto_cleanup,
         tool_context=tool_context,

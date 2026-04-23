@@ -58,6 +58,8 @@ async def demo_from_trajectory(
     improvement_summary: Optional[str] = None,
     timeout_seconds: int = 0,
     record_as_approved: bool = False,
+    promotion_kind: str = "approved_improvement_memory",
+    approval_dependencies: list[str] | None = None,
     auto_cleanup: bool = False,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
@@ -93,12 +95,15 @@ async def demo_from_trajectory(
             "repair_prompt": repair_prompt,
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
+            "promotion_kind": promotion_kind,
         },
         metadata={
             "trajectory_id": trajectory_id,
             "record_as_approved": record_as_approved,
+            "promotion_kind": promotion_kind,
             "auto_cleanup": auto_cleanup,
         },
+        approval_dependencies=approval_dependencies,
         tool_context=tool_context,
     )
     task_id = str(task_record["task_id"])
@@ -139,6 +144,8 @@ async def demo_from_trajectory(
             "reuse_hints": trajectory_reuse_hints(trajectory),
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
+            "promotion_kind": promotion_kind,
+            "approval_dependencies": list(approval_dependencies or []),
             "started_at": time.time(),
         },
     )
@@ -178,6 +185,8 @@ async def demo_from_trajectory(
         repo_path=repo_path,
         timeout_seconds=timeout_seconds,
         record_as_approved=record_as_approved,
+        promotion_kind=promotion_kind,
+        approval_dependencies=approval_dependencies,
         tool_context=tool_context,
     )
     payload = {
@@ -221,6 +230,8 @@ async def search_from_trajectory(
     improvement_summary: Optional[str] = None,
     timeout_seconds: int = 0,
     record_winner_as_approved: bool = False,
+    promotion_kind: str = "approved_improvement_memory",
+    approval_dependencies: list[str] | None = None,
     cleanup_losers: bool = True,
     auto_cleanup: bool = False,
     tool_context: Optional[ToolContext] = None,
@@ -262,13 +273,16 @@ async def search_from_trajectory(
             "repair_prompt": repair_prompt,
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
+            "promotion_kind": promotion_kind,
         },
         metadata={
             "trajectory_id": trajectory_id,
             "record_winner_as_approved": record_winner_as_approved,
+            "promotion_kind": promotion_kind,
             "cleanup_losers": cleanup_losers,
             "auto_cleanup": auto_cleanup,
         },
+        approval_dependencies=approval_dependencies,
         tool_context=tool_context,
     )
     parent_task_id = str(parent_task["task_id"])
@@ -320,8 +334,10 @@ async def search_from_trajectory(
                 "improvement_summary": candidate_summary,
                 "improvement_summary_with_reuse": candidate_summary_with_reuse,
                 "candidate_generation_prompt": candidate_generation_prompt,
+                "promotion_kind": promotion_kind,
             },
             metadata={"candidate_index": index},
+            approval_dependencies=approval_dependencies,
             tool_context=tool_context,
         )
         candidate_result["task_id"] = candidate_task["task_id"]
@@ -356,6 +372,8 @@ async def search_from_trajectory(
                 "reuse_hints": trajectory_reuse_hints(trajectory),
                 "reuse_query": reuse.get("query", ""),
                 "reuse_suggestions": reuse.get("results", []),
+                "promotion_kind": promotion_kind,
+                "approval_dependencies": list(approval_dependencies or []),
                 "started_at": time.time(),
             },
         )
@@ -395,6 +413,8 @@ async def search_from_trajectory(
             repo_path=repo_path,
             timeout_seconds=timeout_seconds,
             record_as_approved=False,
+            promotion_kind=promotion_kind,
+            approval_dependencies=approval_dependencies,
             tool_context=tool_context,
         )
         candidate_result["package"] = packaged
@@ -436,6 +456,8 @@ async def search_from_trajectory(
             repo_path=repo_path,
             timeout_seconds=timeout_seconds,
             record_as_approved=True,
+            promotion_kind=promotion_kind,
+            approval_dependencies=approval_dependencies,
             tool_context=tool_context,
         )
         winner["package"] = refreshed

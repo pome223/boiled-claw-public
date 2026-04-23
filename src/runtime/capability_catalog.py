@@ -68,7 +68,10 @@ async def _skill_list_capability() -> dict[str, Any]:
     await ensure_skills_loaded()
     registry = get_skill_registry()
     items = []
-    for meta in registry.list_skills():
+    for meta in sorted(
+        registry.list_skills(),
+        key=lambda item: (0 if item.name.startswith("promoted/") else 1, item.name),
+    ):
         items.append(
             {
                 "name": meta.name,

@@ -108,11 +108,36 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 
 ## Near-Term Direction
 
-- Reliable computer use: strengthen browser and desktop evals, recovery loops, and trajectory capture
-- Self-improving agents: add benchmark-gated canary worktrees and typed memory for failures, facts, and approved improvements
-- Physical AI adapters: extend toward NVIDIA Isaac Sim / GR00T-style environments and ROS2-friendly action surfaces with a simulation-first posture
+- The next development spine is **trajectory-native self-improvement**, not horizontal channel expansion. See [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md).
+- Priority 1: trajectory-driven eval / replay for browser-first and desktop fallback tasks
+- Priority 2: failure-to-skill / capability promotion from benchmarked trajectories
+- Priority 3: policy-bounded self-improvement with security evals, audit, and approval gates
+- Priority 4: deeper current-tab / desktop practical tasks such as Sheets, Docs, SaaS extraction, and cross-app workflows
+- Priority 5: physical replay PoC that reuses the same trajectory schema in simulation-first validation
+- Slack / WhatsApp / Voice / generic Canvas remain secondary until the loop above is measurable and promotable
 
-The current tree already ships a first slice of all three layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state.
+The current tree already ships a first slice of all of these layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state. The next step is to connect them into one measurable promotion loop: `trajectory -> eval -> repair -> canary -> benchmark -> approval -> promotion -> reuse`.
+The minimum first slice for that loop is a current-tab Google Sheets eval that emits a normalized `failure_type`, produces a replay-linked report, and proves reuse through `approved_improvement_memory`.
+That slice should be read as a **bounded long-running slice** on top of boiled-claw's existing durable-execution substrate: task objects, replay/resume artifacts, approval queues, and scheduler-driven orchestration are the base layer, while PR #83 tightens the self-improvement spine that consumes those artifacts.
+
+The Phase 0 CLI is now present in the repo:
+
+```bash
+boiled-claw eval run evals/current_tab_google_sheets.yaml
+boiled-claw eval report --eval-id current_tab_google_sheets_phase0
+boiled-claw eval report --task-id <current> --compare-to-task-id <baseline>
+boiled-claw eval classify --trajectory-id 42 --failure-type focus_mismatch
+```
+
+Phase 0 eval reports now surface one `run_jobs[]` record per matched trajectory. Each job is expected to expose:
+
+- `trajectory_id`
+- `verifier_result`
+- `failure_type`
+- `recommended_repair_targets`
+- `candidate_promotion_artifacts`
+- `replay_reference`
+- `reuse_suggestions`
 
 ## The Bet
 
@@ -374,32 +399,11 @@ Loading the Chrome extension:
 1. Open `chrome://extensions` in Chrome
 2. Enable `Developer mode`
 3. Click `Load unpacked` and select `chrome_extension/current_tab_adapter`
-4. Open the extension's `Options` page to configure the relay URL, optional token, and optional Control UI origin
+4. Open the extension's `Options` page to configure the relay URL and token
 
 This extension requires `<all_urls>` host permission because it uses `chrome.scripting` on the active tab. This is necessary to perform selector click / fill / text extraction on "whichever tab the user is currently viewing" regardless of the site. Communication itself is limited to the local relay only, restricted by loopback bind, origin check, and an optional token.
 
-Current-browser spreadsheet plans normalize navigation through `current_tab.navigate` instead of relying on a Desktop `Cmd/Ctrl+T` hotkey. When the active tab is the boiled-claw Control UI chat, the runtime preserves that chat tab by opening a separate task tab before navigating. Spreadsheet entry steps also now locate and click a real grid cell such as `A1` before typing so writes land in the sheet instead of the browser chrome or Sheets toolbar. If an executor reaches for `browser.navigate` during a current-browser task, the runtime redirects that call to `current_tab.navigate` and records the redirect in the audit log.
-
-From a user perspective, this means boiled-claw can handle requests like:
-
-- "Research this topic in the current browser and put the results into Google Sheets"
-- "Stay in this browser session, but use a spreadsheet tab for data entry"
-- "Verify that the spreadsheet was actually updated, not just opened"
-
-The intended behavior is:
-
-- The Control UI chat stays available while boiled-claw opens or reuses a separate task tab for the spreadsheet work.
-- When entering spreadsheet data, boiled-claw targets a real sheet cell such as `A1`, so text lands in the grid instead of the browser chrome, toolbar, or document title.
-- Follow-up extraction and verification steps can return to the same task-owned tab, which makes multi-step browser tasks less brittle.
-- If Google Sheets exposes only sparse UI text, the control loop treats that as weak evidence and asks for stronger destination-bound proof instead of claiming success too early.
-
-In other words, this is not just "browser automation." It is a current-browser workflow that keeps the user's active session usable, separates task navigation from the chat surface, and adds extra checks so spreadsheet-oriented tasks are more likely to finish with verifiable results.
-
-Example flow: the operator asks boiled-claw, in Japanese, to research notable `新々刀` swordsmiths and summarize the findings into Google Sheets. The embedded animation below is a README-friendly conversion of a real execution recording, followed by the captured result state from the Control UI.
-
-![Current-browser Google Sheets execution demo](assets/current-browser-sheets-demo-20260421.gif)
-
-![Current-browser Google Sheets result screenshot](assets/current-browser-sheets-result-20260421.jpg)
+Current-browser spreadsheet plans normalize navigation through `current_tab.navigate` instead of relying on a Desktop `Cmd/Ctrl+T` hotkey. When the active tab is the boiled-claw Control UI chat, the runtime preserves that chat tab by opening a separate task tab before navigating. Spreadsheet entry steps also now locate and click a real grid cell such as `A1` before typing so writes land in the sheet instead of the browser chrome or Sheets toolbar.
 
 The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 
@@ -480,9 +484,9 @@ The self-improvement slice is intentionally offline and benchmark-gated:
 - `self_improvement_run_benchmarks` executes guarded shell commands inside that canary
 - `self_improvement_demo_from_trajectory` runs a failed computer trajectory through one canary -> candidate -> benchmark -> package flow
 - `self_improvement_search_from_trajectory` fans one failed computer trajectory out into multiple canaries, compares benchmarked candidates, and keeps the winner
-- `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, and can record approved changes into memory
+- `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, emits a typed promotion artifact, and can record approved changes into typed promotion memory
 - `self_improvement_cleanup_canary` removes the worktree and deletes the canary branch when finished
-- new failed trajectories automatically surface matching `approved_improvement` memories as reuse suggestions, using cheap trajectory-key / selector / action / surface prefilters before semantic fallback
+- new failed trajectories automatically surface matching approved promotions (`approved_improvement`, `approved_skill`, `capability_patch`, `policy_patch`) as reuse suggestions, using cheap trajectory-key / selector / action / surface prefilters before semantic fallback
 
 Optional `.env`:
 
@@ -496,6 +500,28 @@ Typed memory kinds are used to keep long-lived facts separate from execution tra
 - `fact`
 - `trajectory`
 - `approved_improvement`
+- `approved_skill`
+- `capability_patch`
+- `policy_patch`
+
+Typed promotion artifacts now separate memory-only reuse from stronger promotion targets:
+
+- `approved_improvement_memory` can be recorded immediately for reuse prompting
+- `approved_skill`, `capability_patch`, and `policy_patch` emit structured promotion artifacts and require explicit `--approval-dependency` refs before they can be recorded as approved
+
+The four promotion classes have intentionally different responsibilities:
+
+- `approved_improvement_memory`: retrieval-only knowledge that can influence future repair prompting
+- `approved_skill`: a bounded reusable recipe that planner / repair / reuse can register and prefer
+- `capability_patch`: a typed runtime surface that must register into the capability registry before use
+- `policy_patch`: a safety or scope constraint enforced by the promotion security gate
+
+Failure classification follows a similarly explicit lifecycle:
+
+1. `verifier` emits a preliminary bucket from the live run.
+2. `replay_analysis` normalizes that bucket against the persisted trajectory and evidence bundle.
+3. `operator override` can replace the normalized label before promotion.
+4. reports, promotion routing, and reuse consume only the normalized label plus provenance.
 
 The high-level demo and search flows now create persistent task objects:
 
@@ -509,7 +535,9 @@ CLI demo:
 boiled-claw self-improvement-demo \
   --trajectory-id 42 \
   --candidate-command "python3 scripts/apply_fix.py" \
-  --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q"
+  --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q" \
+  --promotion-kind approved_skill \
+  --approval-dependency approval-skill-1
 ```
 
 Search demo:
@@ -519,7 +547,9 @@ boiled-claw self-improvement-search \
   --trajectory-id 42 \
   --candidate-spec '{"name":"small-fix","commands":["python3 scripts/apply_small_fix.py"]}' \
   --candidate-spec '{"name":"bolder-fix","commands":["python3 scripts/apply_bolder_fix.py"]}' \
-  --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q"
+  --benchmark-command ".venv/bin/pytest tests/test_computer_tools.py -q" \
+  --promotion-kind capability_patch \
+  --approval-dependency approval-runtime-7
 ```
 
 ### 9. Physical AI Adapters
@@ -973,6 +1003,10 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - [x] Offline canary self-improvement workflow
 - [x] Simulation-first physical AI adapters
 - [x] Redis sessions
+
+> [!NOTE]
+> The next planned work is the trajectory-native eval / promotion spine described above and in [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md). Channel expansion stays intentionally secondary until that loop is in place.
+
 - [ ] Slack channel
 - [ ] WhatsApp channel
 - [ ] Canvas (visual workspace)
