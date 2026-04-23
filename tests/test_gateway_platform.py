@@ -153,7 +153,9 @@ def test_chat_ui_bundle_includes_long_running_task_sections(monkeypatch, tmp_pat
     assert app_js_response.status_code == 200
     bundle = app_js_response.text
     assert "Long-Running State" in bundle
+    assert "Mission Contract" in bundle
     assert "Scheduler Queues" in bundle
+    assert "evidence=" in bundle
     assert "Latest Checkpoints" in bundle
     assert "Approval Waits" in bundle
     assert "Budget Exhaustion" in bundle

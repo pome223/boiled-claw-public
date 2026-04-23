@@ -17,6 +17,7 @@ from src.runtime.durable_execution_schema import (
     CheckpointBudget,
     DurableArtifactRef,
     DurableCheckpoint,
+    DurableEscalationRecord,
     DurableJobRun,
     DurableResumeState,
     DurableTaskGraph,
@@ -112,6 +113,19 @@ def _utc_datetime(timestamp: float) -> datetime:
     return datetime.fromtimestamp(float(timestamp), tz=timezone.utc)
 
 
+def _datetime_timestamp(value: datetime | str | None) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        try:
+            value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.timestamp()
+
+
 def _supervisor_node_id(control_session_id: str) -> str:
     return f"{control_session_id}/maintain-objective"
 
@@ -192,6 +206,16 @@ def _artifact_refs_for_result(
     failure_type: str | None,
     mission_contract: MissionContract,
 ) -> list[DurableArtifactRef]:
+    verification_inputs = (
+        result.metadata.get("verification_inputs")
+        if isinstance(result.metadata.get("verification_inputs"), dict)
+        else {}
+    )
+    current_tab = (
+        verification_inputs.get("current_tab")
+        if isinstance(verification_inputs.get("current_tab"), dict)
+        else {}
+    )
     refs = [
         _mission_contract_artifact_ref(mission_contract),
         DurableArtifactRef(
@@ -201,6 +225,19 @@ def _artifact_refs_for_result(
             metadata={"task_id": child_task_id},
         )
     ]
+    if current_tab.get("info_succeeded"):
+        refs.append(
+            DurableArtifactRef(
+                kind="current_tab_info",
+                ref=f"{child_task_id}#verification_inputs.current_tab",
+                label="current_tab_info",
+                metadata={
+                    key: current_tab.get(key)
+                    for key in ("url", "title", "tab_id", "window_id")
+                    if current_tab.get(key) is not None
+                },
+            )
+        )
     if result.verification_report_id:
         refs.append(
             DurableArtifactRef(
@@ -255,6 +292,21 @@ def _build_live_verifier_verdict(
         refs = report.get("artifact_refs") or report.get("evidence_refs") or []
         if isinstance(refs, list):
             evidence_refs = [str(item).strip() for item in refs if str(item).strip()]
+    verification_inputs = (
+        result.metadata.get("verification_inputs")
+        if isinstance(result.metadata.get("verification_inputs"), dict)
+        else {}
+    )
+    current_tab = (
+        verification_inputs.get("current_tab")
+        if isinstance(verification_inputs.get("current_tab"), dict)
+        else {}
+    )
+    if current_tab.get("info_succeeded"):
+        evidence_refs.append(f"{child_task_id}#verification_inputs.current_tab")
+    if result.verification_report_id:
+        evidence_refs.append(f"verification_report:{result.verification_report_id}")
+    evidence_refs = list(dict.fromkeys(evidence_refs))
     replay_reference = {"child_task_id": child_task_id}
     if result.verification_report_id:
         replay_reference["verification_report_id"] = result.verification_report_id
@@ -487,12 +539,141 @@ class ControlLoopSupervisor:
     async def shutdown(self) -> None:
         handles = list(self._handles.values())
         for handle in handles:
-            handle.stop_requested.set()
+            if handle.stop_requested.is_set():
+                continue
+            self._append_task_event_record(
+                handle.task_id,
+                event_type="supervisor_shutdown_deferred",
+                status="running",
+                title="Supervisor deferred for resume",
+                payload={
+                    "summary": (
+                        "Gateway shutdown interrupted the live supervisor; the durable "
+                        "execution state remains running for startup resume."
+                    ),
+                },
+            )
+            handle.task.cancel()
         if handles:
             await asyncio.gather(
                 *(handle.task for handle in handles),
                 return_exceptions=True,
             )
+
+    async def resume_open_supervisors(
+        self,
+        tasks: list[dict[str, Any]],
+    ) -> int:
+        resumed = 0
+        for task in tasks:
+            if await self.resume_task(task):
+                resumed += 1
+        return resumed
+
+    async def resume_task(self, task: dict[str, Any]) -> bool:
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id or task_id in self._handles:
+            return False
+        if str(task.get("kind") or "") != "control_supervisor":
+            return False
+        if str(task.get("status") or "") != "running":
+            return False
+
+        artifacts = task.get("artifacts") if isinstance(task.get("artifacts"), dict) else {}
+        metadata = task.get("metadata") if isinstance(task.get("metadata"), dict) else {}
+        supervisor = artifacts.get("supervisor") if isinstance(artifacts.get("supervisor"), dict) else {}
+        progress = artifacts.get("progress") if isinstance(artifacts.get("progress"), dict) else {}
+        if progress.get("stop_requested"):
+            return False
+
+        contract_payload = artifacts.get("mission_contract")
+        durable_execution = (
+            artifacts.get("durable_execution")
+            if isinstance(artifacts.get("durable_execution"), dict)
+            else {}
+        )
+        if not isinstance(contract_payload, dict):
+            contract_payload = durable_execution.get("mission_contract")
+        objective = str(supervisor.get("objective") or task.get("title") or "").strip()
+        constraints = list(supervisor.get("constraints") or [])
+        mission_contract = normalize_mission_contract(
+            contract_payload if isinstance(contract_payload, dict) else None,
+            objective=objective,
+            constraints=constraints,
+            contract_id=str(metadata.get("mission_contract_id") or f"mission:{task_id}"),
+            metadata={
+                "source": "resume",
+                "owner_session_id": task.get("owner_session_id"),
+            },
+        )
+        objective = mission_contract.objective
+        loop_goal = str(supervisor.get("loop_goal") or "").strip() or build_maintenance_goal(
+            objective,
+            mission_contract,
+        )
+        control_session_id = str(
+            supervisor.get("control_session_id")
+            or metadata.get("control_session_id")
+            or f"ctrlsup_resume_{uuid.uuid4().hex[:8]}"
+        )
+        interval_seconds = int(supervisor.get("interval_seconds") or 0)
+        max_iterations = int(supervisor.get("max_iterations") or 1)
+        ends_at = float(supervisor.get("ends_at") or self._now())
+        created_at = float(supervisor.get("started_at") or task.get("created_at") or self._now())
+        child_task_ids = [str(item) for item in progress.get("child_task_ids") or []]
+        completed_iterations = int(progress.get("completed_iterations") or 0)
+        next_run_at = progress.get("next_run_at")
+        runtime_state = self._runtime_state_from_durable_execution(
+            objective=objective,
+            loop_goal=loop_goal,
+            control_session_id=control_session_id,
+            created_at=created_at,
+            next_run_at=float(next_run_at) if next_run_at is not None else self._now(),
+            mission_contract=mission_contract,
+            durable_execution=durable_execution,
+        )
+
+        stop_requested = asyncio.Event()
+        runner_task = asyncio.create_task(
+            self._run_supervisor(
+                task_id=task_id,
+                owner_session_id=str(task.get("owner_session_id") or ""),
+                user_id=str(task.get("owner_user_id") or ""),
+                objective=objective,
+                loop_goal=loop_goal,
+                constraints=constraints,
+                control_session_id=control_session_id,
+                interval_seconds=interval_seconds,
+                max_iterations=max_iterations,
+                ends_at=ends_at,
+                mission_contract=mission_contract,
+                stop_requested=stop_requested,
+                initial_runtime_state=runtime_state,
+                initial_child_task_ids=child_task_ids,
+                initial_completed_iterations=completed_iterations,
+                resumed=True,
+            ),
+            name=f"control-supervisor:{task_id}:resume",
+        )
+        self._handles[task_id] = _SupervisorHandle(
+            task_id=task_id,
+            owner_session_id=str(task.get("owner_session_id") or ""),
+            user_id=str(task.get("owner_user_id") or ""),
+            stop_requested=stop_requested,
+            task=runner_task,
+        )
+        self._append_task_event_record(
+            task_id,
+            event_type="supervisor_resumed",
+            status="running",
+            title="Supervisor resumed",
+            payload={
+                "summary": "Resumed live supervisor from durable_execution.resume_state.",
+                "completed_iterations": completed_iterations,
+                "control_session_id": control_session_id,
+            },
+        )
+        return True
 
     def _initial_runtime_state(
         self,
@@ -555,6 +736,126 @@ class ControlLoopSupervisor:
             "repair_depth_used": 0,
             "pending_approvals_count": 0,
         }
+
+    def _runtime_state_from_durable_execution(
+        self,
+        *,
+        objective: str,
+        loop_goal: str,
+        control_session_id: str,
+        created_at: float,
+        next_run_at: float | None,
+        mission_contract: MissionContract,
+        durable_execution: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        runtime_state = self._initial_runtime_state(
+            objective=objective,
+            loop_goal=loop_goal,
+            control_session_id=control_session_id,
+            created_at=created_at,
+            next_run_at=next_run_at,
+            mission_contract=mission_contract,
+        )
+        if not isinstance(durable_execution, dict):
+            return runtime_state
+
+        task_graph_payload = durable_execution.get("task_graph")
+        if isinstance(task_graph_payload, dict):
+            task_graph = DurableTaskGraph.model_validate(task_graph_payload)
+            if task_graph.nodes:
+                runtime_state["node"] = task_graph.nodes[0]
+
+        queue_state_payload = durable_execution.get("scheduler_state")
+        if isinstance(queue_state_payload, dict):
+            runtime_state["queue_state"] = SchedulerQueueState.model_validate(
+                queue_state_payload
+            )
+
+        runtime_state["job_runs"] = [
+            DurableJobRun.model_validate(item)
+            for item in durable_execution.get("job_runs") or []
+            if isinstance(item, dict)
+        ]
+        runtime_state["checkpoints"] = [
+            DurableCheckpoint.model_validate(item)
+            for item in durable_execution.get("checkpoints") or []
+            if isinstance(item, dict)
+        ]
+        runtime_state["escalations"] = [
+            DurableEscalationRecord.model_validate(item)
+            for item in durable_execution.get("escalations") or []
+            if isinstance(item, dict)
+        ]
+        if runtime_state["checkpoints"]:
+            latest_budget = runtime_state["checkpoints"][-1].budget
+            runtime_state["retry_counters"] = Counter(latest_budget.same_failure_retries)
+            runtime_state["llm_calls_used"] = latest_budget.llm_calls_used
+            runtime_state["tool_calls_used"] = latest_budget.tool_calls_used
+            runtime_state["repair_depth_used"] = latest_budget.repair_depth_used
+            runtime_state["pending_approvals_count"] = latest_budget.pending_approvals_count
+            runtime_state["successful_artifacts"] = dict(
+                runtime_state["checkpoints"][-1].last_successful_artifacts
+            )
+        return runtime_state
+
+    @staticmethod
+    def _scheduler_queue_entries(
+        queue_state: SchedulerQueueState,
+    ) -> list[SchedulerQueueEntry]:
+        return [
+            *queue_state.ready_queue,
+            *queue_state.retry_later_queue,
+            *queue_state.periodic_check_queue,
+        ]
+
+    def _next_scheduler_entry(
+        self,
+        runtime_state: dict[str, Any],
+    ) -> SchedulerQueueEntry | None:
+        entries = self._scheduler_queue_entries(runtime_state["queue_state"])
+        return entries[0] if entries else None
+
+    def _mission_contract_abort_reason(
+        self,
+        *,
+        mission_contract: MissionContract,
+        result: ExecutionResult,
+        next_queue: SchedulerQueueKind,
+        budget_exhausted: bool,
+    ) -> str | None:
+        aborts = {str(item or "").strip().lower() for item in mission_contract.abort_conditions}
+        if not aborts:
+            return None
+        if (
+            "human approval required" in aborts
+            and next_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL
+        ):
+            return "human approval required"
+        if (
+            "guardrail budget exhausted" in aborts
+            and budget_exhausted
+        ):
+            return "guardrail budget exhausted"
+        text = " ".join(
+            str(part or "")
+            for part in (
+                result.final_text,
+                result.metadata.get("error"),
+                result.metadata.get("normalized_failure_type"),
+            )
+        ).lower()
+        if not result.success and "current tab connection unavailable" in aborts and any(
+            token in text
+            for token in (
+                "current tab extension",
+                "current_tab",
+                "all connection attempts failed",
+                "connection unavailable",
+                "disconnected",
+            )
+        ):
+            return "current tab connection unavailable"
+        return None
 
     def _serialize_runtime_state(
         self,
@@ -746,6 +1047,15 @@ class ControlLoopSupervisor:
         budget_exhausted = bool(budget_reasons)
         if budget_exhausted:
             next_queue = SchedulerQueueKind.BLOCKED
+        abort_reason = self._mission_contract_abort_reason(
+            mission_contract=mission_contract,
+            result=result,
+            next_queue=next_queue,
+            budget_exhausted=budget_exhausted,
+        )
+        if abort_reason:
+            next_queue = SchedulerQueueKind.BLOCKED
+            chosen_action = RecoveryActionType.MARK_FAILED
         decision = RecoveryDecision(
             node_id=runtime_state["node_id"],
             failure_type=failure_type,
@@ -759,6 +1069,8 @@ class ControlLoopSupervisor:
             decision,
             verifier_verdict=verifier_verdict,
         )
+        if abort_reason:
+            queue_reason = f"mission_aborted:{abort_reason}"
         available_at = _available_at_for_queue(
             next_queue,
             next_run_at=next_run_at,
@@ -795,6 +1107,8 @@ class ControlLoopSupervisor:
             ),
         )
         queue_entry.reason = queue_reason
+        if abort_reason:
+            queue_entry.metadata["abort_reason"] = abort_reason
         runtime_state["queue_state"] = SchedulerQueueState()
         append_scheduler_queue_entry(runtime_state["queue_state"], queue_entry)
 
@@ -917,6 +1231,7 @@ class ControlLoopSupervisor:
             "budget_state": checkpoint.budget.model_dump(mode="json"),
             "checkpoint": checkpoint.model_dump(mode="json"),
             "job_run": job_run.model_dump(mode="json"),
+            "abort_reason": abort_reason,
             "escalation_record": (
                 escalation_record.model_dump(mode="json")
                 if escalation_record is not None
@@ -939,10 +1254,14 @@ class ControlLoopSupervisor:
         ends_at: float,
         mission_contract: MissionContract,
         stop_requested: asyncio.Event,
+        initial_runtime_state: dict[str, Any] | None = None,
+        initial_child_task_ids: list[str] | None = None,
+        initial_completed_iterations: int = 0,
+        resumed: bool = False,
     ) -> None:
-        child_task_ids: list[str] = []
-        completed_iterations = 0
-        runtime_state = self._initial_runtime_state(
+        child_task_ids = list(initial_child_task_ids or [])
+        completed_iterations = max(0, int(initial_completed_iterations or 0))
+        runtime_state = initial_runtime_state or self._initial_runtime_state(
             objective=objective,
             loop_goal=loop_goal,
             control_session_id=control_session_id,
@@ -950,25 +1269,26 @@ class ControlLoopSupervisor:
             next_run_at=self._now(),
             mission_contract=mission_contract,
         )
-        self._append_task_event_record(
-            task_id,
-            event_type="supervisor_started",
-            status="running",
-            title="Supervisor started",
-            payload={
-                "summary": (
-                    f"Maintaining objective for up to {max_iterations} iteration(s)."
-                ),
-                "supervisor": {
-                    "control_session_id": control_session_id,
-                    "max_iterations": max_iterations,
-                    "ends_at": ends_at,
+        if not resumed:
+            self._append_task_event_record(
+                task_id,
+                event_type="supervisor_started",
+                status="running",
+                title="Supervisor started",
+                payload={
+                    "summary": (
+                        f"Maintaining objective for up to {max_iterations} iteration(s)."
+                    ),
+                    "supervisor": {
+                        "control_session_id": control_session_id,
+                        "max_iterations": max_iterations,
+                        "ends_at": ends_at,
+                    },
                 },
-            },
-        )
+            )
         try:
             try:
-                for iteration in range(1, max_iterations + 1):
+                for iteration in range(completed_iterations + 1, max_iterations + 1):
                     if stop_requested.is_set():
                         await self._finish_cancelled(
                             task_id=task_id,
@@ -982,6 +1302,61 @@ class ControlLoopSupervisor:
                     now = self._now()
                     if now >= ends_at and completed_iterations > 0:
                         break
+
+                    scheduler_entry = self._next_scheduler_entry(runtime_state)
+                    if scheduler_entry is not None:
+                        available_at = _datetime_timestamp(scheduler_entry.available_at)
+                        if available_at is not None and available_at > now:
+                            self._update_task_record(
+                                task_id,
+                                artifacts={
+                                    "progress": {
+                                        "next_run_at": available_at,
+                                    },
+                                    "durable_execution": self._serialize_runtime_state(
+                                        runtime_state,
+                                        objective=objective,
+                                    ),
+                                },
+                            )
+                            self._append_task_event_record(
+                                task_id,
+                                event_type="scheduler_worker_waiting",
+                                status="running",
+                                title="Scheduler worker waiting",
+                                payload={
+                                    "summary": "Waiting for the next due scheduler queue entry.",
+                                    "iteration": iteration,
+                                    "queue": scheduler_entry.queue.value,
+                                    "available_at": available_at,
+                                    "entry": scheduler_entry.model_dump(mode="json"),
+                                },
+                            )
+                            if await self._wait_for_stop_or_timeout(
+                                stop_requested=stop_requested,
+                                timeout_seconds=max(0.0, available_at - self._now()),
+                            ):
+                                await self._finish_cancelled(
+                                    task_id=task_id,
+                                    owner_session_id=owner_session_id,
+                                    user_id=user_id,
+                                    completed_iterations=completed_iterations,
+                                    child_task_ids=child_task_ids,
+                                )
+                                return
+                        self._append_task_event_record(
+                            task_id,
+                            event_type="scheduler_worker_tick",
+                            status="running",
+                            title="Scheduler worker tick",
+                            payload={
+                                "summary": "Executing due scheduler queue entry.",
+                                "iteration": iteration,
+                                "queue": scheduler_entry.queue.value,
+                                "entry": scheduler_entry.model_dump(mode="json"),
+                                "resumed": resumed,
+                            },
+                        )
 
                     self._update_task_record(
                         task_id,
@@ -1091,6 +1466,18 @@ class ControlLoopSupervisor:
 
                     if runtime_report["scheduler_queue"] == SchedulerQueueKind.WAITING_FOR_APPROVAL.value:
                         await self._finish_waiting_for_approval(
+                            task_id=task_id,
+                            owner_session_id=owner_session_id,
+                            user_id=user_id,
+                            completed_iterations=completed_iterations,
+                            child_task_ids=child_task_ids,
+                            child_task_id=child_task_id,
+                            result=result,
+                            runtime_report=runtime_report,
+                        )
+                        return
+                    if runtime_report.get("abort_reason"):
+                        await self._finish_mission_aborted(
                             task_id=task_id,
                             owner_session_id=owner_session_id,
                             user_id=user_id,
@@ -1366,6 +1753,74 @@ class ControlLoopSupervisor:
             source=_SUPERVISOR_AGENT_NAME,
             status="blocked",
             message=result.final_text or "Long-running control supervisor blocked.",
+            user_id=user_id,
+            task_id=task_id,
+            agent_name=_SUPERVISOR_AGENT_NAME,
+        )
+
+    async def _finish_mission_aborted(
+        self,
+        *,
+        task_id: str,
+        owner_session_id: str,
+        user_id: str,
+        completed_iterations: int,
+        child_task_ids: list[str],
+        child_task_id: str,
+        result: ExecutionResult,
+        runtime_report: dict[str, Any],
+    ) -> None:
+        abort_reason = str(runtime_report.get("abort_reason") or "").strip()
+        self._update_task_record(
+            task_id,
+            status="failed",
+            artifacts={
+                "progress": {
+                    "completed_iterations": completed_iterations,
+                    "child_task_ids": child_task_ids,
+                    "last_child_task_id": child_task_id,
+                    "next_run_at": None,
+                },
+                "result": {
+                    "success": False,
+                    "mission_aborted": True,
+                    "abort_reason": abort_reason,
+                    "final_text": result.final_text,
+                    "blocking_child_task_id": child_task_id,
+                    "failure_type": runtime_report.get("failure_type"),
+                    "scheduler_queue": runtime_report.get("scheduler_queue"),
+                },
+                "durable_execution": runtime_report["durable_execution"],
+            },
+            metadata={
+                "mission_aborted": True,
+                "abort_reason": abort_reason,
+                "blocking_child_task_id": child_task_id,
+                "normalized_failure_type": runtime_report.get("failure_type"),
+            },
+            error=f"mission_aborted:{abort_reason or 'abort_condition'}",
+            ended_at=self._now(),
+        )
+        self._append_task_event_record(
+            task_id,
+            event_type="mission_aborted",
+            status="failed",
+            title="Mission aborted",
+            payload={
+                "summary": f"Mission Contract abort condition matched: {abort_reason}",
+                "child_task_id": child_task_id,
+                "runtime": {
+                    "recovery_decision": runtime_report["recovery_decision"],
+                    "scheduler_queue_entry": runtime_report["scheduler_queue_entry"],
+                    "budget_state": runtime_report["budget_state"],
+                },
+            },
+        )
+        await self._emit_session_event(
+            owner_session_id,
+            source=_SUPERVISOR_AGENT_NAME,
+            status="failed",
+            message=f"Mission aborted: {abort_reason}",
             user_id=user_id,
             task_id=task_id,
             agent_name=_SUPERVISOR_AGENT_NAME,

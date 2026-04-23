@@ -1542,15 +1542,20 @@ function humanizeLongRunningToken(value) {
 function extractLongRunningReport(task) {
   const artifacts = task && typeof task.artifacts === "object" ? task.artifacts : {};
   const report = artifacts.report && typeof artifacts.report === "object" ? artifacts.report : null;
-  if (!report) return null;
-  const durable = report.durable_execution && typeof report.durable_execution === "object"
+  const liveDurable = artifacts.durable_execution && typeof artifacts.durable_execution === "object"
+    ? artifacts.durable_execution
+    : null;
+  if (!report && !liveDurable) return null;
+  const durable = report?.durable_execution && typeof report.durable_execution === "object"
     ? report.durable_execution
-    : {};
-  const runJobs = Array.isArray(report.run_jobs) ? report.run_jobs : [];
+    : (liveDurable || {});
+  const runJobs = Array.isArray(report?.run_jobs)
+    ? report.run_jobs
+    : (Array.isArray(durable.job_runs) ? durable.job_runs : []);
   if (!runJobs.length && !Object.keys(durable).length) {
     return null;
   }
-  return { report, durable, runJobs };
+  return { report: report || {}, durable, runJobs };
 }
 
 function renderLongRunningTaskState(task) {
@@ -1563,6 +1568,9 @@ function renderLongRunningTaskState(task) {
   const schedulerState = durable.scheduler_state && typeof durable.scheduler_state === "object"
     ? durable.scheduler_state
     : {};
+  const missionContract = durable.mission_contract && typeof durable.mission_contract === "object"
+    ? durable.mission_contract
+    : (task.artifacts?.mission_contract && typeof task.artifacts.mission_contract === "object" ? task.artifacts.mission_contract : {});
   const resumeState = durable.resume_state && typeof durable.resume_state === "object"
     ? durable.resume_state
     : {};
@@ -1614,15 +1622,17 @@ function renderLongRunningTaskState(task) {
     const decision = job.recovery_decision && typeof job.recovery_decision === "object" ? job.recovery_decision : {};
     const budgetState = job.budget_state && typeof job.budget_state === "object" ? job.budget_state : {};
     const replayReference = job.replay_reference && typeof job.replay_reference === "object" ? job.replay_reference : {};
+    const verdict = job.verifier_verdict && typeof job.verifier_verdict === "object" ? job.verifier_verdict : {};
+    const evidenceRefs = Array.isArray(verdict.evidence_refs) ? verdict.evidence_refs : [];
     const detailBits = [
-      job.failure_type ? `failure=${job.failure_type}` : "",
+      (job.failure_type || verdict.failure_type) ? `failure=${job.failure_type || verdict.failure_type}` : "",
       decision.chosen_action ? `next=${decision.chosen_action}` : "",
-      checkpoint.current_task_node_id ? `node=${checkpoint.current_task_node_id}` : "",
+      (checkpoint.current_task_node_id || job.node_id) ? `node=${checkpoint.current_task_node_id || job.node_id}` : "",
     ].filter(Boolean);
     return [
       `<div class="detail-card">`,
       `<div class="detail-heading">`,
-      `<div><div class="k">${escapeHtml(job.run_job_id || job.task_node_id || "run job")}</div><div class="item-meta mono">${escapeHtml(`trajectory=${job.trajectory_id || "-"}`)}</div></div>`,
+      `<div><div class="k">${escapeHtml(job.run_job_id || job.run_id || job.task_node_id || "run job")}</div><div class="item-meta mono">${escapeHtml(`trajectory=${job.trajectory_id || "-"}`)}</div></div>`,
       statusTag(job.scheduler_queue || job.status || "unknown"),
       `</div>`,
       `<div class="item-detail">${escapeHtml(detailBits.join(" · ") || "-")}</div>`,
@@ -1630,6 +1640,7 @@ function renderLongRunningTaskState(task) {
       replayReference && Object.keys(replayReference).length
         ? `<div class="item-meta mono">${escapeHtml(compactText(JSON.stringify(replayReference), 180))}</div>`
         : "",
+      evidenceRefs.length ? `<div class="item-meta mono">${escapeHtml(`evidence=${evidenceRefs.join(", ")}`)}</div>` : "",
       budgetState.budget_exhausted
         ? `<div class="item-meta mono">${escapeHtml(`budget=${(budgetState.budget_exhausted_reasons || []).join(", ") || "exhausted"}`)}</div>`
         : "",
@@ -1676,6 +1687,7 @@ function renderLongRunningTaskState(task) {
     `<div class="detail-grid">`,
     `<div class="detail-card"><div class="k">Slice</div><div>${escapeHtml(humanizeLongRunningToken(slice.type || "-"))}</div><div class="item-meta mono">${escapeHtml(report.eval_id || "-")}</div></div>`,
     `<div class="detail-card"><div class="k">Runs</div><div>${escapeHtml(`${report.runs_evaluated || 0}/${report.runs_requested || report.runs_evaluated || 0}`)}</div><div class="item-meta mono">${escapeHtml(`success_rate=${Number(report.success_rate || 0).toFixed(4)}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Mission Contract</div><div>${escapeHtml(missionContract.contract_id || "-")}</div><div class="item-meta mono">${escapeHtml((missionContract.allowed_actions || []).join(", ") || "-")}</div></div>`,
     `<div class="detail-card"><div class="k">Resume</div><div>${escapeHtml(humanizeLongRunningToken(resumeState.reason || "-"))}</div><div class="item-meta mono">${escapeHtml(resumeState.next_actionable_task_node_id || "-")}</div></div>`,
     `<div class="detail-card"><div class="k">Queues</div><div>${escapeHtml([
       `ready=${resumeState.scheduler_queue_counts?.ready ?? 0}`,
