@@ -434,7 +434,11 @@ def eval_run(spec_path, trajectory_id, limit):
 
 @eval.command("report")
 @click.option("--task-id", default=None, help="Task id returned by `boiled-claw eval run`.")
-@click.option("--eval-id", default=None, help="Eval id from the YAML spec. Returns the latest matching report.")
+@click.option(
+    "--eval-id",
+    default=None,
+    help="Eval id from the YAML spec. Returns the latest completed or failed matching report.",
+)
 @click.option("--compare-to-task-id", default=None, help="Baseline eval task id to compare against.")
 @click.option("--compare-to-eval-id", default=None, help="Baseline eval id to compare against.")
 def eval_report(task_id, eval_id, compare_to_task_id, compare_to_eval_id):

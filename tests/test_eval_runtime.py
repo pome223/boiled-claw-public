@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import sqlite3
 
 from click.testing import CliRunner
 
@@ -7,6 +8,7 @@ from src.computer_use.trajectory_store import ComputerTrajectoryStore
 from src.evals.failure_taxonomy import normalize_trajectory_failure
 from src.evals import runtime as eval_runtime
 from src.main import cli
+from src.runtime.task_store import TaskStore
 from src.runtime.task_store import get_task_store
 from src.tools.self_improvement_runtime.promotion import REUSE_MEMORY_KINDS
 
@@ -483,6 +485,75 @@ match:
     assert "target_context_mismatch" in report["comparison"]["improved_buckets"]
 
 
+def test_get_eval_report_prefers_latest_terminal_task_over_running_or_updated_older_run(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+
+    def _create_eval_task(task_id: str, status: str, *, created_at: float, updated_at: float) -> None:
+        task = store.create(
+            task_id=task_id,
+            kind="eval_run",
+            title=f"{status} eval",
+            status=status,
+            owner_session_id="session-1",
+            owner_user_id="user-1",
+            metadata={"eval_id": "current_tab_google_sheets_phase0"},
+            artifacts={
+                "spec": {"id": "current_tab_google_sheets_phase0"},
+                "report": {
+                    "task_id": task_id,
+                    "status": status,
+                    "created_at": created_at,
+                },
+            },
+        )
+        assert task["task_id"] == task_id
+        with sqlite3.connect(store.db_path) as conn:
+            conn.execute(
+                """
+                UPDATE tasks
+                SET created_at = ?, updated_at = ?, started_at = ?, ended_at = ?
+                WHERE task_id = ?
+                """,
+                (
+                    created_at,
+                    updated_at,
+                    created_at if status in {"accepted", "running", "idle"} else None,
+                    updated_at if status in {"completed", "failed", "cancelled", "expired"} else None,
+                    task_id,
+                ),
+            )
+            conn.commit()
+
+    _create_eval_task(
+        "task_eval_completed_older",
+        "completed",
+        created_at=100.0,
+        updated_at=300.0,
+    )
+    _create_eval_task(
+        "task_eval_completed_latest",
+        "completed",
+        created_at=200.0,
+        updated_at=200.0,
+    )
+    _create_eval_task(
+        "task_eval_running_newest",
+        "running",
+        created_at=400.0,
+        updated_at=400.0,
+    )
+
+    report = eval_runtime.get_eval_report(
+        eval_id="current_tab_google_sheets_phase0",
+        get_task_store_fn=lambda: store,
+    )
+
+    assert report["success"] is True
+    assert report["task_id"] == "task_eval_completed_latest"
+    assert report["status"] == "completed"
+    assert report["report"]["task_id"] == "task_eval_completed_latest"
+
+
 def test_run_eval_spec_blocks_when_guardrail_budget_is_exhausted(tmp_path, monkeypatch):
     store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
     first_trajectory = store.record(
@@ -879,6 +950,129 @@ match:
     assert report_payload["report"]["durable_execution"]["resume_state"]["reason"] == (
         "awaiting_approval"
     )
+
+
+def test_eval_cli_report_by_eval_id_prefers_latest_completed_terminal_run_end_to_end(tmp_path, monkeypatch):
+    store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
+    first_trajectory = store.record(
+        action="fill",
+        status="success",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={
+            "status": "pass",
+            "success": True,
+            "checks": [
+                {
+                    "name": "url_contains",
+                    "expected": "docs.google.com/spreadsheets",
+                    "actual": "https://docs.google.com/spreadsheets/d/1",
+                    "passed": True,
+                }
+            ],
+        },
+        request={
+            "selector": ".cell-input",
+            "verify": {
+                "url_contains": "docs.google.com/spreadsheets",
+            },
+        },
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+    second_trajectory = store.record(
+        action="fill",
+        status="success",
+        final_surface="current_tab",
+        attempts=[{"surface": "current_tab", "strategy": "current_tab_selector"}],
+        verification={
+            "status": "pass",
+            "success": True,
+            "checks": [
+                {
+                    "name": "url_contains",
+                    "expected": "docs.google.com/spreadsheets",
+                    "actual": "https://docs.google.com/spreadsheets/d/2",
+                    "passed": True,
+                }
+            ],
+        },
+        request={
+            "selector": ".cell-input",
+            "verify": {
+                "url_contains": "docs.google.com/spreadsheets",
+            },
+        },
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    spec_path = tmp_path / "current_tab_google_sheets.yaml"
+    spec_path.write_text(
+        """
+id: current_tab_google_sheets_phase0
+goal: "Write into Google Sheets"
+runs: 1
+match:
+  action: fill
+  final_surface_any:
+    - current_tab
+  status_any:
+    - success
+  request:
+    verify:
+      url_contains: "docs.google.com/spreadsheets"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    task_store = TaskStore(str(tmp_path / "tasks.db"))
+    monkeypatch.setattr(eval_runtime, "get_computer_trajectory_store", lambda: store)
+    monkeypatch.setattr(eval_runtime, "get_task_store", lambda: task_store)
+    monkeypatch.setattr(eval_runtime, "get_memory_store", lambda: _StubMemoryStore([]))
+
+    runner = CliRunner()
+    first_run = runner.invoke(cli, ["eval", "run", str(spec_path), "--trajectory-id", str(first_trajectory)])
+    assert first_run.exit_code == 0
+    first_payload = json.loads(first_run.output)
+
+    second_run = runner.invoke(cli, ["eval", "run", str(spec_path), "--trajectory-id", str(second_trajectory)])
+    assert second_run.exit_code == 0
+    second_payload = json.loads(second_run.output)
+
+    with sqlite3.connect(task_store.db_path) as conn:
+        conn.execute(
+            "UPDATE tasks SET updated_at = ? WHERE task_id = ?",
+            (9999.0, first_payload["task_id"]),
+        )
+        conn.commit()
+
+    running_task = task_store.create(
+        task_id="task_eval_running_newest",
+        kind="eval_run",
+        title="running eval",
+        status="running",
+        owner_session_id="session-1",
+        owner_user_id="user-1",
+        metadata={"eval_id": "current_tab_google_sheets_phase0"},
+        artifacts={
+            "spec": {"id": "current_tab_google_sheets_phase0"},
+            "report": {"task_id": "task_eval_running_newest", "status": "running"},
+        },
+    )
+    assert running_task["task_id"] == "task_eval_running_newest"
+
+    report = runner.invoke(
+        cli,
+        ["eval", "report", "--eval-id", "current_tab_google_sheets_phase0"],
+    )
+
+    assert report.exit_code == 0
+    report_payload = json.loads(report.output)
+    assert report_payload["success"] is True
+    assert report_payload["task_id"] == second_payload["task_id"]
+    assert report_payload["status"] == "completed"
+    assert report_payload["report"]["run_jobs"][0]["trajectory_id"] == second_trajectory
+    assert report_payload["report"]["run_jobs"][0]["status"] == "success"
 
 
 def test_eval_cli_classify_updates_operator_override(tmp_path, monkeypatch):

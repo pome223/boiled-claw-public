@@ -934,12 +934,31 @@ def _resolve_eval_task(
         return store.get(task_id)
     if not eval_id:
         return None
-    recent = store.query(kind="eval_run", page=1, page_size=100)["tasks"]
-    for item in recent:
-        metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
-        if str(metadata.get("eval_id") or "") == str(eval_id):
-            return item
-    return None
+
+    matching_terminal_tasks: list[dict[str, Any]] = []
+    for status in ("completed", "failed"):
+        recent = store.query(
+            kind="eval_run",
+            status=status,
+            page=1,
+            page_size=100,
+        )["tasks"]
+        for item in recent:
+            metadata = item.get("metadata") if isinstance(item.get("metadata"), dict) else {}
+            if str(metadata.get("eval_id") or "") == str(eval_id):
+                matching_terminal_tasks.append(item)
+
+    if not matching_terminal_tasks:
+        return None
+
+    matching_terminal_tasks.sort(
+        key=lambda item: (
+            float(item.get("created_at") or 0.0),
+            float(item.get("updated_at") or 0.0),
+        ),
+        reverse=True,
+    )
+    return matching_terminal_tasks[0]
 
 
 def _select_trajectories(
