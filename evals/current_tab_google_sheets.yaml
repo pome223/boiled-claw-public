@@ -1,0 +1,42 @@
+id: current_tab_google_sheets_phase0
+goal: "Use the current browser session to write into Google Sheets without losing context."
+slice_type: bounded_long_running
+substrate:
+  - task_store
+  - trajectory_store
+  - replay_report
+  - approval_gated_promotion
+expected_artifacts:
+  - trajectory_id
+  - verifier_result
+  - failure_type
+  - recommended_repair_targets
+  - candidate_promotion_artifacts
+  - replay_reference
+  - reuse_suggestions
+surfaces:
+  - current_tab
+  - desktop
+  - browser
+success_criteria:
+  - destination_url_contains: "docs.google.com/spreadsheets"
+  - evidence_required: "destination_bound_text_or_screenshot"
+  - write_target: "sheet_cell"
+runs: 5
+failure_buckets:
+  - weak_evidence
+  - focus_mismatch
+  - target_context_mismatch
+match:
+  action: fill
+  final_surface_any:
+    - current_tab
+    - desktop
+    - browser
+  status_any:
+    - success
+    - recovered
+    - failed
+  request:
+    verify:
+      url_contains: "docs.google.com/spreadsheets"

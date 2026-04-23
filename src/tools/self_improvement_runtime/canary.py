@@ -23,6 +23,13 @@ from src.tools.self_improvement_runtime.common import (
     worktree_root,
     write_state,
 )
+from src.tools.self_improvement_runtime.promotion import (
+    DEFAULT_PROMOTION_KIND,
+    build_promotion_artifact,
+    normalize_promotion_kind,
+    promotion_memory_kind,
+)
+from src.tools.self_improvement_runtime.security import evaluate_promotion_deployability
 from src.tools.self_improvement_runtime.reuse import state_reuse_hints
 
 
@@ -238,6 +245,8 @@ async def package_candidate(
     repo_path_value: Optional[str] = None,
     timeout_seconds: int = 0,
     record_as_approved: bool = False,
+    promotion_kind: str = DEFAULT_PROMOTION_KIND,
+    approval_dependencies: list[str] | None = None,
     tool_context: Optional[ToolContext] = None,
     run_benchmarks_fn: RunBenchmarksFn,
     memory_store_fn: MemoryStoreFn,
@@ -255,9 +264,18 @@ async def package_candidate(
 
     canary = Path(canary_path).resolve()
     repo = repo_path(repo_path_value or canary_path)
+    state = read_state(canary)
     diff_stat = run_git(canary, "diff", "--stat")
     diff_patch = run_git(canary, "diff", "--minimal", "--binary", "--no-ext-diff")
     branch = run_git(canary, "rev-parse", "--abbrev-ref", "HEAD")
+    resolved_promotion_kind = normalize_promotion_kind(promotion_kind)
+    flow_state = {}
+    for key in ("demo", "search"):
+        candidate = state.get(key)
+        if isinstance(candidate, dict):
+            flow_state = candidate
+            break
+    reuse_hints = state_reuse_hints(canary)
 
     payload = {
         "success": True,
@@ -270,30 +288,64 @@ async def package_candidate(
         "benchmark_reused": bool(benchmark_result.get("reused")),
         "diff_stat": diff_stat.stdout.strip(),
         "diff_excerpt": trim_output(diff_patch.stdout.strip(), limit=8000),
+        "promotion_kind": resolved_promotion_kind,
+        "approval_dependencies": [str(item).strip() for item in approval_dependencies or [] if str(item).strip()],
     }
+    payload["promotion_artifact"] = build_promotion_artifact(
+        promotion_kind=resolved_promotion_kind,
+        canary_path=str(canary),
+        branch=payload["branch"],
+        improvement_summary=improvement_summary,
+        goal=str(flow_state.get("goal") or ""),
+        failure_reason=str(flow_state.get("failure_reason") or ""),
+        trajectory_id=int(flow_state["trajectory_id"]) if flow_state.get("trajectory_id") is not None else None,
+        benchmark_results=list(benchmark_result.get("results") or []),
+        diff_stat=payload["diff_stat"],
+        reuse_hints=reuse_hints,
+        approval_dependencies=payload["approval_dependencies"],
+    )
+    payload["promotion_gate"] = evaluate_promotion_deployability(
+        promotion_kind=resolved_promotion_kind,
+        artifact=payload["promotion_artifact"],
+    )
 
     if record_as_approved and benchmark_result["all_passed"]:
-        reuse_hints = state_reuse_hints(canary)
+        memory_kind = promotion_memory_kind(resolved_promotion_kind)
         ctx = resolve_tool_context_fn(tool_context) if tool_context is not None else {}
-        memory_payload = await memory_store_fn(
-            content=improvement_summary,
-            tags="self-improvement,approved",
-            metadata=json.dumps(
-                {
-                    "canary_path": str(canary),
-                    "branch": payload["branch"],
-                    "benchmark_results": benchmark_result["results"],
-                    "diff_stat": payload["diff_stat"],
-                    **reuse_hints,
-                    "approved_by_user_id": ctx.get("user_id") or "",
-                    "approved_in_session_id": ctx.get("session_id") or "",
-                },
-                ensure_ascii=True,
-            ),
-            kind="approved_improvement",
-            tool_context=tool_context,
-        )
-        payload["approved_memory"] = memory_payload
+        if resolved_promotion_kind != DEFAULT_PROMOTION_KIND and not payload["promotion_gate"]["deployable"]:
+            payload["approved_record"] = {
+                "success": False,
+                "error": payload["promotion_gate"]["reasons"][0]
+                if payload["promotion_gate"]["reasons"]
+                else (
+                    f"promotion kind {resolved_promotion_kind} cannot be recorded as approved"
+                ),
+            }
+        else:
+            memory_payload = await memory_store_fn(
+                content=improvement_summary,
+                tags=f"self-improvement,approved,{memory_kind}",
+                metadata=json.dumps(
+                    {
+                        "canary_path": str(canary),
+                        "branch": payload["branch"],
+                        "benchmark_results": benchmark_result["results"],
+                        "diff_stat": payload["diff_stat"],
+                        **reuse_hints,
+                        "approval_dependencies": payload["approval_dependencies"],
+                        "artifact_kind": resolved_promotion_kind,
+                        "promotion_artifact": payload["promotion_artifact"],
+                        "approved_by_user_id": ctx.get("user_id") or "",
+                        "approved_in_session_id": ctx.get("session_id") or "",
+                    },
+                    ensure_ascii=True,
+                ),
+                kind=memory_kind,
+                tool_context=tool_context,
+            )
+            payload["approved_record"] = memory_payload
+            if memory_kind == "approved_improvement":
+                payload["approved_memory"] = memory_payload
 
     return payload
 

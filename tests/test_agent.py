@@ -283,6 +283,51 @@ async def test_memory_vector_search_ranks_semantic_match(monkeypatch):
             os.unlink(db_path)
 
 
+@pytest.mark.asyncio
+async def test_memory_store_supports_approved_skill_kind(monkeypatch):
+    """typed promotion kinds should round-trip through the memory store"""
+    from src.tools import memory as memory_module
+    import tempfile
+    import os
+
+    async def fake_embed(text: str, *, task_type: str, output_dimensionality: int):
+        vec = [0.0] * output_dimensionality
+        if "Sheets" in text or "skill" in text:
+            vec[0] = 1.0
+        return vec
+
+    monkeypatch.setattr(memory_module, "_embed_with_google", fake_embed)
+
+    with tempfile.NamedTemporaryFile(delete=False) as f:
+        db_path = f.name
+
+    old_store = memory_module._memory_store
+    memory_module._memory_store = memory_module.MemoryStore(db_path=db_path)
+
+    try:
+        stored = await memory_module.memory_store(
+            "Google Sheets entry skill with stronger cell targeting",
+            tags="sheets,promotion",
+            kind="approved_skill",
+        )
+        assert stored.get("success")
+        assert stored["kind"] == "approved_skill"
+
+        result = await memory_module.memory_search(
+            query="Sheets skill",
+            kind="approved_skill",
+            limit=2,
+        )
+
+        assert result.get("success")
+        assert result["count"] >= 1
+        assert all(item["kind"] == "approved_skill" for item in result["results"])
+    finally:
+        memory_module._memory_store = old_store
+        if os.path.exists(db_path):
+            os.unlink(db_path)
+
+
 def test_channel_registry():
     """チャネルレジストリのテスト"""
     from src.channels.registry import get_channel_registry

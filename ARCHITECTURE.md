@@ -14,6 +14,35 @@ boiled-claw は、OpenClaw の control plane / execution plane separation を Py
 
 このドキュメントは現在実装されている構成を中心に説明します。physical AI 方向は forward path であり、現時点でフル robotics stack を提供するものではありません。
 
+## Next Development Spine
+
+次に深掘りするべきなのは、Slack / Voice のような横展開ではなく、
+**trajectory を中心にした eval / replay / repair / promotion の閉ループ強化**である。
+
+要点は次の 6 つ。
+
+1. `computer_*` の trajectory を first-class eval artifact にする
+2. 失敗を taxonomy で分類し、verifier -> replay analysis -> normalized failure_type -> operator override の lifecycle を持たせる
+3. benchmark を通過した修復を `approved_skill` / `capability_patch` / `approved_improvement_memory` / `policy_patch` に責務分離して昇格する
+4. promotion を approval / audit / security eval で明示的に縛る
+5. current-tab 優先 + desktop fallback の実用タスクを深掘りする
+6. 同じ trajectory schema を simulation-first physical replay に再利用する
+
+この spine は durable execution の代替ではなく、その上に乗る improvement layer として扱う。
+ここでいう substrate は、既存の task store / replay / resume / approval queue / scheduler surfaces であり、
+PR #83 の主役は workflow engine の完成ではなく、それらの durable artifact を
+`trajectory -> eval -> failure classification -> promotion -> reuse` に接続すること。
+
+最小の first slice は、current-tab Google Sheets task を起点に
+`trajectory -> normalized failure_type -> replay-linked report -> canary -> approved_improvement_memory reuse`
+を通す形がよい。
+
+Phase 0 の report では、少なくとも
+`trajectory_id / verifier_result / failure_type / recommended_repair_targets / replay_reference`
+が複数 run を並べた `run_jobs` として見えることを目標にする。
+
+詳細な設計図は [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md) を参照。
+
 ### 主要コンポーネント
 
 ```

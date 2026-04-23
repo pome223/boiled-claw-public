@@ -408,6 +408,72 @@ def status():
     console.print(ch_table)
 
 
+@cli.group()
+def eval():
+    """Run trajectory-native eval specs and inspect reports."""
+    pass
+
+
+@eval.command("run")
+@click.argument("spec_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--trajectory-id", type=int, default=None, help="Evaluate a single stored computer trajectory.")
+@click.option("--limit", type=int, default=None, help="Override the number of matching trajectories to include.")
+def eval_run(spec_path, trajectory_id, limit):
+    """Run a Phase 0 eval spec against stored computer trajectories."""
+    from src.evals.runtime import run_eval_spec
+
+    result = run_eval_spec(
+        spec_path,
+        trajectory_id=trajectory_id,
+        limit=limit,
+    )
+    console.print_json(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result.get("success"):
+        raise click.Abort()
+
+
+@eval.command("report")
+@click.option("--task-id", default=None, help="Task id returned by `boiled-claw eval run`.")
+@click.option("--eval-id", default=None, help="Eval id from the YAML spec. Returns the latest matching report.")
+@click.option("--compare-to-task-id", default=None, help="Baseline eval task id to compare against.")
+@click.option("--compare-to-eval-id", default=None, help="Baseline eval id to compare against.")
+def eval_report(task_id, eval_id, compare_to_task_id, compare_to_eval_id):
+    """Show a stored eval report by task id or eval id."""
+    from src.evals.runtime import get_eval_report
+
+    result = get_eval_report(
+        task_id=task_id,
+        eval_id=eval_id,
+        compare_to_task_id=compare_to_task_id,
+        compare_to_eval_id=compare_to_eval_id,
+    )
+    console.print_json(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result.get("success"):
+        raise click.Abort()
+
+
+@eval.command("classify")
+@click.option("--trajectory-id", type=int, required=True, help="Stored computer trajectory id to override.")
+@click.option(
+    "--failure-type",
+    type=click.Choice(["weak_evidence", "focus_mismatch", "target_context_mismatch", "unknown", "clear"]),
+    required=True,
+    help="Normalized failure type override, or `clear` to remove the operator override.",
+)
+def eval_classify(trajectory_id, failure_type):
+    """Override the normalized failure classification for one stored trajectory."""
+    from src.evals.runtime import override_trajectory_failure_type
+
+    requested_failure_type = None if failure_type == "clear" else failure_type
+    result = override_trajectory_failure_type(
+        trajectory_id=trajectory_id,
+        failure_type=requested_failure_type,
+    )
+    console.print_json(json.dumps(result, ensure_ascii=False, indent=2))
+    if not result.get("success"):
+        raise click.Abort()
+
+
 @cli.command("self-improvement-demo")
 @click.option("--trajectory-id", type=int, required=True, help="Failed computer trajectory id to replay.")
 @click.option(
@@ -430,7 +496,24 @@ def status():
 @click.option("--goal", default=None, help="Override the generated canary goal.")
 @click.option("--summary", default=None, help="Override the generated improvement summary.")
 @click.option("--timeout-seconds", default=0, type=int, help="Timeout for candidate and benchmark commands.")
-@click.option("--record-as-approved", is_flag=True, default=False, help="Record a passing candidate as approved memory.")
+@click.option(
+    "--promotion-kind",
+    type=click.Choice(["approved_improvement_memory", "approved_skill", "capability_patch", "policy_patch"]),
+    default="approved_improvement_memory",
+    help="Promotion artifact class to emit for a passing candidate.",
+)
+@click.option(
+    "--approval-dependency",
+    "approval_dependencies",
+    multiple=True,
+    help="Explicit approval id/ref required before recording approved_skill, capability_patch, or policy_patch.",
+)
+@click.option(
+    "--record-as-approved",
+    is_flag=True,
+    default=False,
+    help="Record a passing candidate as an approved promotion artifact or memory.",
+)
 @click.option("--auto-cleanup", is_flag=True, default=False, help="Remove the canary after packaging.")
 def self_improvement_demo(
     trajectory_id,
@@ -442,6 +525,8 @@ def self_improvement_demo(
     goal,
     summary,
     timeout_seconds,
+    promotion_kind,
+    approval_dependencies,
     record_as_approved,
     auto_cleanup,
 ):
@@ -460,6 +545,8 @@ def self_improvement_demo(
             improvement_summary=summary,
             timeout_seconds=timeout_seconds,
             record_as_approved=record_as_approved,
+            promotion_kind=promotion_kind,
+            approval_dependencies=list(approval_dependencies),
             auto_cleanup=auto_cleanup,
         )
     )
@@ -494,7 +581,24 @@ def self_improvement_demo(
 @click.option("--goal", default=None, help="Override the generated search goal.")
 @click.option("--summary", default=None, help="Override the generated improvement summary.")
 @click.option("--timeout-seconds", default=0, type=int, help="Timeout for candidate and benchmark commands.")
-@click.option("--record-winner-as-approved", is_flag=True, default=False, help="Record the winning candidate as approved memory.")
+@click.option(
+    "--promotion-kind",
+    type=click.Choice(["approved_improvement_memory", "approved_skill", "capability_patch", "policy_patch"]),
+    default="approved_improvement_memory",
+    help="Promotion artifact class to emit for the winning candidate.",
+)
+@click.option(
+    "--approval-dependency",
+    "approval_dependencies",
+    multiple=True,
+    help="Explicit approval id/ref required before recording approved_skill, capability_patch, or policy_patch.",
+)
+@click.option(
+    "--record-winner-as-approved",
+    is_flag=True,
+    default=False,
+    help="Record the winning candidate as an approved promotion artifact or memory.",
+)
 @click.option("--cleanup-losers/--keep-losers", default=True, help="Remove losing canaries after comparison.")
 @click.option("--auto-cleanup", is_flag=True, default=False, help="Also remove the winning canary after packaging.")
 def self_improvement_search(
@@ -507,6 +611,8 @@ def self_improvement_search(
     goal,
     summary,
     timeout_seconds,
+    promotion_kind,
+    approval_dependencies,
     record_winner_as_approved,
     cleanup_losers,
     auto_cleanup,
@@ -526,6 +632,8 @@ def self_improvement_search(
             improvement_summary=summary,
             timeout_seconds=timeout_seconds,
             record_winner_as_approved=record_winner_as_approved,
+            promotion_kind=promotion_kind,
+            approval_dependencies=list(approval_dependencies),
             cleanup_losers=cleanup_losers,
             auto_cleanup=auto_cleanup,
         )

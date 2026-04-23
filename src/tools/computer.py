@@ -319,10 +319,23 @@ def _record_trajectory(
     final_surface: Optional[str],
     success: bool,
 ) -> int:
+    from src.evals.failure_taxonomy import normalize_trajectory_failure
+
     if success:
         status = "recovered" if len(attempts) > 1 else "success"
     else:
         status = "failed"
+    classification = normalize_trajectory_failure(
+        {
+            "status": status,
+            "attempts": attempts,
+            "verification": verification,
+            "request": request,
+            "observation": _observation_summary(observation),
+            "final_surface": final_surface,
+        },
+        classified_by="verifier",
+    )
     store = get_computer_trajectory_store()
     return store.record(
         action=action,
@@ -332,6 +345,10 @@ def _record_trajectory(
         verification=verification,
         request=request,
         observation=_observation_summary(observation),
+        preliminary_failure_type=classification["preliminary_failure_type"],
+        normalized_failure_type=classification["normalized_failure_type"],
+        classified_by=classification["classified_by"],
+        operator_override=classification["operator_override"],
     )
 
 

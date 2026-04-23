@@ -17,6 +17,14 @@ from src.tools.browser import PLAYWRIGHT_AVAILABLE
 from src.runtime.capability_catalog import _CAPABILITY_SPECS, _HOST_BRIDGE_CAPABILITY_MAP
 from src.runtime.capability_models import RuntimeCapabilitySpec
 from src.runtime.capability_resources import bridge_resources, skill_resource
+from src.runtime.promoted_capabilities import load_promoted_capability_specs
+
+
+async def _all_capability_specs() -> dict[str, RuntimeCapabilitySpec]:
+    promoted = await load_promoted_capability_specs()
+    merged = dict(_CAPABILITY_SPECS)
+    merged.update(promoted)
+    return merged
 
 
 async def _implemented_overrides(refresh: bool) -> dict[str, bool]:
@@ -83,7 +91,10 @@ async def list_runtime_resources() -> dict[str, Any]:
     await ensure_skills_loaded()
     registry = get_skill_registry()
     resources = bridge_resources()
-    for meta in sorted(registry.list_skills(), key=lambda item: item.name):
+    for meta in sorted(
+        registry.list_skills(),
+        key=lambda item: (0 if item.name.startswith("promoted/") else 1, item.name),
+    ):
         skill = registry.get_skill(meta.name)
         if skill is not None:
             resources.append(skill_resource(skill))
@@ -166,9 +177,13 @@ async def read_runtime_resource(resource_id: str, refresh: bool = False) -> dict
 async def list_runtime_capabilities(refresh: bool = False) -> dict[str, Any]:
     await ensure_skills_loaded()
     implemented = await _implemented_overrides(refresh=refresh)
+    specs = await _all_capability_specs()
     capabilities = []
-    for name in sorted(_CAPABILITY_SPECS):
-        spec = _CAPABILITY_SPECS[name]
+    for name in sorted(
+        specs,
+        key=lambda item: (0 if item.startswith("promoted.") else 1, item),
+    ):
+        spec = specs[name]
         capabilities.append(
             {
                 "name": spec.name,
@@ -189,7 +204,8 @@ async def invoke_runtime_capability(
     params: Optional[dict[str, Any]] = None,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
-    spec = _CAPABILITY_SPECS.get(name)
+    specs = await _all_capability_specs()
+    spec = specs.get(name)
     if spec is None:
         return {"success": False, "capability": name, "error": f"Unknown capability: {name}"}
 

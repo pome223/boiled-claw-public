@@ -8,8 +8,15 @@ from click.testing import CliRunner
 
 from src.computer_use.trajectory_store import ComputerTrajectoryStore
 from src.main import cli
+from src.tools.memory import MemoryStore
+from src.skills.base import get_skill_registry
+import src.skills.runtime as skills_runtime
 from src.runtime.task_store import get_task_store
 from src.tools import self_improvement
+import src.runtime.promoted_capabilities as promoted_capabilities
+import src.skills.promoted as promoted_skills
+from src.tools.self_improvement_runtime.promotion import REUSE_MEMORY_KINDS
+from src.tools.skills import resource_list
 
 
 @pytest.fixture(autouse=True)
@@ -40,6 +47,34 @@ def _local_shell_only(monkeypatch):
             return {"stdout": "", "stderr": str(e), "return_code": -1, "error": str(e)}
 
     monkeypatch.setattr(self_improvement, "run_shell_guarded", _patched)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_promotions(monkeypatch, tmp_path):
+    store = MemoryStore(str(tmp_path / "memory.db"))
+    monkeypatch.setattr(self_improvement, "get_memory_store", lambda: store)
+    monkeypatch.setattr(promoted_skills, "get_memory_store", lambda: store)
+    monkeypatch.setattr(promoted_capabilities, "get_memory_store", lambda: store)
+    return store
+
+
+@pytest.fixture
+def _reset_skill_runtime():
+    registry = get_skill_registry()
+    original_skills = dict(registry.skills)
+    original_loaded = skills_runtime._loaded
+    original_report = dict(skills_runtime._last_report)
+
+    registry.skills.clear()
+    skills_runtime._loaded = False
+    skills_runtime._last_report = {"loaded": False, "count": 0, "skills": []}
+
+    yield
+
+    registry.skills.clear()
+    registry.skills.update(original_skills)
+    skills_runtime._loaded = original_loaded
+    skills_runtime._last_report = original_report
 
 
 def _git(repo: Path, *args: str) -> None:
@@ -180,6 +215,99 @@ async def test_package_candidate_is_benchmark_gated_and_can_record_approved_memo
     assert recorded["kind"] == "approved_improvement"
     assert recorded["metadata"]["trajectory_key"] == "click::current_tab::#save"
     assert recorded["metadata"]["selector"] == "#save"
+    assert result["promotion_artifact"]["artifact_kind"] == "approved_improvement_memory"
+
+
+@pytest.mark.asyncio
+async def test_package_candidate_can_record_approved_skill_with_explicit_approval(
+    git_repo,
+    tmp_path,
+    monkeypatch,
+):
+    prepare = await self_improvement.self_improvement_prepare_canary(
+        goal="Promote Sheets skill",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+    canary = Path(prepare["canary_path"])
+    (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+
+    recorded = {}
+
+    async def _memory_store(content, tags=None, metadata=None, kind="fact", tool_context=None):
+        recorded["content"] = content
+        recorded["kind"] = kind
+        recorded["tags"] = tags
+        recorded["metadata"] = json.loads(metadata or "{}")
+        return {"success": True, "memory_id": 9, "kind": kind}
+
+    monkeypatch.setattr(self_improvement, "memory_store", _memory_store)
+    self_improvement._persist_state(
+        canary,
+        demo={
+            "trajectory_id": 42,
+            "goal": "Enter into Sheets",
+            "failure_reason": "verification fail",
+            "reuse_hints": {
+                "trajectory_key": "fill::current_tab::a1",
+                "selector": "A1",
+                "surface": "current_tab",
+                "target": "google-sheets-entry",
+            },
+        },
+    )
+
+    result = await self_improvement.self_improvement_package_candidate(
+        canary_path=str(canary),
+        benchmark_commands="printf 'ok'\n",
+        improvement_summary="Promote the Google Sheets entry repair into a reusable skill.",
+        promotion_kind="approved_skill",
+        approval_dependencies=["approval-skill-1"],
+        record_as_approved=True,
+    )
+
+    assert result["success"] is True
+    assert result["promotable"] is True
+    assert result["promotion_artifact"]["artifact_kind"] == "approved_skill"
+    assert result["promotion_artifact"]["approval_status"] == "linked"
+    assert result["promotion_artifact"]["proposed_path"].endswith("/SKILL.md")
+    assert recorded["kind"] == "approved_skill"
+    assert recorded["metadata"]["artifact_kind"] == "approved_skill"
+    assert recorded["metadata"]["approval_dependencies"] == ["approval-skill-1"]
+    assert recorded["metadata"]["promotion_artifact"]["skill_name"].startswith("promoted/")
+
+
+@pytest.mark.asyncio
+async def test_package_candidate_requires_approval_dependency_for_non_memory_recording(
+    git_repo,
+    tmp_path,
+    monkeypatch,
+):
+    prepare = await self_improvement.self_improvement_prepare_canary(
+        goal="Promote capability patch",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+    canary = Path(prepare["canary_path"])
+    (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+
+    async def _memory_store(*args, **kwargs):
+        raise AssertionError("typed promotion should not be recorded without explicit approval")
+
+    monkeypatch.setattr(self_improvement, "memory_store", _memory_store)
+
+    result = await self_improvement.self_improvement_package_candidate(
+        canary_path=str(canary),
+        benchmark_commands="printf 'ok'\n",
+        improvement_summary="Promote the evidence capture path.",
+        promotion_kind="capability_patch",
+        record_as_approved=True,
+    )
+
+    assert result["success"] is True
+    assert result["promotable"] is True
+    assert result["approved_record"]["success"] is False
+    assert "requires at least one approval dependency" in result["approved_record"]["error"]
 
 
 @pytest.mark.asyncio
@@ -277,10 +405,12 @@ async def test_demo_from_failed_trajectory_includes_reuse_suggestions(
             return {"stdout": "patched", "stderr": "", "return_code": 0}
         if command == "verify-demo-fix":
             return {"stdout": "verified", "stderr": "", "return_code": 0}
+        if command.startswith("printf "):
+            return {"stdout": "ok", "stderr": "", "return_code": 0}
         return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
 
     async def _memory_search(query=None, tags=None, kind=None, limit=10, tool_context=None):
-        assert kind == "approved_improvement"
+        assert kind == ",".join(REUSE_MEMORY_KINDS)
         assert "#save" in query
         return {
             "success": True,
@@ -551,14 +681,14 @@ async def test_search_from_failed_trajectory_includes_reuse_suggestions(
         return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
 
     async def _memory_search(query=None, tags=None, kind=None, limit=10, tool_context=None):
-        assert kind == "approved_improvement"
+        assert kind == ",".join(REUSE_MEMORY_KINDS)
         return {
             "success": True,
             "results": [
                 {
                     "id": 11,
                     "content": "Reuse the browser selector normalization fix.",
-                    "kind": "approved_improvement",
+                    "kind": "approved_skill",
                     "metadata": {"branch": "canary/browser-fix"},
                     "tags": ["approved"],
                     "created_at": 456.0,
@@ -590,6 +720,103 @@ async def test_search_from_failed_trajectory_includes_reuse_suggestions(
 
 
 @pytest.mark.asyncio
+async def test_second_similar_failure_reuses_registered_approved_skill_end_to_end(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+    _isolated_promotions,
+):
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        canary = Path(cwd)
+        if command == "apply-demo-fix":
+            (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+            return {"stdout": "patched", "stderr": "", "return_code": 0}
+        if command == "verify-demo-fix":
+            return {"stdout": "verified", "stderr": "", "return_code": 0}
+        if command.startswith("printf "):
+            return {"stdout": "ok", "stderr": "", "return_code": 0}
+        return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
+
+    async def _memory_store(content, tags=None, metadata=None, kind="fact", tool_context=None):
+        memory_id = _isolated_promotions.store(
+            content=content,
+            kind=kind,
+            tags=[item.strip() for item in (tags or "").split(",") if item.strip()],
+            metadata=json.loads(metadata or "{}"),
+        )
+        return {"success": True, "memory_id": memory_id, "kind": kind}
+
+    async def _memory_search(query=None, tags=None, kind=None, limit=10, tool_context=None):
+        return {"success": False, "error": "semantic search unavailable"}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+    monkeypatch.setattr(self_improvement, "memory_store", _memory_store)
+    monkeypatch.setattr(self_improvement, "memory_search", _memory_search)
+
+    prepare = await self_improvement.self_improvement_prepare_canary(
+        goal="Promote a Sheets repair",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+    canary = Path(prepare["canary_path"])
+    (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+    self_improvement._persist_state(
+        canary,
+        demo={
+            "trajectory_id": 1,
+            "goal": "Enter into Sheets",
+            "failure_reason": "verification fail",
+            "reuse_hints": {
+                "trajectory_key": "fill::current_tab::a1",
+                "selector": "A1",
+                "surface": "current_tab",
+                "target": "google-sheets-entry",
+            },
+        },
+    )
+
+    first = await self_improvement.self_improvement_package_candidate(
+        canary_path=str(canary),
+        benchmark_commands="printf 'ok'\n",
+        improvement_summary="Promote the Google Sheets entry repair into a reusable skill.",
+        promotion_kind="approved_skill",
+        approval_dependencies=["approval-skill-1"],
+        record_as_approved=True,
+    )
+    assert first["success"] is True
+    assert first["approved_record"]["success"] is True
+
+    second_trajectory_id = computer_trajectory_store.record(
+        action="fill",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[],
+        verification={"status": "fail", "success": False},
+        request={"selector": "A1"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    second = await self_improvement.self_improvement_demo_from_trajectory(
+        trajectory_id=second_trajectory_id,
+        candidate_commands="apply-demo-fix",
+        benchmark_commands="verify-demo-fix",
+        repo_path=str(git_repo),
+        worktree_root=str(tmp_path / "canaries"),
+    )
+
+    assert second["success"] is True
+    assert second["reuse_suggestions"][0]["kind"] == "approved_skill"
+    assert second["reuse_suggestions"][0]["runtime_registration"]["kind"] == "skill"
+    assert second["reuse_suggestions"][0]["runtime_registration"]["registered"] is True
+    assert second["reuse_suggestions"][0]["deployment_gate"]["deployable"] is True
+    assert second["reuse_query"]
+    assert "Registered approved reuse content:" in second["repair_prompt"]
+    assert "promoted/current_tab_google_sheets_entry" not in second["repair_prompt"]
+    assert "# promoted/current-tab-google-sheets-entry" in second["repair_prompt"]
+
+
+@pytest.mark.asyncio
 async def test_reuse_prefilter_avoids_semantic_search_when_metadata_matches(
     computer_trajectory_store,
     monkeypatch,
@@ -609,12 +836,12 @@ async def test_reuse_prefilter_avoids_semantic_search_when_metadata_matches(
     class _FakeMemoryStore:
         def search(self, query=None, tags=None, kinds=None, limit=10, embedding=None):
             assert query is None
-            assert kinds == ["approved_improvement"]
+            assert kinds == list(REUSE_MEMORY_KINDS)
             return [
                 {
                     "id": 19,
                     "content": "Reuse the current-tab save selector repair.",
-                    "kind": "approved_improvement",
+                    "kind": "approved_skill",
                     "metadata": {
                         "trajectory_key": "click::current_tab::#save",
                         "selector": "#save",
@@ -667,3 +894,176 @@ def test_cli_self_improvement_search_invokes_tool(monkeypatch):
 
     assert result.exit_code == 0
     assert '"winner_name": "small-fix"' in result.output
+
+
+def test_cli_self_improvement_demo_accepts_promotion_kind_and_approval_dependencies(monkeypatch):
+    async def _demo(**kwargs):
+        assert kwargs["promotion_kind"] == "approved_skill"
+        assert kwargs["approval_dependencies"] == ["approval-skill-1"]
+        return {"success": True, "trajectory": {"id": 7}}
+
+    monkeypatch.setattr(self_improvement, "self_improvement_demo_from_trajectory", _demo)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "self-improvement-demo",
+            "--trajectory-id",
+            "7",
+            "--candidate-command",
+            "apply-demo-fix",
+            "--benchmark-command",
+            "verify-demo-fix",
+            "--promotion-kind",
+            "approved_skill",
+            "--approval-dependency",
+            "approval-skill-1",
+        ],
+    )
+
+    assert result.exit_code == 0
+
+
+def test_cli_self_improvement_demo_end_to_end_reuses_recorded_approved_skill(
+    git_repo,
+    tmp_path,
+    computer_trajectory_store,
+    monkeypatch,
+    _isolated_promotions,
+    _reset_skill_runtime,
+):
+    async def _run_shell_guarded(command, timeout=30, cwd=None, tool_context=None):
+        canary = Path(cwd)
+        if command == "apply-demo-fix":
+            (canary / "README.md").write_text("hello\nworld\n", encoding="utf-8")
+            return {"stdout": "patched", "stderr": "", "return_code": 0}
+        if command == "verify-demo-fix":
+            return {"stdout": "verified", "stderr": "", "return_code": 0}
+        return {"stdout": "", "stderr": f"unknown command {command}", "return_code": 1}
+
+    async def _memory_store(content, tags=None, metadata=None, kind="fact", tool_context=None):
+        memory_id = _isolated_promotions.store(
+            content=content,
+            kind=kind,
+            tags=[item.strip() for item in (tags or "").split(",") if item.strip()],
+            metadata=json.loads(metadata or "{}"),
+        )
+        return {"success": True, "memory_id": memory_id, "kind": kind}
+
+    async def _memory_search(query=None, tags=None, kind=None, limit=10, tool_context=None):
+        kinds = [item.strip() for item in (kind or "").split(",") if item.strip()] or None
+        results = _isolated_promotions.search(query=query, kinds=kinds, limit=limit)
+        return {"success": True, "results": results, "count": len(results), "query": query}
+
+    monkeypatch.setattr(self_improvement, "run_shell_guarded", _run_shell_guarded)
+    monkeypatch.setattr(self_improvement, "memory_store", _memory_store)
+    monkeypatch.setattr(self_improvement, "memory_search", _memory_search)
+
+    first_trajectory_id = computer_trajectory_store.record(
+        action="fill",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[],
+        verification={"status": "fail", "success": False},
+        request={"selector": "A1"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    runner = CliRunner()
+    first = runner.invoke(
+        cli,
+        [
+            "self-improvement-demo",
+            "--trajectory-id",
+            str(first_trajectory_id),
+            "--candidate-command",
+            "apply-demo-fix",
+            "--benchmark-command",
+            "verify-demo-fix",
+            "--repo-path",
+            str(git_repo),
+            "--worktree-root",
+            str(tmp_path / "canaries"),
+            "--promotion-kind",
+            "approved_skill",
+            "--approval-dependency",
+            "approval-skill-1",
+            "--record-as-approved",
+        ],
+    )
+
+    assert first.exit_code == 0, first.output
+    first_payload = json.loads(first.output)
+    assert first_payload["success"] is True
+    assert first_payload["package"]["approved_record"]["success"] is True
+    skill_name = first_payload["package"]["promotion_artifact"]["skill_name"]
+
+    resources = asyncio.run(resource_list())
+    assert any(item["id"] == f"skill:{skill_name}" for item in resources["resources"])
+
+    second_trajectory_id = computer_trajectory_store.record(
+        action="fill",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[],
+        verification={"status": "fail", "success": False},
+        request={"selector": "A1"},
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    second = runner.invoke(
+        cli,
+        [
+            "self-improvement-demo",
+            "--trajectory-id",
+            str(second_trajectory_id),
+            "--candidate-command",
+            "apply-demo-fix",
+            "--benchmark-command",
+            "verify-demo-fix",
+            "--repo-path",
+            str(git_repo),
+            "--worktree-root",
+            str(tmp_path / "canaries"),
+        ],
+    )
+
+    assert second.exit_code == 0, second.output
+    second_payload = json.loads(second.output)
+    assert second_payload["success"] is True
+    assert second_payload["reuse_suggestions"][0]["kind"] == "approved_skill"
+    assert second_payload["reuse_suggestions"][0]["runtime_registration"]["name"] == skill_name
+    assert second_payload["reuse_suggestions"][0]["runtime_registration"]["registered"] is True
+    assert second_payload["reuse_suggestions"][0]["deployment_gate"]["deployable"] is True
+    assert "Registered approved reuse content:" in second_payload["repair_prompt"]
+    assert f"# {skill_name}" in second_payload["repair_prompt"]
+
+
+def test_cli_self_improvement_search_accepts_promotion_kind_and_approval_dependencies(monkeypatch):
+    async def _search(**kwargs):
+        assert kwargs["promotion_kind"] == "policy_patch"
+        assert kwargs["approval_dependencies"] == ["approval-policy-1"]
+        return {"success": True, "winner_name": "small-fix"}
+
+    monkeypatch.setattr(self_improvement, "self_improvement_search_from_trajectory", _search)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        cli,
+        [
+            "self-improvement-search",
+            "--trajectory-id",
+            "9",
+            "--candidate-spec",
+            '{"name":"small-fix","commands":["apply-small-fix"]}',
+            "--benchmark-command",
+            "verify-search-fix",
+            "--promotion-kind",
+            "policy_patch",
+            "--approval-dependency",
+            "approval-policy-1",
+        ],
+    )
+
+    assert result.exit_code == 0
