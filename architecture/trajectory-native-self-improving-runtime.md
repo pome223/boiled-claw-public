@@ -229,6 +229,13 @@ These artifacts are related, but they are not interchangeable:
 - `approved_improvement_memory` stores reusable improvement knowledge
 - `policy_patch` constrains execution or promotion rather than improving task skill directly
 
+Phase 0 reuse for `approved_improvement_memory` should stay evidence-bearing and inspectable:
+
+- matching should prefer normalized `failure_type` plus trajectory hints such as selector, action, surface, and trajectory key before semantic fallback
+- demo/search/eval reports should expose `reuse_memory_ids` and `reuse_policy`
+- persisted trajectories should keep a `reuse_trace` that records which approved memories were considered or used
+- policy may disable reuse entirely for a trajectory without blocking the rest of the repair flow
+
 Illustrative promotion shape:
 
 ```text

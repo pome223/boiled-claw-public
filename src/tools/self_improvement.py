@@ -145,9 +145,16 @@ async def _run_candidate_commands(
 
 
 def _flow_deps() -> FlowDeps:
+    def _record_trajectory_reuse(trajectory_id: int, reuse_trace: dict[str, Any]) -> bool:
+        return get_computer_trajectory_store().update_reuse_trace(
+            int(trajectory_id),
+            reuse_trace=reuse_trace,
+        )
+
     return FlowDeps(
         get_computer_trajectory_store=get_computer_trajectory_store,
         find_reuse_suggestions=_find_reuse_suggestions,
+        record_trajectory_reuse=_record_trajectory_reuse,
         create_task_record=create_task_record,
         update_task_record=update_task_record,
         prepare_canary=self_improvement_prepare_canary,

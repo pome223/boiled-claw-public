@@ -157,6 +157,15 @@ match:
 
     monkeypatch.setattr(eval_runtime, "get_computer_trajectory_store", lambda: store)
     monkeypatch.setattr(eval_runtime, "get_memory_store", lambda: stub_memory)
+    assert store.update_reuse_trace(
+        trajectory_id,
+        reuse_trace={
+            "source": "self_improvement_demo",
+            "memory_ids": [7],
+            "used_memory_ids": [7],
+            "policy": {"enabled": True, "source": "default"},
+        },
+    )
 
     result = eval_runtime.run_eval_spec(spec_path)
 
@@ -180,6 +189,9 @@ match:
     ]
     assert result["reports"][0]["replay_reference"]["trajectory_id"] == trajectory_id
     assert result["reports"][0]["reuse_suggestions"][0]["memory_id"] == 7
+    assert result["reports"][0]["reuse_memory_ids"] == [7]
+    assert result["reports"][0]["reuse_policy"]["enabled"] is True
+    assert result["reports"][0]["reuse_trace"]["used_memory_ids"] == [7]
     assert result["reports"][0]["task_node"]["status"] == "failed"
     assert result["reports"][0]["scheduler_queue"] == "retry_later"
     assert result["reports"][0]["recovery_policy"]["failure_type"] == "target_context_mismatch"
@@ -202,6 +214,7 @@ match:
     persisted = store.get(trajectory_id)
     assert persisted["normalized_failure_type"] == "target_context_mismatch"
     assert persisted["classified_by"] == ["replay_analysis"]
+    assert persisted["reuse_trace"]["used_memory_ids"] == [7]
 
     task = get_task_store().get(result["task_id"])
     assert task is not None
@@ -286,6 +299,55 @@ match:
     assert result["durable_execution"]["resume_state"]["scheduler_queue_counts"]["waiting_for_approval"] == 1
     assert result["durable_execution"]["resume_state"]["next_actionable_task_node_id"] is None
     assert result["durable_execution"]["resume_state"]["reason"] == "awaiting_approval"
+
+
+def test_run_eval_spec_respects_reuse_policy_disable(tmp_path, monkeypatch):
+    store = ComputerTrajectoryStore(str(tmp_path / "computer_trajectories.db"))
+    trajectory_id = store.record(
+        action="fill",
+        status="failed",
+        final_surface="current_tab",
+        attempts=[],
+        verification={"status": "fail", "success": False},
+        request={
+            "selector": ".cell-input",
+            "policy": {"allow_approved_improvement_reuse": False},
+        },
+        observation={"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    )
+
+    class _FailingMemoryStore:
+        def search(self, **kwargs):
+            raise AssertionError("prefilter search should not run when reuse is disabled by policy")
+
+    spec_path = tmp_path / "current_tab_google_sheets.yaml"
+    spec_path.write_text(
+        """
+id: current_tab_google_sheets_phase0
+goal: "Write into Google Sheets"
+runs: 1
+match:
+  action: fill
+  final_surface_any:
+    - current_tab
+  status_any:
+    - failed
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(eval_runtime, "get_computer_trajectory_store", lambda: store)
+    monkeypatch.setattr(eval_runtime, "get_memory_store", lambda: _FailingMemoryStore())
+
+    result = eval_runtime.run_eval_spec(spec_path)
+
+    assert result["success"] is True
+    assert result["reports"][0]["trajectory_id"] == trajectory_id
+    assert result["reports"][0]["reuse_suggestions"] == []
+    assert result["reports"][0]["reuse_memory_ids"] == []
+    assert result["reports"][0]["reuse_policy"]["enabled"] is False
+    assert result["reports"][0]["reuse_policy"]["source"] == "request.policy.allow_approved_improvement_reuse"
 
 
 def test_override_trajectory_failure_type_applies_and_clears_operator_override(tmp_path):

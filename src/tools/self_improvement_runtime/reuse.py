@@ -28,6 +28,15 @@ _KIND_PRIORITY = {
     "policy_patch": 10,
 }
 
+_REUSE_POLICY_ALLOW_KEYS = (
+    "allow_self_improvement_reuse",
+    "allow_approved_improvement_reuse",
+)
+_REUSE_POLICY_DISABLE_KEYS = (
+    "disable_self_improvement_reuse",
+    "disable_approved_improvement_reuse",
+)
+
 
 def trajectory_failure_reason(trajectory: dict[str, Any]) -> str:
     verification = trajectory.get("verification")
@@ -99,6 +108,7 @@ def trajectory_reuse_query(trajectory: dict[str, Any]) -> str:
         hints.get("title"),
         hints.get("identifier"),
         hints.get("surface"),
+        hints.get("failure_type"),
         hints.get("failure_reason"),
     ]
     return " ".join(str(part).strip() for part in parts if part)
@@ -116,6 +126,11 @@ def trajectory_reuse_hints(trajectory: dict[str, Any]) -> dict[str, str]:
     identifier = normalize_reuse_value(request.get("identifier"))
     value_contains = normalize_reuse_value(request.get("value_contains"))
     surface = normalize_reuse_value(trajectory.get("final_surface"))
+    failure_type = normalize_reuse_value(
+        trajectory.get("normalized_failure_type")
+        or trajectory.get("failure_type")
+        or trajectory.get("preliminary_failure_type")
+    )
     failure_reason = normalize_reuse_value(trajectory_failure_reason(trajectory))
     target = selector or title or identifier or value_contains or surface or "unknown-target"
     trajectory_key = "::".join(part for part in [action, surface, target] if part)
@@ -127,8 +142,45 @@ def trajectory_reuse_hints(trajectory: dict[str, Any]) -> dict[str, str]:
         "identifier": identifier,
         "value_contains": value_contains,
         "surface": surface,
+        "failure_type": failure_type,
         "failure_reason": failure_reason,
         "target": target,
+    }
+
+
+def approved_reuse_policy(trajectory: dict[str, Any]) -> dict[str, Any]:
+    request = trajectory.get("request")
+    request = request if isinstance(request, dict) else {}
+    observation = trajectory.get("observation")
+    observation = observation if isinstance(observation, dict) else {}
+    candidates = [
+        ("request.policy", request.get("policy")),
+        ("observation.policy", observation.get("policy")),
+        ("trajectory.policy", trajectory.get("policy")),
+    ]
+    for source, candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in _REUSE_POLICY_ALLOW_KEYS:
+            if key in candidate:
+                enabled = bool(candidate.get(key))
+                return {
+                    "enabled": enabled,
+                    "source": f"{source}.{key}",
+                    "reason": "policy_disabled" if not enabled else "policy_enabled",
+                }
+        for key in _REUSE_POLICY_DISABLE_KEYS:
+            if key in candidate:
+                disabled = bool(candidate.get(key))
+                return {
+                    "enabled": not disabled,
+                    "source": f"{source}.{key}",
+                    "reason": "policy_disabled" if disabled else "policy_enabled",
+                }
+    return {
+        "enabled": True,
+        "source": "default",
+        "reason": "policy_enabled",
     }
 
 
@@ -164,9 +216,57 @@ def cheap_reuse_match_score(
         metadata_value = normalize_reuse_value(metadata.get(field))
         if hint_value and metadata_value and hint_value == metadata_value:
             score += weight
+    if hints.get("failure_type") and normalize_reuse_value(metadata.get("failure_type")) == hints.get("failure_type"):
+        score += 6
     if hints.get("failure_reason") and normalize_reuse_value(metadata.get("failure_reason")) == hints.get("failure_reason"):
         score += 1
     return score
+
+
+def reuse_memory_ids(results: list[dict[str, Any]]) -> list[int]:
+    ids: list[int] = []
+    seen: set[int] = set()
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        raw = item.get("memory_id")
+        if raw is None:
+            continue
+        try:
+            memory_id = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if memory_id in seen:
+            continue
+        seen.add(memory_id)
+        ids.append(memory_id)
+    return ids
+
+
+def build_reuse_trace(
+    trajectory: dict[str, Any],
+    reuse: dict[str, Any],
+    *,
+    source: str,
+) -> dict[str, Any]:
+    results = reuse.get("results") if isinstance(reuse, dict) else []
+    results = results if isinstance(results, list) else []
+    hints = trajectory_reuse_hints(trajectory)
+    policy = reuse.get("policy") if isinstance(reuse, dict) else None
+    policy = policy if isinstance(policy, dict) else approved_reuse_policy(trajectory)
+    return {
+        "source": source,
+        "query": str(reuse.get("query") or trajectory_reuse_query(trajectory)),
+        "policy": policy,
+        "failure_type": hints.get("failure_type") or "",
+        "memory_ids": reuse_memory_ids(results),
+        "used_memory_ids": reuse_memory_ids(results),
+        "match_types": [
+            str(item.get("match_type") or "").strip()
+            for item in results
+            if isinstance(item, dict) and str(item.get("match_type") or "").strip()
+        ],
+    }
 
 
 def prefilter_reuse_suggestions(
@@ -214,6 +314,34 @@ def prefilter_reuse_suggestions(
     return matches[:limit]
 
 
+def prefilter_reuse_payload(
+    trajectory: dict[str, Any],
+    *,
+    limit: int,
+    get_memory_store_fn: MemoryStoreGetter,
+) -> dict[str, Any]:
+    policy = approved_reuse_policy(trajectory)
+    query = trajectory_reuse_query(trajectory)
+    if not policy.get("enabled"):
+        return {
+            "query": query,
+            "results": [],
+            "memory_ids": [],
+            "policy": policy,
+        }
+    results = prefilter_reuse_suggestions(
+        trajectory,
+        limit=limit,
+        get_memory_store_fn=get_memory_store_fn,
+    )
+    return {
+        "query": query,
+        "results": results,
+        "memory_ids": reuse_memory_ids(results),
+        "policy": policy,
+    }
+
+
 async def find_reuse_suggestions(
     trajectory: dict[str, Any],
     *,
@@ -222,19 +350,28 @@ async def find_reuse_suggestions(
     limit: int = 3,
     tool_context: Optional[ToolContext] = None,
 ) -> dict[str, Any]:
-    query = trajectory_reuse_query(trajectory)
-    if not query:
-        return {"query": "", "results": []}
-
-    bounded_limit = max(1, min(limit, 10))
-    prefiltered = prefilter_reuse_suggestions(
+    base = prefilter_reuse_payload(
         trajectory,
-        limit=bounded_limit,
+        limit=max(1, min(limit, 10)),
         get_memory_store_fn=get_memory_store_fn,
     )
+    query = str(base.get("query") or "")
+    if not query:
+        return {"query": "", "results": [], "memory_ids": [], "policy": base.get("policy", {})}
+
+    if not base.get("policy", {}).get("enabled", True):
+        return base
+
+    bounded_limit = max(1, min(limit, 10))
+    prefiltered = list(base.get("results") or [])
     if len(prefiltered) >= bounded_limit:
         enriched = await _enrich_reuse_results(prefiltered)
-        return {"query": query, "results": enriched}
+        return {
+            "query": query,
+            "results": enriched,
+            "memory_ids": reuse_memory_ids(enriched),
+            "policy": base.get("policy", {}),
+        }
 
     results_by_id: dict[Any, dict[str, Any]] = {
         item.get("memory_id"): item for item in prefiltered if item.get("memory_id") is not None
@@ -275,13 +412,21 @@ async def find_reuse_suggestions(
         payload = {
             "query": query,
             "results": [],
+            "memory_ids": [],
+            "policy": base.get("policy", {}),
         }
         if search_error:
             payload["error"] = search_error
         return payload
 
     results = await _enrich_reuse_results(list(results_by_id.values()))
-    payload = {"query": query, "results": results[:bounded_limit]}
+    final_results = results[:bounded_limit]
+    payload = {
+        "query": query,
+        "results": final_results,
+        "memory_ids": reuse_memory_ids(final_results),
+        "policy": base.get("policy", {}),
+    }
     if search_error:
         payload["error"] = search_error
     return payload
@@ -482,11 +627,15 @@ def build_repair_prompt(
 
 
 __all__ = [
+    "approved_reuse_policy",
+    "build_reuse_trace",
     "build_repair_prompt",
     "find_reuse_suggestions",
     "improvement_summary_with_reuse",
+    "prefilter_reuse_payload",
     "prefilter_reuse_suggestions",
     "preferred_runtime_reuse",
+    "reuse_memory_ids",
     "state_reuse_hints",
     "trajectory_demo_goal",
     "trajectory_failure_reason",

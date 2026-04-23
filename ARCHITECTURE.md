@@ -63,6 +63,12 @@ task graph / scheduler queues / approval waits / latest checkpoints / budget exh
 `trajectory -> normalized failure_type -> replay-linked report -> canary -> approved_improvement_memory reuse`
 を通す形がよい。
 
+Phase 0 の approved improvement memory reuse では、normalized `failure_type` と
+trajectory hints を使って候補を引き、demo/search/eval report に
+`reuse_memory_ids` / `reuse_policy` を載せ、trajectory 自体にも `reuse_trace`
+を残す。reuse は `request.policy` / `observation.policy` / `trajectory.policy`
+で opt-out できる。
+
 Phase 0 の report では、少なくとも
 `trajectory_id / verifier_result / failure_type / recommended_repair_targets / replay_reference`
 が複数 run を並べた `run_jobs` として見えることを目標にする。

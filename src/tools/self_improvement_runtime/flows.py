@@ -17,6 +17,7 @@ from src.tools.self_improvement_runtime.common import (
     search_candidate_summary,
 )
 from src.tools.self_improvement_runtime.reuse import (
+    build_reuse_trace,
     build_repair_prompt,
     improvement_summary_with_reuse,
     trajectory_demo_goal,
@@ -36,6 +37,7 @@ TrajectoryStoreGetter = Callable[[], Any]
 class FlowDeps:
     get_computer_trajectory_store: TrajectoryStoreGetter
     find_reuse_suggestions: AsyncDictFn
+    record_trajectory_reuse: Callable[[int, dict[str, Any]], bool]
     create_task_record: SyncDictFn
     update_task_record: SyncDictFn
     prepare_canary: AsyncDictFn
@@ -76,6 +78,12 @@ async def demo_from_trajectory(
     resolved_goal = goal or trajectory_demo_goal(trajectory)
     resolved_summary = improvement_summary or trajectory_improvement_summary(trajectory)
     reuse = await deps.find_reuse_suggestions(trajectory, tool_context=tool_context)
+    reuse_trace = build_reuse_trace(
+        trajectory,
+        reuse,
+        source="self_improvement_demo",
+    )
+    deps.record_trajectory_reuse(trajectory_id, reuse_trace)
     resolved_summary_with_reuse = improvement_summary_with_reuse(resolved_summary, reuse)
     repair_prompt = build_repair_prompt(
         goal=resolved_goal,
@@ -95,6 +103,8 @@ async def demo_from_trajectory(
             "repair_prompt": repair_prompt,
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
+            "reuse_memory_ids": reuse.get("memory_ids", []),
+            "reuse_policy": reuse.get("policy", {}),
             "promotion_kind": promotion_kind,
         },
         metadata={
@@ -137,6 +147,10 @@ async def demo_from_trajectory(
             "trajectory_id": trajectory_id,
             "trajectory_status": trajectory.get("status"),
             "failure_reason": trajectory_failure_reason(trajectory),
+            "failure_type": trajectory.get("normalized_failure_type")
+            or trajectory.get("failure_type")
+            or trajectory.get("preliminary_failure_type")
+            or "",
             "goal": resolved_goal,
             "improvement_summary": resolved_summary,
             "improvement_summary_with_reuse": resolved_summary_with_reuse,
@@ -144,6 +158,8 @@ async def demo_from_trajectory(
             "reuse_hints": trajectory_reuse_hints(trajectory),
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
+            "reuse_memory_ids": reuse.get("memory_ids", []),
+            "reuse_policy": reuse.get("policy", {}),
             "promotion_kind": promotion_kind,
             "approval_dependencies": list(approval_dependencies or []),
             "started_at": time.time(),
@@ -202,6 +218,8 @@ async def demo_from_trajectory(
         "repair_prompt": repair_prompt,
         "reuse_query": reuse.get("query", ""),
         "reuse_suggestions": reuse.get("results", []),
+        "reuse_memory_ids": reuse.get("memory_ids", []),
+        "reuse_policy": reuse.get("policy", {}),
     }
     if auto_cleanup:
         payload["cleanup"] = await deps.cleanup_canary(
@@ -254,6 +272,12 @@ async def search_from_trajectory(
     resolved_goal = goal or trajectory_search_goal(trajectory)
     resolved_summary = improvement_summary or trajectory_improvement_summary(trajectory)
     reuse = await deps.find_reuse_suggestions(trajectory, tool_context=tool_context)
+    reuse_trace = build_reuse_trace(
+        trajectory,
+        reuse,
+        source="self_improvement_search",
+    )
+    deps.record_trajectory_reuse(trajectory_id, reuse_trace)
     resolved_summary_with_reuse = improvement_summary_with_reuse(resolved_summary, reuse)
     repair_prompt = build_repair_prompt(
         goal=resolved_goal,
@@ -273,6 +297,8 @@ async def search_from_trajectory(
             "repair_prompt": repair_prompt,
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
+            "reuse_memory_ids": reuse.get("memory_ids", []),
+            "reuse_policy": reuse.get("policy", {}),
             "promotion_kind": promotion_kind,
         },
         metadata={
@@ -365,6 +391,10 @@ async def search_from_trajectory(
                 "candidate_index": index,
                 "trajectory_status": trajectory.get("status"),
                 "failure_reason": trajectory_failure_reason(trajectory),
+                "failure_type": trajectory.get("normalized_failure_type")
+                or trajectory.get("failure_type")
+                or trajectory.get("preliminary_failure_type")
+                or "",
                 "goal": candidate_goal,
                 "improvement_summary": candidate_summary,
                 "improvement_summary_with_reuse": candidate_summary_with_reuse,
@@ -372,6 +402,8 @@ async def search_from_trajectory(
                 "reuse_hints": trajectory_reuse_hints(trajectory),
                 "reuse_query": reuse.get("query", ""),
                 "reuse_suggestions": reuse.get("results", []),
+                "reuse_memory_ids": reuse.get("memory_ids", []),
+                "reuse_policy": reuse.get("policy", {}),
                 "promotion_kind": promotion_kind,
                 "approval_dependencies": list(approval_dependencies or []),
                 "started_at": time.time(),
@@ -496,6 +528,8 @@ async def search_from_trajectory(
         "repair_prompt": repair_prompt,
         "reuse_query": reuse.get("query", ""),
         "reuse_suggestions": reuse.get("results", []),
+        "reuse_memory_ids": reuse.get("memory_ids", []),
+        "reuse_policy": reuse.get("policy", {}),
         "candidates": candidates,
     }
     if winner is not None:
@@ -518,6 +552,8 @@ async def search_from_trajectory(
             "winner_task_id": winner_task_id,
             "reuse_query": reuse.get("query", ""),
             "reuse_suggestions": reuse.get("results", []),
+            "reuse_memory_ids": reuse.get("memory_ids", []),
+            "reuse_policy": reuse.get("policy", {}),
         },
         error=payload.get("error"),
     )
