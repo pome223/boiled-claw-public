@@ -37,6 +37,7 @@ class ComputerTrajectoryStore:
                     normalized_failure_type TEXT,
                     classified_by_json TEXT,
                     operator_override TEXT,
+                    reuse_trace_json TEXT,
                     created_at REAL NOT NULL
                 )
                 """
@@ -85,6 +86,13 @@ class ComputerTrajectoryStore:
                     ADD COLUMN operator_override TEXT
                     """
                 )
+            if "reuse_trace_json" not in columns:
+                cursor.execute(
+                    """
+                    ALTER TABLE computer_trajectories
+                    ADD COLUMN reuse_trace_json TEXT
+                    """
+                )
             cursor.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_computer_trajectories_failure_type
@@ -107,6 +115,7 @@ class ComputerTrajectoryStore:
         normalized_failure_type: str | None = None,
         classified_by: list[str] | None = None,
         operator_override: str | None = None,
+        reuse_trace: dict[str, Any] | None = None,
     ) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -124,9 +133,10 @@ class ComputerTrajectoryStore:
                     normalized_failure_type,
                     classified_by_json,
                     operator_override,
+                    reuse_trace_json,
                     created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     action,
@@ -140,6 +150,7 @@ class ComputerTrajectoryStore:
                     normalized_failure_type,
                     json.dumps(classified_by or [], ensure_ascii=True),
                     operator_override,
+                    json.dumps(reuse_trace or {}, ensure_ascii=True),
                     time.time(),
                 ),
             )
@@ -163,7 +174,8 @@ class ComputerTrajectoryStore:
             "failure_type": row[9] or row[8],
             "classified_by": json.loads(row[10]) if row[10] else [],
             "operator_override": row[11],
-            "created_at": row[12],
+            "reuse_trace": json.loads(row[12]) if row[12] else {},
+            "created_at": row[13],
         }
 
     def get(self, trajectory_id: int) -> dict[str, Any] | None:
@@ -173,7 +185,7 @@ class ComputerTrajectoryStore:
                 """
                 SELECT id, action, status, final_surface, attempts_json, verification_json,
                        request_json, observation_json, preliminary_failure_type,
-                       normalized_failure_type, classified_by_json, operator_override, created_at
+                       normalized_failure_type, classified_by_json, operator_override, reuse_trace_json, created_at
                 FROM computer_trajectories
                 WHERE id = ?
                 """,
@@ -192,7 +204,7 @@ class ComputerTrajectoryStore:
                     """
                     SELECT id, action, status, final_surface, attempts_json, verification_json,
                            request_json, observation_json, preliminary_failure_type,
-                           normalized_failure_type, classified_by_json, operator_override, created_at
+                           normalized_failure_type, classified_by_json, operator_override, reuse_trace_json, created_at
                     FROM computer_trajectories
                     WHERE status = ?
                     ORDER BY created_at DESC
@@ -205,7 +217,7 @@ class ComputerTrajectoryStore:
                     """
                     SELECT id, action, status, final_surface, attempts_json, verification_json,
                            request_json, observation_json, preliminary_failure_type,
-                           normalized_failure_type, classified_by_json, operator_override, created_at
+                           normalized_failure_type, classified_by_json, operator_override, reuse_trace_json, created_at
                     FROM computer_trajectories
                     ORDER BY created_at DESC
                     LIMIT ?
@@ -240,6 +252,28 @@ class ComputerTrajectoryStore:
                     normalized_failure_type,
                     json.dumps(classified_by or [], ensure_ascii=True),
                     operator_override,
+                    trajectory_id,
+                ),
+            )
+            conn.commit()
+        return cursor.rowcount > 0
+
+    def update_reuse_trace(
+        self,
+        trajectory_id: int,
+        *,
+        reuse_trace: dict[str, Any] | None,
+    ) -> bool:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                UPDATE computer_trajectories
+                SET reuse_trace_json = ?
+                WHERE id = ?
+                """,
+                (
+                    json.dumps(reuse_trace or {}, ensure_ascii=True),
                     trajectory_id,
                 ),
             )

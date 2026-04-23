@@ -199,7 +199,14 @@ async def test_package_candidate_is_benchmark_gated_and_can_record_approved_memo
     monkeypatch.setattr(self_improvement, "memory_store", _memory_store)
     self_improvement._persist_state(
         canary,
-        demo={"reuse_hints": {"trajectory_key": "click::current_tab::#save", "selector": "#save"}},
+        demo={
+            "failure_type": "focus_mismatch",
+            "reuse_hints": {
+                "trajectory_key": "click::current_tab::#save",
+                "selector": "#save",
+                "failure_type": "focus_mismatch",
+            },
+        },
     )
 
     result = await self_improvement.self_improvement_package_candidate(
@@ -215,7 +222,9 @@ async def test_package_candidate_is_benchmark_gated_and_can_record_approved_memo
     assert recorded["kind"] == "approved_improvement"
     assert recorded["metadata"]["trajectory_key"] == "click::current_tab::#save"
     assert recorded["metadata"]["selector"] == "#save"
+    assert recorded["metadata"]["failure_type"] == "focus_mismatch"
     assert result["promotion_artifact"]["artifact_kind"] == "approved_improvement_memory"
+    assert result["promotion_artifact"]["failure_type"] == "focus_mismatch"
 
 
 @pytest.mark.asyncio
@@ -441,12 +450,19 @@ async def test_demo_from_failed_trajectory_includes_reuse_suggestions(
     assert result["success"] is True
     assert result["reuse_query"]
     assert result["reuse_suggestions"][0]["memory_id"] == 7
+    assert result["reuse_memory_ids"] == [7]
+    assert result["reuse_policy"]["enabled"] is True
     assert "Approved improvement reuse hints" in result["repair_prompt"]
     assert "Prefer a more stable selector for the save button." in result["package"]["improvement_summary"]
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["artifacts"]["reuse_suggestions"][0]["memory_id"] == 7
+    assert task["artifacts"]["reuse_memory_ids"] == [7]
     assert "Approved improvement reuse hints" in task["artifacts"]["repair_prompt"]
+    updated_trajectory = computer_trajectory_store.get(trajectory_id)
+    assert updated_trajectory["reuse_trace"]["source"] == "self_improvement_demo"
+    assert updated_trajectory["reuse_trace"]["memory_ids"] == [7]
+    assert updated_trajectory["reuse_trace"]["used_memory_ids"] == [7]
 
 
 @pytest.mark.asyncio
@@ -710,12 +726,14 @@ async def test_search_from_failed_trajectory_includes_reuse_suggestions(
 
     assert result["success"] is True
     assert result["reuse_suggestions"][0]["memory_id"] == 11
+    assert result["reuse_memory_ids"] == [11]
     assert "Approved improvement reuse hints" in result["repair_prompt"]
     assert "Reuse the browser selector normalization fix." in result["winner"]["package"]["improvement_summary"]
     assert "Approved improvement reuse hints" in result["winner"]["candidate_generation_prompt"]
     task = get_task_store().get(result["task_id"])
     assert task is not None
     assert task["artifacts"]["reuse_suggestions"][0]["memory_id"] == 11
+    assert task["artifacts"]["reuse_memory_ids"] == [11]
     assert "Approved improvement reuse hints" in task["artifacts"]["repair_prompt"]
 
 
@@ -864,6 +882,39 @@ async def test_reuse_prefilter_avoids_semantic_search_when_metadata_matches(
 
     assert result["results"][0]["memory_id"] == 19
     assert result["results"][0]["match_type"] == "prefilter"
+    assert result["memory_ids"] == [19]
+
+
+@pytest.mark.asyncio
+async def test_find_reuse_suggestions_can_be_disabled_by_policy(monkeypatch):
+    trajectory = {
+        "id": 11,
+        "action": "click",
+        "status": "failed",
+        "final_surface": "current_tab",
+        "request": {
+            "selector": "#save",
+            "policy": {"allow_approved_improvement_reuse": False},
+        },
+        "observation": {"preferred_surface": "current_tab", "available_surfaces": ["current_tab"]},
+    }
+
+    class _FakeMemoryStore:
+        def search(self, **kwargs):
+            raise AssertionError("prefilter search should not run when reuse is disabled by policy")
+
+    async def _memory_search(**kwargs):
+        raise AssertionError("semantic memory search should not run when reuse is disabled by policy")
+
+    monkeypatch.setattr(self_improvement, "get_memory_store", lambda: _FakeMemoryStore())
+    monkeypatch.setattr(self_improvement, "memory_search", _memory_search)
+
+    result = await self_improvement._find_reuse_suggestions(trajectory, limit=3)
+
+    assert result["results"] == []
+    assert result["memory_ids"] == []
+    assert result["policy"]["enabled"] is False
+    assert result["policy"]["source"] == "request.policy.allow_approved_improvement_reuse"
 
 
 def test_cli_self_improvement_search_invokes_tool(monkeypatch):

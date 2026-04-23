@@ -39,7 +39,7 @@ from src.runtime.durable_execution_schema import (
 from src.runtime.task_store import get_task_store
 from src.tools.memory import get_memory_store
 from src.tools.self_improvement_runtime.promotion import REUSE_MEMORY_KINDS
-from src.tools.self_improvement_runtime.reuse import prefilter_reuse_suggestions
+from src.tools.self_improvement_runtime.reuse import prefilter_reuse_payload
 
 
 class EvalVerifyMatch(BaseModel):
@@ -605,7 +605,7 @@ def _build_run_report_entry(
     get_memory_store_fn: Callable[[], Any],
 ) -> dict[str, Any]:
     classification = normalize_trajectory_failure(trajectory, classified_by="replay_analysis")
-    reuse = prefilter_reuse_suggestions(
+    reuse = prefilter_reuse_payload(
         trajectory,
         limit=3,
         get_memory_store_fn=get_memory_store_fn,
@@ -654,10 +654,18 @@ def _build_run_report_entry(
         "recommended_repair_targets": recommended_repair_targets,
         "candidate_promotion_artifacts": candidate_promotion_artifacts,
         "reuse_query": {
+            "query": reuse.get("query", ""),
             "kinds": list(REUSE_MEMORY_KINDS),
             "strategy": "prefilter",
         },
-        "reuse_suggestions": reuse,
+        "reuse_suggestions": reuse.get("results", []),
+        "reuse_memory_ids": reuse.get("memory_ids", []),
+        "reuse_policy": reuse.get("policy", {}),
+        "reuse_trace": (
+            trajectory.get("reuse_trace")
+            if isinstance(trajectory.get("reuse_trace"), dict)
+            else {}
+        ),
         "replay_reference": replay_reference,
         "replay": replay_reference,
         "verifier_verdict": verifier_verdict.model_dump(mode="json"),
@@ -1303,6 +1311,7 @@ def run_eval_spec(
                 "recommended_repair_targets",
                 "candidate_promotion_artifacts",
                 "replay_reference",
+                "reuse_memory_ids",
                 "reuse_suggestions",
                 "recovery_policy",
                 "recovery_decision",

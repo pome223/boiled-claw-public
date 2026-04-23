@@ -514,6 +514,8 @@ The self-improvement slice is intentionally offline and benchmark-gated:
 - `self_improvement_package_candidate` reuses cached benchmark results, packages the diff, emits a typed promotion artifact, and can record approved changes into typed promotion memory
 - `self_improvement_cleanup_canary` removes the worktree and deletes the canary branch when finished
 - new failed trajectories automatically surface matching approved promotions (`approved_improvement`, `approved_skill`, `capability_patch`, `policy_patch`) as reuse suggestions, using cheap trajectory-key / selector / action / surface prefilters before semantic fallback
+- approved improvement memory reuse is now also linked to the normalized `failure_type`, records `reuse_memory_ids` / `reuse_policy` on demo, search, and eval reports, and persists a per-trajectory `reuse_trace` so later replay can show which approved memories were used
+- reuse can be disabled per trajectory through `request.policy`, `observation.policy`, or `trajectory.policy` flags such as `allow_approved_improvement_reuse=false`
 
 Optional `.env`:
 
@@ -554,7 +556,8 @@ The high-level demo and search flows now create persistent task objects:
 
 - `self_improvement_demo_from_trajectory` returns one `task_id` for the end-to-end demo run
 - `self_improvement_search_from_trajectory` creates a parent search task plus candidate child tasks, then records `winner_task_id` / `loser_task_ids`
-- both flows attach `reuse_query` and `reuse_suggestions` so the dashboard can show prior approved fixes for similar failures
+- both flows attach `reuse_query`, `reuse_suggestions`, `reuse_memory_ids`, and `reuse_policy` so the dashboard can show prior approved fixes for similar failures and whether reuse was policy-disabled
+- persisted trajectories also carry `reuse_trace`, which records the source flow, query, failure type, matched memory ids, and policy decision used during repair
 
 CLI demo:
 
