@@ -123,6 +123,7 @@ The next substrate slice for #84, #85, and #87 is now explicit too: each eval ru
 In Phase 0 these are **eval-derived substrate artifacts**, not live scheduler-backed runtime state yet. They make the contract explicit now, so later scheduler / recovery work can consume the same shapes without inventing a new surface.
 The next follow-on slice for #86, #88, #89, and #90 stays inside that same Phase 0 contract: eval runs now also emit **eval-derived orchestration artifacts** for scheduler queues, recovery policy/decision, guardrail budget state, and durable human escalation records.
 These are still not a live worker loop. They are the durable report shapes that a future scheduler / recovery engine can consume without changing the external artifact contract.
+The next Google Sheets vertical slice for #92 and #93 now uses that same contract directly: `evals/current_tab_google_sheets.yaml` is a `long_running_vertical_slice`, and the Control UI task detail renders long-running state, scheduler queues, checkpoints, approval waits, and budget exhaustion from the persisted eval report.
 
 The Phase 0 CLI is now present in the repo:
 
@@ -185,7 +186,7 @@ The next important open agent framework will not be the biggest model wrapper. I
 - 💬 **Multi-Channel** - Telegram, Discord, WebSocket support
 - 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
 - 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
-- 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state, subscribes to task / approval deltas over WebSocket, exposes a clickable detail / intervention panel, and lets operators replay / compare control-loop runs from the task detail view
+- 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state, subscribes to task / approval deltas over WebSocket, exposes a clickable detail / intervention panel, renders long-running scheduler / checkpoint / approval-wait state for eval-backed tasks, and lets operators replay / compare control-loop runs from the task detail view
 - 🕵️ **Audit Log Explorer** - Filter audit events by actor / session / tool / source / result, deep-link from task or approval detail, inspect approval resolve before / after state, and stream indexed audit appends in the browser
 - 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
 - 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces

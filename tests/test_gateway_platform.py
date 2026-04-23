@@ -144,6 +144,21 @@ def test_chat_ui_and_static_assets_disable_caching(monkeypatch, tmp_path):
         assert app_js_response.headers["expires"] == "0"
 
 
+def test_chat_ui_bundle_includes_long_running_task_sections(monkeypatch, tmp_path):
+    gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
+
+    with TestClient(gateway.app) as client:
+        app_js_response = client.get("/chat-static/app.js")
+
+    assert app_js_response.status_code == 200
+    bundle = app_js_response.text
+    assert "Long-Running State" in bundle
+    assert "Scheduler Queues" in bundle
+    assert "Latest Checkpoints" in bundle
+    assert "Approval Waits" in bundle
+    assert "Budget Exhaustion" in bundle
+
+
 def test_protocol_exposes_runtime_substrate_metadata(monkeypatch, tmp_path):
     gateway, _scheduler = _build_gateway(monkeypatch, tmp_path)
 
@@ -1813,6 +1828,7 @@ async def test_audit_notifier_fans_out_target_session_for_tool_approval(monkeypa
     )
 
     assert [session_id for session_id, _data in sent] == ["sess-source", "sess-target"]
+
 
 
 def test_http_task_timeline_endpoint_merges_task_approval_and_audit_entries(monkeypatch, tmp_path):
