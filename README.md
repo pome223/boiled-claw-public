@@ -90,6 +90,11 @@ The Gateway ships a browser-based chat, task dashboard, audit explorer, detail /
 
 The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened. The Dashboard and Audit tabs then let you drill into task artifacts, inspect merged task timelines, jump into related audit events, replay failed control-loop runs, compare replays against the baseline task, and watch task / approval / audit updates arrive over the WebSocket without leaving the Control UI.
 
+## Architecture Overview
+
+Start with the short English overview in [architecture/README.md](architecture/README.md) if you want the system shape before reading the deeper design notes.
+The root [ARCHITECTURE.md](ARCHITECTURE.md) is a detailed Japanese-first deep dive, while the `architecture/` directory contains focused notes on routing, host bridges, desktop bridges, control-loop memory, and trajectory-native self-improvement.
+
 ## Thesis
 
 boiled-claw keeps the OpenClaw spirit of local-first, composable, inspectable tooling, but reframes it around the agent stack that matters in 2026: browser-first computer use, verification-driven recovery, measured improvement, and a clear adapter path toward physical AI environments.
@@ -125,12 +130,31 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 
 ## Near-Term Direction
 
-- The next development spine is **trajectory-native self-improvement**, not horizontal channel expansion. See [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md).
+- The next development spine is **trajectory-native self-improvement**, not horizontal channel expansion. See [architecture/README.md](architecture/README.md) for a short English overview and [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md) for the detailed design.
 - Priority 1: trajectory-driven eval / replay for browser-first and desktop fallback tasks
 - Priority 2: failure-to-skill / capability promotion from benchmarked trajectories
 - Priority 3: policy-bounded self-improvement with security evals, audit, and approval gates
 - Priority 4: deeper current-tab / desktop practical tasks such as Sheets, Docs, SaaS extraction, and cross-app workflows
 - Priority 5: physical replay PoC that reuses the same trajectory schema in simulation-first validation
+
+The intended self-improvement loop is evidence-first and approval-gated:
+
+```mermaid
+flowchart LR
+    A["Task or mission contract"] --> B["Execute"]
+    B --> C["Capture trajectory"]
+    C --> D["Evaluate outcome"]
+    D --> E{"Verifier verdict"}
+    E -- pass --> F["Persist evidence"]
+    E -- fail or uncertain --> G["Classify failure"]
+    G --> H["Generate repair candidate"]
+    H --> I["Run canary benchmark"]
+    I --> J{"Operator approval"}
+    J -- approved --> K["Promote memory, skill, capability, or policy"]
+    J -- denied --> L["Record rejected proposal"]
+    K --> M["Reuse in future missions"]
+    M --> A
+```
 
 The current tree already ships a first slice of all of these layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state. The next step is to connect them into one measurable promotion loop: `trajectory -> eval -> repair -> canary -> benchmark -> approval -> promotion -> reuse`.
 The minimum first slice for that loop is a current-tab Google Sheets eval that emits a normalized `failure_type`, produces a replay-linked report, and proves reuse through `approved_improvement_memory`.
