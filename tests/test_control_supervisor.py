@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 
 import pytest
 
@@ -8,7 +9,13 @@ from src.gateway.control_supervisor import (
     _SupervisorHandle,
     build_maintenance_goal,
 )
-from src.runtime.durable_execution_schema import GuardrailBudgetPolicy
+from src.runtime.durable_execution_schema import (
+    DurableTaskNodeStatus,
+    GuardrailBudgetPolicy,
+    SchedulerQueueEntry,
+    SchedulerQueueKind,
+    SchedulerQueueState,
+)
 from src.runtime.mission_contract import (
     MissionAbortConditionType,
     MissionContract,
@@ -179,7 +186,14 @@ async def test_control_supervisor_persists_mission_contract_in_live_artifacts(tm
     def _append_task_event_record(task_id, **kwargs):
         return store.append_event(task_id, **kwargs)
 
-    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+    async def _emit_session_event(
+        session_id: str,
+        *,
+        source: str,
+        status: str,
+        message: str,
+        **kwargs,
+    ):
         return None
 
     async def _run_control_loop_with_task(**kwargs):
@@ -1339,3 +1353,587 @@ async def test_control_supervisor_links_current_tab_evidence_refs(tmp_path):
     artifact_kinds = {item["kind"] for item in durable["task_graph"]["nodes"][0]["artifacts"]}
     assert "current_tab_info" in artifact_kinds
     assert "verification_report" in artifact_kinds
+
+
+def _scheduler_entry(
+    *,
+    entry_id: str,
+    node_id: str,
+    queue: SchedulerQueueKind,
+    available_at: float | None = None,
+    expires_at: float | None = None,
+) -> SchedulerQueueEntry:
+    metadata = {}
+    if expires_at is not None:
+        metadata["expires_at"] = datetime.fromtimestamp(
+            expires_at,
+            tz=timezone.utc,
+        ).isoformat()
+    return SchedulerQueueEntry(
+        entry_id=entry_id,
+        node_id=node_id,
+        queue=queue,
+        available_at=(
+            datetime.fromtimestamp(available_at, tz=timezone.utc)
+            if available_at is not None
+            else None
+        ),
+        metadata=metadata,
+    )
+
+
+def test_scheduler_selection_prioritizes_due_entries_and_skips_stale():
+    async def _run_control_loop_with_task(**kwargs):
+        raise AssertionError("selection test should not execute the child loop")
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    now = {"value": 1000.0}
+    mission_contract = build_mission_contract(objective="Keep scheduler deterministic")
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        now_fn=lambda: now["value"],
+    )
+    runtime_state = supervisor._initial_runtime_state(
+        objective=mission_contract.objective,
+        loop_goal=build_maintenance_goal(mission_contract.objective, mission_contract),
+        control_session_id="ctrlsup_scheduler_priority",
+        created_at=now["value"],
+        next_run_at=now["value"],
+        mission_contract=mission_contract,
+    )
+    node_id = runtime_state["node_id"]
+    runtime_state["queue_state"] = SchedulerQueueState(
+        ready_queue=[
+            _scheduler_entry(
+                entry_id="a-stale-ready",
+                node_id="missing-node",
+                queue=SchedulerQueueKind.READY,
+            ),
+            _scheduler_entry(
+                entry_id="b-ready",
+                node_id=node_id,
+                queue=SchedulerQueueKind.READY,
+            ),
+        ],
+        retry_later_queue=[
+            _scheduler_entry(
+                entry_id="c-due-retry",
+                node_id=node_id,
+                queue=SchedulerQueueKind.RETRY_LATER,
+                available_at=900.0,
+            )
+        ],
+        periodic_check_queue=[
+            _scheduler_entry(
+                entry_id="d-due-periodic",
+                node_id=node_id,
+                queue=SchedulerQueueKind.PERIODIC_CHECK,
+                available_at=800.0,
+            )
+        ],
+    )
+
+    selection = supervisor._select_scheduler_entry(runtime_state, now=now["value"])
+
+    assert selection.entry is not None
+    assert selection.entry.entry_id == "b-ready"
+    assert selection.skipped_entries[0]["reason"] == "stale_unknown_node"
+    assert runtime_state["queue_state"].ready_queue[0].entry_id == "b-ready"
+
+    runtime_state["queue_state"] = SchedulerQueueState(
+        retry_later_queue=[
+            _scheduler_entry(
+                entry_id="retry",
+                node_id=node_id,
+                queue=SchedulerQueueKind.RETRY_LATER,
+                available_at=900.0,
+            )
+        ],
+        periodic_check_queue=[
+            _scheduler_entry(
+                entry_id="periodic",
+                node_id=node_id,
+                queue=SchedulerQueueKind.PERIODIC_CHECK,
+                available_at=800.0,
+            )
+        ],
+    )
+    assert supervisor._select_scheduler_entry(
+        runtime_state,
+        now=now["value"],
+    ).entry.entry_id == "retry"
+
+    runtime_state["queue_state"] = SchedulerQueueState(
+        retry_later_queue=[
+            _scheduler_entry(
+                entry_id="future-retry",
+                node_id=node_id,
+                queue=SchedulerQueueKind.RETRY_LATER,
+                available_at=1300.0,
+            )
+        ],
+        periodic_check_queue=[
+            _scheduler_entry(
+                entry_id="future-periodic",
+                node_id=node_id,
+                queue=SchedulerQueueKind.PERIODIC_CHECK,
+                available_at=1200.0,
+            )
+        ],
+    )
+    assert supervisor._select_scheduler_entry(
+        runtime_state,
+        now=now["value"],
+    ).entry.entry_id == "future-periodic"
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_records_heartbeat_and_watchdog_warnings(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    now = {"value": 1000.0}
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="heartbeat iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-heartbeat",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+        now_fn=lambda: now["value"],
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="Keep heartbeat visible",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=1,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    progress = parent["artifacts"]["progress"]
+    assert progress["heartbeat"]["last_heartbeat_at"] == now["value"]
+    assert parent["artifacts"]["durable_execution"]["supervisor_health"][
+        "active_node_id"
+    ].endswith("/maintain-objective")
+
+    stale_task = store.create(
+        kind="control_supervisor",
+        title="stale supervisor",
+        status="running",
+        owner_session_id="sess-owner",
+        owner_user_id="alice",
+        artifacts={
+            "progress": {
+                "heartbeat": {
+                    "last_heartbeat_at": 500.0,
+                    "status": "running",
+                },
+                "stop_requested": False,
+            }
+        },
+        metadata={"type": "control_supervisor"},
+    )
+    finding = supervisor.watchdog_task(stale_task, stale_after_seconds=100.0)
+    assert finding is not None
+    assert finding.reason == "stale_heartbeat"
+    assert finding.action == "resume"
+    updated = store.get(stale_task["task_id"])
+    assert updated["artifacts"]["progress"]["watchdog"]["reason"] == "stale_heartbeat"
+    assert any(
+        event["event_type"] == "supervisor_watchdog_warning"
+        for event in store.query_timeline(stale_task["task_id"])["events"]
+    )
+
+    stopped_task = store.create(
+        kind="control_supervisor",
+        title="stopped supervisor",
+        status="running",
+        owner_session_id="sess-owner",
+        owner_user_id="alice",
+        artifacts={
+            "progress": {
+                "heartbeat": {"last_heartbeat_at": 100.0},
+                "stop_requested": True,
+            }
+        },
+        metadata={"type": "control_supervisor"},
+    )
+    assert supervisor.watchdog_task(stopped_task, stale_after_seconds=100.0) is None
+    stopped = store.get(stopped_task["task_id"])
+    assert stopped["metadata"].get("watchdog_action") is None
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_runs_multi_node_graph_in_dependency_order(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    child_goals: list[str] = []
+
+    mission_contract = build_mission_contract(
+        contract_id="mission-multi-node",
+        objective="Run a staged inspection",
+        task_nodes=[
+            {
+                "node_id": "inspect",
+                "title": "Inspect target",
+                "description": "Inspect the visible state",
+                "completion_criteria": ["inspection captured"],
+            },
+            {
+                "node_id": "repair",
+                "title": "Repair target",
+                "description": "Repair any drift",
+                "depends_on": ["inspect"],
+            },
+            {
+                "node_id": "verify",
+                "title": "Verify target",
+                "description": "Verify the repaired state",
+                "depends_on": ["repair"],
+            },
+        ],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_goals.append(kwargs["goal"])
+        child_task = store.create(
+            kind="control_loop",
+            title=f"node {len(child_goals)}",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id=f"req-node-{len(child_goals)}",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy objective",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=60,
+        source="test",
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "completed"
+    assert parent["artifacts"]["progress"]["completed_iterations"] == 3
+    assert [goal.splitlines()[0] for goal in child_goals] == [
+        "Inspect the visible state",
+        "Repair any drift",
+        "Verify the repaired state",
+    ]
+    durable = parent["artifacts"]["durable_execution"]
+    assert [run["node_id"].split("/")[-1] for run in durable["job_runs"]] == [
+        "inspect",
+        "repair",
+        "verify",
+    ]
+    assert {node["status"] for node in durable["task_graph"]["nodes"]} == {
+        DurableTaskNodeStatus.DONE.value
+    }
+    assert durable["resume_state"]["reason"] == "graph_complete"
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_resumes_multi_node_graph_at_next_actionable_node(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    now = {"value": 1000.0}
+    child_goals: list[str] = []
+    mission_contract = build_mission_contract(
+        contract_id="mission-multi-resume",
+        objective="Run a resumable staged inspection",
+        task_nodes=[
+            {"node_id": "inspect", "description": "Inspect state"},
+            {"node_id": "repair", "description": "Repair state", "depends_on": ["inspect"]},
+            {"node_id": "verify", "description": "Verify state", "depends_on": ["repair"]},
+        ],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_goals.append(kwargs["goal"])
+        child_task = store.create(
+            kind="control_loop",
+            title=f"resumed node {len(child_goals)}",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id=f"req-resume-node-{len(child_goals)}",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+        now_fn=lambda: now["value"],
+    )
+    runtime_state = supervisor._initial_runtime_state(
+        objective=mission_contract.objective,
+        loop_goal=build_maintenance_goal(mission_contract.objective, mission_contract),
+        control_session_id="ctrlsup_multi_resume",
+        created_at=now["value"],
+        next_run_at=now["value"],
+        mission_contract=mission_contract,
+    )
+    first_report = supervisor._record_runtime_iteration(
+        runtime_state,
+        objective=mission_contract.objective,
+        iteration=1,
+        max_iterations=3,
+        result=ExecutionResult(
+            request_id="req-before-restart",
+            session_id="ctrlsup_multi_resume",
+            user_id="alice",
+            final_text="ok before restart",
+            success=True,
+        ),
+        child_task_id="task_child_before_restart",
+        next_run_at=None,
+        has_more_iterations=True,
+    )
+    assert first_report["checkpoint"]["next_actionable_task_node_id"].endswith("/repair")
+    task = store.create(
+        kind="control_supervisor",
+        title=mission_contract.objective,
+        status="running",
+        owner_session_id="sess-owner",
+        owner_user_id="alice",
+        artifacts={
+            "mission_contract": mission_contract.model_dump(mode="json"),
+            "supervisor": {
+                "objective": mission_contract.objective,
+                "loop_goal": build_maintenance_goal(mission_contract.objective, mission_contract),
+                "constraints": [],
+                "mission_contract_id": mission_contract.contract_id,
+                "duration_seconds": 120,
+                "interval_seconds": 0,
+                "control_session_id": "ctrlsup_multi_resume",
+                "started_at": now["value"],
+                "ends_at": now["value"] + 120,
+                "max_iterations": 3,
+            },
+            "progress": {
+                "iteration": 1,
+                "completed_iterations": 1,
+                "next_run_at": now["value"],
+                "child_task_ids": ["task_child_before_restart"],
+                "last_child_task_id": "task_child_before_restart",
+            },
+            "durable_execution": first_report["durable_execution"],
+        },
+        metadata={
+            "type": "control_supervisor",
+            "control_session_id": "ctrlsup_multi_resume",
+            "mission_contract_id": mission_contract.contract_id,
+        },
+    )
+
+    assert await supervisor.resume_task(task) is True
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(task["task_id"])
+    durable = parent["artifacts"]["durable_execution"]
+    assert parent["status"] == "completed"
+    assert parent["artifacts"]["progress"]["child_task_ids"][0] == "task_child_before_restart"
+    assert [goal.splitlines()[0] for goal in child_goals] == [
+        "Repair state",
+        "Verify state",
+    ]
+    assert [run["node_id"].split("/")[-1] for run in durable["job_runs"]] == [
+        "inspect",
+        "repair",
+        "verify",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_blocked_node_does_not_stop_independent_ready_node(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    child_nodes: list[str] = []
+    mission_contract = build_mission_contract(
+        contract_id="mission-multi-independent",
+        objective="Run independent branches",
+        task_nodes=[
+            {"node_id": "blocked_branch", "description": "Run branch that blocks"},
+            {"node_id": "independent_branch", "description": "Run independent branch"},
+            {
+                "node_id": "dependent_branch",
+                "description": "Run dependent branch",
+                "depends_on": ["blocked_branch"],
+            },
+        ],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        node_name = kwargs["goal"].splitlines()[0]
+        child_nodes.append(node_name)
+        child_task = store.create(
+            kind="control_loop",
+            title=node_name,
+            status="failed" if "blocks" in node_name else "completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        if "blocks" in node_name:
+            return (
+                ExecutionResult(
+                    request_id="req-blocked-branch",
+                    session_id=kwargs["session_id"],
+                    user_id=kwargs["user_id"],
+                    final_text="manual triage required",
+                    success=False,
+                    metadata={"normalized_failure_type": "unknown"},
+                ),
+                child_task["task_id"],
+            )
+        return (
+            ExecutionResult(
+                request_id="req-independent-branch",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy objective",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent["status"] == "blocked"
+    assert child_nodes == ["Run branch that blocks", "Run independent branch"]
+    durable = parent["artifacts"]["durable_execution"]
+    statuses = {
+        node["node_id"].split("/")[-1]: node["status"]
+        for node in durable["task_graph"]["nodes"]
+    }
+    assert statuses == {
+        "blocked_branch": "blocked",
+        "independent_branch": "done",
+        "dependent_branch": "blocked",
+    }

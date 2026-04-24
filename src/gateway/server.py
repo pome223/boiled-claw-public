@@ -511,9 +511,9 @@ class GatewayServer:
         scheduler.set_notifier(self._cron_notifier_fn)
         scheduler.start()
         await scheduler.fire_system_event("startup")
-        await self.control_supervisor.resume_open_supervisors(
-            self._running_control_supervisor_tasks()
-        )
+        running_supervisors = self._running_control_supervisor_tasks()
+        self.control_supervisor.watchdog_running_supervisors(running_supervisors)
+        await self.control_supervisor.resume_open_supervisors(running_supervisors)
 
     def _running_control_supervisor_tasks(
         self,

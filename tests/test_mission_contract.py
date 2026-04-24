@@ -58,3 +58,37 @@ def test_mission_contract_rejects_unknown_abort_condition_type():
             objective="Keep the current tab healthy",
             abort_conditions=["unknown unsafe thing"],
         )
+
+
+def test_mission_contract_accepts_explicit_task_nodes():
+    contract = build_mission_contract(
+        objective="Inspect a target in stages",
+        task_nodes=[
+            {
+                "node_id": "inspect",
+                "title": "Inspect target",
+                "description": "Inspect visible state",
+                "completion_criteria": ["visible state recorded"],
+            },
+            {
+                "node_id": "verify",
+                "title": "Verify target",
+                "depends_on": ["inspect"],
+            },
+        ],
+    )
+
+    assert [node.node_id for node in contract.task_nodes] == ["inspect", "verify"]
+    assert contract.task_nodes[1].depends_on == ["inspect"]
+    assert contract.task_nodes[0].completion_criteria == ["visible state recorded"]
+
+
+def test_mission_contract_rejects_unknown_task_node_dependency():
+    with pytest.raises(ValidationError):
+        build_mission_contract(
+            objective="Inspect a target in stages",
+            task_nodes=[
+                {"node_id": "inspect"},
+                {"node_id": "verify", "depends_on": ["missing"]},
+            ],
+        )

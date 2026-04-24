@@ -65,18 +65,21 @@ supervisor は standalone scheduler daemon ではなく supervisor-owned live wo
 task artifact / durable_execution / task_graph metadata / scheduler queue metadata に同じ
 `mission_contract` を永続化し、completion criteria / evidence requirements / abort conditions を
 各 live task node から追えるようにする。
-その次の実働 slice では、この artifact を読むだけでなく live worker が scheduler queue の due entry を選んで実行する。
+live worker はこの artifact を読むだけでなく、scheduler queue の due entry を deterministic priority で選んで実行する。
 Gateway restart 時には `running` な control supervisor task を `durable_execution.resume_state` から再開し、
 Mission Contract の typed abort conditions は `mission_aborted:*` として terminal failure に落とす。
 current-tab inspection の結果と verifier report は `evidence_refs` / node artifacts に明示リンクされ、
 Control UI は eval-derived report だけでなく live `artifacts.durable_execution` も同じ task graph /
 scheduler / checkpoint / evidence surface として表示する。
 この live scheduler supervisor runtime は `control_supervisor` task 向けに active だが、
-まだ general multi-node mission scheduler ではない。Startup resume は running supervisor task を page 全体で走査し、
-active handle 重複、stale handle、explicit stop の skip を task event として残す。
+standalone distributed scheduler ではなく supervisor-owned worker のままにしている。Startup resume は running supervisor task を page 全体で走査し、
+active handle 重複、stale handle、explicit stop の skip、heartbeat/watchdog warning を task event として残す。
 `human_approval_required` / `guardrail_budget_exhausted` / `current_tab_connection_unavailable` などの
 abort condition は typed object として保持し、legacy string input は同じ type に正規化する。
-将来の runtime scheduler では複数 scheduler entry の priority / due ordering を明示的に扱う。
+explicit `mission_contract.task_nodes` がある場合は dependency-gated multi-node graph として実行し、
+`resume_state.next_actionable_task_node_id`、scheduler entry、latest checkpoint の順で resume node を決める。
+queue selection は `ready > due retry_later > due periodic_check` を優先し、due entry がなければ最も早い future
+`available_at` を待つ。stale / expired entry は実行せず task event に残す。
 
 その次の #94 / #95 / #96 / #97 は、physical AI 側も同じ contract-first で進める slice として扱う。
 ここで追加するのは live robotics runtime ではなく、simulation-first adapter が永続化する
