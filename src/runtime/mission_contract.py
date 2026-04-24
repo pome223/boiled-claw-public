@@ -73,6 +73,27 @@ class MissionAbortCondition(BaseModel):
         return str(value or "").strip()
 
 
+class MissionTaskNode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    node_id: str = Field(min_length=1)
+    title: str = ""
+    description: str = ""
+    depends_on: list[str] = Field(default_factory=list)
+    completion_criteria: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("node_id", "title", "description", mode="before")
+    @classmethod
+    def _strip_text(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+    @field_validator("depends_on", "completion_criteria", mode="before")
+    @classmethod
+    def _strip_text_list(cls, value: Any) -> list[str]:
+        return _clean_text_list(value)
+
+
 def _clean_abort_conditions(
     items: list[Any] | tuple[Any, ...] | str | dict[str, Any] | MissionAbortCondition | None,
 ) -> list[MissionAbortCondition]:
@@ -90,6 +111,21 @@ def _clean_abort_conditions(
             continue
         conditions.append(MissionAbortCondition.model_validate(item))
     return conditions
+
+
+def _clean_task_nodes(
+    items: list[Any] | tuple[Any, ...] | dict[str, Any] | MissionTaskNode | None,
+) -> list[MissionTaskNode]:
+    if items is None:
+        return []
+    if isinstance(items, MissionTaskNode):
+        return [items]
+    if isinstance(items, dict):
+        return [MissionTaskNode.model_validate(items)]
+    nodes: list[MissionTaskNode] = []
+    for item in items:
+        nodes.append(MissionTaskNode.model_validate(item))
+    return nodes
 
 
 def _default_abort_conditions() -> list[MissionAbortCondition]:
@@ -114,6 +150,7 @@ class MissionContract(BaseModel):
     abort_conditions: list[MissionAbortCondition] = Field(default_factory=list)
     completion_criteria: list[str] = Field(default_factory=list)
     evidence_requirements: list[str] = Field(default_factory=list)
+    task_nodes: list[MissionTaskNode] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @field_validator("contract_id", "objective", mode="before")
@@ -137,6 +174,35 @@ class MissionContract(BaseModel):
     def _strip_abort_conditions(cls, value: Any) -> list[MissionAbortCondition]:
         return _clean_abort_conditions(value)
 
+    @field_validator("task_nodes", mode="before")
+    @classmethod
+    def _strip_task_nodes(cls, value: Any) -> list[MissionTaskNode]:
+        return _clean_task_nodes(value)
+
+    @model_validator(mode="after")
+    def _validate_task_graph(self) -> "MissionContract":
+        node_ids = [node.node_id for node in self.task_nodes]
+        duplicates = sorted({node_id for node_id in node_ids if node_ids.count(node_id) > 1})
+        if duplicates:
+            raise ValueError(
+                "mission task node ids must be unique: " + ", ".join(duplicates)
+            )
+        known_node_ids = set(node_ids)
+        unknown_dependencies = sorted(
+            {
+                dependency
+                for node in self.task_nodes
+                for dependency in node.depends_on
+                if dependency not in known_node_ids
+            }
+        )
+        if unknown_dependencies:
+            raise ValueError(
+                "mission task node dependencies must reference known node ids: "
+                + ", ".join(unknown_dependencies)
+            )
+        return self
+
     @property
     def abort_condition_types(self) -> set[MissionAbortConditionType]:
         return {condition.type for condition in self.abort_conditions}
@@ -152,6 +218,7 @@ def build_mission_contract(
     abort_conditions: list[Any] | tuple[Any, ...] | str | dict[str, Any] | None = None,
     completion_criteria: list[str] | tuple[str, ...] | str | None = None,
     evidence_requirements: list[str] | tuple[str, ...] | str | None = None,
+    task_nodes: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> MissionContract:
     normalized_objective = str(objective or "").strip()
@@ -179,6 +246,7 @@ def build_mission_contract(
         or list(_DEFAULT_COMPLETION_CRITERIA),
         evidence_requirements=_clean_text_list(evidence_requirements)
         or list(_DEFAULT_EVIDENCE_REQUIREMENTS),
+        task_nodes=_clean_task_nodes(task_nodes),
         metadata=normalized_metadata,
     )
 

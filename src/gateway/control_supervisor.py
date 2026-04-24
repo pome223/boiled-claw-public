@@ -152,6 +152,15 @@ def _supervisor_node_id(control_session_id: str) -> str:
     return f"{control_session_id}/maintain-objective"
 
 
+def _mission_graph_node_id(control_session_id: str, contract_node_id: str) -> str:
+    normalized = str(contract_node_id or "").strip()
+    if not normalized:
+        return _supervisor_node_id(control_session_id)
+    if normalized.startswith(f"{control_session_id}/"):
+        return normalized
+    return f"{control_session_id}/{normalized}"
+
+
 def _queue_entry_for_node(
     *,
     node_id: str,
@@ -364,6 +373,23 @@ class _SupervisorHandle:
     task: asyncio.Task[None]
 
 
+@dataclass(frozen=True)
+class _SchedulerSelection:
+    entry: SchedulerQueueEntry | None
+    skipped_entries: list[dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class SupervisorWatchdogFinding:
+    task_id: str
+    status: str
+    reason: str
+    action: str
+    last_heartbeat_at: float | None
+    stale_after_seconds: float
+    has_active_handle: bool
+
+
 class ControlLoopSupervisor:
     def __init__(
         self,
@@ -419,6 +445,11 @@ class ControlLoopSupervisor:
                 "owner_session_id": owner_session_id,
             },
         )
+        if resolved_contract.task_nodes:
+            resolved_max_iterations = max(
+                resolved_max_iterations,
+                len(resolved_contract.task_nodes),
+            )
         resolved_objective = resolved_contract.objective
         raw_loop_goal = str(maintenance_goal or "").strip()
         loop_goal = (
@@ -456,6 +487,14 @@ class ControlLoopSupervisor:
                     "last_child_task_id": None,
                     "last_result": None,
                     "stop_requested": False,
+                    "heartbeat": {
+                        "last_heartbeat_at": started_at,
+                        "status": "accepted",
+                        "reason": "supervisor_started",
+                        "active_node_id": "",
+                        "scheduler_queue_counts": {},
+                    },
+                    "last_heartbeat_at": started_at,
                 },
                 "durable_execution": self._initial_durable_execution_payload(
                     objective=resolved_objective,
@@ -781,6 +820,151 @@ class ControlLoopSupervisor:
         )
         return True
 
+    def _mission_graph_nodes(
+        self,
+        *,
+        objective: str,
+        loop_goal: str,
+        control_session_id: str,
+        mission_contract: MissionContract,
+    ) -> list[DurableTaskNode]:
+        if not mission_contract.task_nodes:
+            node_id = _supervisor_node_id(control_session_id)
+            return [
+                DurableTaskNode(
+                    node_id=node_id,
+                    title=objective,
+                    description=loop_goal,
+                    status=DurableTaskNodeStatus.READY,
+                    completion_criteria=list(mission_contract.completion_criteria),
+                    artifacts=[_mission_contract_artifact_ref(mission_contract)],
+                    scheduler_queue=SchedulerQueueKind.READY,
+                    metadata={
+                        "mission_contract_id": mission_contract.contract_id,
+                        "allowed_actions": list(mission_contract.allowed_actions),
+                        "forbidden_actions": list(mission_contract.forbidden_actions),
+                        **_abort_condition_metadata(mission_contract),
+                        "evidence_requirements": list(mission_contract.evidence_requirements),
+                        "mission_graph_mode": "single_node",
+                    },
+                )
+            ]
+
+        nodes: list[DurableTaskNode] = []
+        for contract_node in mission_contract.task_nodes:
+            node_id = _mission_graph_node_id(
+                control_session_id,
+                contract_node.node_id,
+            )
+            dependencies = [
+                _mission_graph_node_id(control_session_id, dependency)
+                for dependency in contract_node.depends_on
+            ]
+            is_ready = not dependencies
+            node_title = contract_node.title or contract_node.node_id
+            node_description = contract_node.description or node_title
+            nodes.append(
+                DurableTaskNode(
+                    node_id=node_id,
+                    title=node_title,
+                    description=_append_mission_contract_section(
+                        node_description,
+                        mission_contract,
+                    ),
+                    status=(
+                        DurableTaskNodeStatus.READY
+                        if is_ready
+                        else DurableTaskNodeStatus.BLOCKED
+                    ),
+                    depends_on=dependencies,
+                    completion_criteria=list(
+                        contract_node.completion_criteria
+                        or mission_contract.completion_criteria
+                    ),
+                    artifacts=[_mission_contract_artifact_ref(mission_contract)],
+                    scheduler_queue=(
+                        SchedulerQueueKind.READY
+                        if is_ready
+                        else SchedulerQueueKind.BLOCKED
+                    ),
+                    metadata={
+                        "mission_contract_id": mission_contract.contract_id,
+                        "contract_node_id": contract_node.node_id,
+                        "allowed_actions": list(mission_contract.allowed_actions),
+                        "forbidden_actions": list(mission_contract.forbidden_actions),
+                        **_abort_condition_metadata(mission_contract),
+                        "evidence_requirements": list(mission_contract.evidence_requirements),
+                        "mission_graph_mode": "multi_node",
+                        **dict(contract_node.metadata),
+                    },
+                )
+            )
+        return nodes
+
+    def _initial_scheduler_queue_state(
+        self,
+        *,
+        nodes: list[DurableTaskNode],
+        mission_contract: MissionContract,
+    ) -> SchedulerQueueState:
+        queue_state = SchedulerQueueState()
+        for node in nodes:
+            queue = node.scheduler_queue or SchedulerQueueKind.BLOCKED
+            entry = _queue_entry_for_node(
+                node_id=node.node_id,
+                queue=queue,
+                checkpoint_id=None,
+                available_at=None,
+                failure_type=None,
+                chosen_action=None,
+                mission_contract=mission_contract,
+            )
+            entry.reason = (
+                "dependencies_satisfied"
+                if queue == SchedulerQueueKind.READY
+                else "waiting_for_dependencies"
+            )
+            append_scheduler_queue_entry(queue_state, entry)
+        return queue_state
+
+    @staticmethod
+    def _runtime_nodes(runtime_state: dict[str, Any]) -> list[DurableTaskNode]:
+        nodes = runtime_state.get("nodes")
+        if isinstance(nodes, list) and nodes:
+            return nodes
+        node = runtime_state.get("node")
+        if isinstance(node, DurableTaskNode):
+            runtime_state["nodes"] = [node]
+            return runtime_state["nodes"]
+        return []
+
+    def _node_by_id(
+        self,
+        runtime_state: dict[str, Any],
+        node_id: str | None,
+    ) -> DurableTaskNode | None:
+        if not node_id:
+            return None
+        for node in self._runtime_nodes(runtime_state):
+            if node.node_id == node_id:
+                return node
+        return None
+
+    def _set_current_node(
+        self,
+        runtime_state: dict[str, Any],
+        node_id: str | None,
+    ) -> DurableTaskNode | None:
+        node = self._node_by_id(runtime_state, node_id)
+        if node is None:
+            return None
+        runtime_state["node_id"] = node.node_id
+        runtime_state["node"] = node
+        return node
+
+    def _is_multi_node_runtime(self, runtime_state: dict[str, Any]) -> bool:
+        return len(self._runtime_nodes(runtime_state)) > 1
+
     def _initial_runtime_state(
         self,
         *,
@@ -792,50 +976,39 @@ class ControlLoopSupervisor:
         mission_contract: MissionContract,
     ) -> dict[str, Any]:
         graph_id = f"control_supervisor:{control_session_id}"
-        node_id = _supervisor_node_id(control_session_id)
-        node = DurableTaskNode(
-            node_id=node_id,
-            title=objective,
-            description=loop_goal,
-            status=DurableTaskNodeStatus.READY,
-            completion_criteria=list(mission_contract.completion_criteria),
-            artifacts=[_mission_contract_artifact_ref(mission_contract)],
-            scheduler_queue=SchedulerQueueKind.READY,
-            metadata={
-                "mission_contract_id": mission_contract.contract_id,
-                "allowed_actions": list(mission_contract.allowed_actions),
-                "forbidden_actions": list(mission_contract.forbidden_actions),
-                **_abort_condition_metadata(mission_contract),
-                "evidence_requirements": list(mission_contract.evidence_requirements),
-            },
+        nodes = self._mission_graph_nodes(
+            objective=objective,
+            loop_goal=loop_goal,
+            control_session_id=control_session_id,
+            mission_contract=mission_contract,
         )
-        queue_state = SchedulerQueueState()
-        append_scheduler_queue_entry(
-            queue_state,
-            _queue_entry_for_node(
-                node_id=node_id,
-                queue=SchedulerQueueKind.READY,
-                checkpoint_id=None,
-                available_at=_available_at_for_queue(
-                    SchedulerQueueKind.READY,
-                    next_run_at=next_run_at,
-                ),
-                failure_type=None,
-                chosen_action=None,
-                mission_contract=mission_contract,
-            ),
+        queue_state = self._initial_scheduler_queue_state(
+            nodes=nodes,
+            mission_contract=mission_contract,
+        )
+        current_node = next(
+            (node for node in nodes if node.scheduler_queue == SchedulerQueueKind.READY),
+            nodes[0],
         )
         return {
             "created_at": created_at,
             "graph_id": graph_id,
-            "node_id": node_id,
-            "node": node,
+            "control_session_id": control_session_id,
+            "node_id": current_node.node_id,
+            "node": current_node,
+            "nodes": nodes,
             "mission_contract": mission_contract,
             "queue_state": queue_state,
             "job_runs": [],
             "checkpoints": [],
             "escalations": [],
             "successful_artifacts": {},
+            "heartbeat": {
+                "last_heartbeat_at": created_at,
+                "status": "initialized",
+                "reason": "initial_runtime_state",
+                "active_node_id": current_node.node_id,
+            },
             "retry_counters": Counter(),
             "llm_calls_used": 0,
             "tool_calls_used": 0,
@@ -869,7 +1042,7 @@ class ControlLoopSupervisor:
         if isinstance(task_graph_payload, dict):
             task_graph = DurableTaskGraph.model_validate(task_graph_payload)
             if task_graph.nodes:
-                runtime_state["node"] = task_graph.nodes[0]
+                runtime_state["nodes"] = list(task_graph.nodes)
 
         queue_state_payload = durable_execution.get("scheduler_state")
         if isinstance(queue_state_payload, dict):
@@ -902,6 +1075,35 @@ class ControlLoopSupervisor:
             runtime_state["successful_artifacts"] = dict(
                 runtime_state["checkpoints"][-1].last_successful_artifacts
             )
+        resume_state_payload = durable_execution.get("resume_state")
+        resume_node_id = None
+        if isinstance(resume_state_payload, dict):
+            resume_node_id = str(
+                resume_state_payload.get("next_actionable_task_node_id") or ""
+            ).strip() or None
+        if resume_node_id is None:
+            selected_entry = self._next_scheduler_entry(runtime_state)
+            resume_node_id = selected_entry.node_id if selected_entry is not None else None
+        if resume_node_id is None and runtime_state["checkpoints"]:
+            latest_checkpoint = runtime_state["checkpoints"][-1]
+            resume_node_id = (
+                latest_checkpoint.next_actionable_task_node_id
+                or latest_checkpoint.current_task_node_id
+            )
+        if resume_node_id is None:
+            task_graph = DurableTaskGraph(
+                graph_id=runtime_state["graph_id"],
+                goal=objective,
+                nodes=list(self._runtime_nodes(runtime_state)),
+            )
+            resume_node_id = task_graph.next_actionable_task_node_id()
+        if self._set_current_node(runtime_state, resume_node_id) is None:
+            nodes = self._runtime_nodes(runtime_state)
+            if nodes:
+                self._set_current_node(runtime_state, nodes[0].node_id)
+        health_payload = durable_execution.get("supervisor_health")
+        if isinstance(health_payload, dict):
+            runtime_state["heartbeat"] = dict(health_payload)
         return runtime_state
 
     @staticmethod
@@ -914,12 +1116,138 @@ class ControlLoopSupervisor:
             *queue_state.periodic_check_queue,
         ]
 
+    @staticmethod
+    def _remove_scheduler_entries(
+        queue_state: SchedulerQueueState,
+        entry_ids: set[str],
+    ) -> None:
+        if not entry_ids:
+            return
+        queue_state.ready_queue = [
+            entry for entry in queue_state.ready_queue if entry.entry_id not in entry_ids
+        ]
+        queue_state.retry_later_queue = [
+            entry for entry in queue_state.retry_later_queue if entry.entry_id not in entry_ids
+        ]
+        queue_state.periodic_check_queue = [
+            entry
+            for entry in queue_state.periodic_check_queue
+            if entry.entry_id not in entry_ids
+        ]
+
+    def _scheduler_entry_skip_reason(
+        self,
+        runtime_state: dict[str, Any],
+        entry: SchedulerQueueEntry,
+        *,
+        now: float,
+    ) -> str | None:
+        expires_at = _datetime_timestamp(entry.metadata.get("expires_at"))
+        if expires_at is not None and expires_at <= now:
+            return "expired"
+        node = self._node_by_id(runtime_state, entry.node_id)
+        if node is None:
+            return "stale_unknown_node"
+        if node.status == DurableTaskNodeStatus.DONE and entry.queue != SchedulerQueueKind.COMPLETED:
+            return "stale_completed_node"
+        if node.status == DurableTaskNodeStatus.BLOCKED and entry.queue == SchedulerQueueKind.READY:
+            return "stale_blocked_node"
+        return None
+
+    @staticmethod
+    def _scheduler_entry_sort_key(
+        entry: SchedulerQueueEntry,
+        *,
+        now: float,
+        due_only: bool,
+    ) -> tuple[float, int, str]:
+        queue_priority = {
+            SchedulerQueueKind.READY: 0,
+            SchedulerQueueKind.RETRY_LATER: 1,
+            SchedulerQueueKind.PERIODIC_CHECK: 2,
+        }
+        available_at = _datetime_timestamp(entry.available_at)
+        if due_only:
+            return (
+                available_at if available_at is not None else 0.0,
+                queue_priority.get(entry.queue, 99),
+                entry.entry_id,
+            )
+        return (
+            available_at if available_at is not None else now,
+            queue_priority.get(entry.queue, 99),
+            entry.entry_id,
+        )
+
+    def _select_scheduler_entry(
+        self,
+        runtime_state: dict[str, Any],
+        *,
+        now: float | None = None,
+    ) -> _SchedulerSelection:
+        selected_now = self._now() if now is None else now
+        entries = self._scheduler_queue_entries(runtime_state["queue_state"])
+        actionable_entries: list[SchedulerQueueEntry] = []
+        future_entries: list[SchedulerQueueEntry] = []
+        skipped_entries: list[dict[str, Any]] = []
+        stale_entry_ids: set[str] = set()
+
+        for entry in entries:
+            skip_reason = self._scheduler_entry_skip_reason(
+                runtime_state,
+                entry,
+                now=selected_now,
+            )
+            if skip_reason:
+                stale_entry_ids.add(entry.entry_id)
+                skipped_entries.append(
+                    {
+                        "reason": skip_reason,
+                        "entry": entry.model_dump(mode="json"),
+                    }
+                )
+                continue
+            available_at = _datetime_timestamp(entry.available_at)
+            if available_at is None or available_at <= selected_now:
+                actionable_entries.append(entry)
+            else:
+                future_entries.append(entry)
+
+        self._remove_scheduler_entries(runtime_state["queue_state"], stale_entry_ids)
+
+        if actionable_entries:
+            selected = sorted(
+                actionable_entries,
+                key=lambda entry: (
+                    {
+                        SchedulerQueueKind.READY: 0,
+                        SchedulerQueueKind.RETRY_LATER: 1,
+                        SchedulerQueueKind.PERIODIC_CHECK: 2,
+                    }.get(entry.queue, 99),
+                    _datetime_timestamp(entry.available_at) or 0.0,
+                    entry.entry_id,
+                ),
+            )[0]
+            return _SchedulerSelection(entry=selected, skipped_entries=skipped_entries)
+
+        if future_entries:
+            selected = sorted(
+                future_entries,
+                key=lambda entry: self._scheduler_entry_sort_key(
+                    entry,
+                    now=selected_now,
+                    due_only=False,
+                ),
+            )[0]
+            return _SchedulerSelection(entry=selected, skipped_entries=skipped_entries)
+
+        return _SchedulerSelection(entry=None, skipped_entries=skipped_entries)
+
     def _next_scheduler_entry(
         self,
         runtime_state: dict[str, Any],
     ) -> SchedulerQueueEntry | None:
-        entries = self._scheduler_queue_entries(runtime_state["queue_state"])
-        return entries[0] if entries else None
+        return self._select_scheduler_entry(runtime_state).entry
 
     def _mission_contract_abort_reason(
         self,
@@ -978,17 +1306,23 @@ class ControlLoopSupervisor:
         # transitions remain in `job_runs`, `checkpoints`, and task timeline events.
         created_at = _utc_datetime(runtime_state["created_at"])
         node: DurableTaskNode = runtime_state["node"]
+        nodes = list(self._runtime_nodes(runtime_state))
         mission_contract: MissionContract = runtime_state["mission_contract"]
         task_graph = DurableTaskGraph(
             graph_id=runtime_state["graph_id"],
             goal=objective,
-            nodes=[node],
+            nodes=nodes,
             created_at=created_at,
             updated_at=_utc_datetime(self._now()),
             metadata={
-                "runtime_mode": "live_supervisor_phase0",
+                "runtime_mode": (
+                    "live_supervisor_mission_graph"
+                    if len(nodes) > 1
+                    else "live_supervisor_phase0"
+                ),
                 "scheduler_phase": "live_worker",
                 "mission_contract_id": mission_contract.contract_id,
+                "queue_selection": "ready_then_due_retry_then_due_periodic",
             },
         )
         checkpoints: list[DurableCheckpoint] = runtime_state["checkpoints"]
@@ -1031,6 +1365,7 @@ class ControlLoopSupervisor:
                 item.model_dump(mode="json") for item in runtime_state["escalations"]
             ],
             "resume_state": resume_state.model_dump(mode="json"),
+            "supervisor_health": dict(runtime_state.get("heartbeat") or {}),
         }
 
     def _initial_durable_execution_payload(
@@ -1092,6 +1427,79 @@ class ControlLoopSupervisor:
             },
         )
 
+    def _dependency_ready_nodes(
+        self,
+        runtime_state: dict[str, Any],
+    ) -> list[DurableTaskNode]:
+        nodes = self._runtime_nodes(runtime_state)
+        completed_node_ids = {
+            node.node_id
+            for node in nodes
+            if node.status == DurableTaskNodeStatus.DONE
+            or node.scheduler_queue == SchedulerQueueKind.COMPLETED
+        }
+        ready_nodes: list[DurableTaskNode] = []
+        for node in nodes:
+            if not node.depends_on:
+                continue
+            if node.status != DurableTaskNodeStatus.BLOCKED:
+                continue
+            if node.scheduler_queue not in {SchedulerQueueKind.BLOCKED, None}:
+                continue
+            if all(dependency in completed_node_ids for dependency in node.depends_on):
+                ready_nodes.append(node)
+        return ready_nodes
+
+    def _queue_ready_dependency_nodes(
+        self,
+        runtime_state: dict[str, Any],
+        *,
+        mission_contract: MissionContract,
+        checkpoint_id: str,
+    ) -> list[SchedulerQueueEntry]:
+        ready_entries: list[SchedulerQueueEntry] = []
+        for node in self._dependency_ready_nodes(runtime_state):
+            node.status = DurableTaskNodeStatus.READY
+            node.scheduler_queue = SchedulerQueueKind.READY
+            entry = _queue_entry_for_node(
+                node_id=node.node_id,
+                queue=SchedulerQueueKind.READY,
+                checkpoint_id=checkpoint_id,
+                available_at=None,
+                failure_type=None,
+                chosen_action=None,
+                mission_contract=mission_contract,
+            )
+            entry.reason = "dependencies_satisfied"
+            ready_entries.append(entry)
+        return ready_entries
+
+    def _runtime_task_graph(
+        self,
+        runtime_state: dict[str, Any],
+        *,
+        objective: str,
+    ) -> DurableTaskGraph:
+        mission_contract: MissionContract = runtime_state["mission_contract"]
+        nodes = list(self._runtime_nodes(runtime_state))
+        return DurableTaskGraph(
+            graph_id=runtime_state["graph_id"],
+            goal=objective,
+            nodes=nodes,
+            created_at=_utc_datetime(runtime_state["created_at"]),
+            updated_at=_utc_datetime(self._now()),
+            metadata={
+                "runtime_mode": (
+                    "live_supervisor_mission_graph"
+                    if len(nodes) > 1
+                    else "live_supervisor_phase0"
+                ),
+                "scheduler_phase": "live_worker",
+                "mission_contract_id": mission_contract.contract_id,
+                "queue_selection": "ready_then_due_retry_then_due_periodic",
+            },
+        )
+
     def _record_runtime_iteration(
         self,
         runtime_state: dict[str, Any],
@@ -1105,6 +1513,8 @@ class ControlLoopSupervisor:
         has_more_iterations: bool,
     ) -> dict[str, Any]:
         mission_contract: MissionContract = runtime_state["mission_contract"]
+        node: DurableTaskNode = runtime_state["node"]
+        is_multi_node = self._is_multi_node_runtime(runtime_state)
         classification = self._runtime_failure_classification(result)
         failure_type = classification["normalized_failure_type"]
         verifier_verdict = _build_live_verifier_verdict(
@@ -1116,7 +1526,7 @@ class ControlLoopSupervisor:
         policy = None
         chosen_action = None
         if result.success:
-            next_queue = (
+            current_node_queue = SchedulerQueueKind.COMPLETED if is_multi_node else (
                 SchedulerQueueKind.PERIODIC_CHECK
                 if has_more_iterations
                 else SchedulerQueueKind.COMPLETED
@@ -1124,7 +1534,11 @@ class ControlLoopSupervisor:
         else:
             policy = recovery_policy_for_failure_type(failure_type)
             chosen_action = policy.allowed_actions[0] if policy and policy.allowed_actions else None
-            next_queue = policy.next_scheduler_queue if policy is not None else SchedulerQueueKind.BLOCKED
+            current_node_queue = (
+                policy.next_scheduler_queue
+                if policy is not None
+                else SchedulerQueueKind.BLOCKED
+            )
         retry_count = runtime_state["retry_counters"][failure_type] if failure_type else 0
         runtime_state["llm_calls_used"] += 1 + (
             policy.budget_impact.llm_calls if policy is not None else 0
@@ -1134,7 +1548,7 @@ class ControlLoopSupervisor:
         )
         runtime_state["repair_depth_used"] += repair_depth_increment(chosen_action)
         pending_approvals_after = runtime_state["pending_approvals_count"] + (
-            1 if next_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL else 0
+            1 if current_node_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL else 0
         )
         # Phase 0 uses a coarse hourly budget counter so live supervisor artifacts
         # stay shape-compatible with eval-derived substrate reports. If a future
@@ -1150,28 +1564,28 @@ class ControlLoopSupervisor:
             tool_calls_used=runtime_state["tool_calls_used"],
             repair_depth_used=runtime_state["repair_depth_used"],
             pending_approvals_count=pending_approvals_after,
-            next_scheduler_queue=next_queue,
+            next_scheduler_queue=current_node_queue,
             failure_type=failure_type,
             retry_count=retry_count,
         )
         budget_exhausted = bool(budget_reasons)
         if budget_exhausted:
-            next_queue = SchedulerQueueKind.BLOCKED
+            current_node_queue = SchedulerQueueKind.BLOCKED
         abort_reason = self._mission_contract_abort_reason(
             mission_contract=mission_contract,
             result=result,
-            next_queue=next_queue,
+            next_queue=current_node_queue,
             budget_exhausted=budget_exhausted,
         )
         if abort_reason:
-            next_queue = SchedulerQueueKind.BLOCKED
+            current_node_queue = SchedulerQueueKind.BLOCKED
             chosen_action = RecoveryActionType.MARK_FAILED
         decision = RecoveryDecision(
             node_id=runtime_state["node_id"],
             failure_type=failure_type,
             chosen_action=chosen_action,
             policy=policy,
-            next_scheduler_queue=next_queue,
+            next_scheduler_queue=current_node_queue,
             budget_exhausted=budget_exhausted,
             budget_exhausted_reasons=budget_reasons,
         )
@@ -1182,12 +1596,12 @@ class ControlLoopSupervisor:
         if abort_reason:
             queue_reason = f"mission_aborted:{abort_reason}"
         available_at = _available_at_for_queue(
-            next_queue,
+            current_node_queue,
             next_run_at=next_run_at,
         )
         checkpoint_id = f"{runtime_state['graph_id']}/checkpoint-{iteration}"
         escalation_record = None
-        if next_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL:
+        if current_node_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL:
             approval_request = result.metadata.get("approval_request")
             approval_request_id = None
             if isinstance(approval_request, dict):
@@ -1206,7 +1620,7 @@ class ControlLoopSupervisor:
 
         queue_entry = _queue_entry_for_node(
             node_id=runtime_state["node_id"],
-            queue=next_queue,
+            queue=current_node_queue,
             checkpoint_id=checkpoint_id,
             available_at=available_at,
             failure_type=failure_type,
@@ -1219,20 +1633,18 @@ class ControlLoopSupervisor:
         queue_entry.reason = queue_reason
         if abort_reason:
             queue_entry.metadata["abort_reason"] = abort_reason
-        runtime_state["queue_state"] = SchedulerQueueState()
-        append_scheduler_queue_entry(runtime_state["queue_state"], queue_entry)
 
         if failure_type and not result.success:
             runtime_state["retry_counters"][failure_type] += 1
 
-        node: DurableTaskNode = runtime_state["node"]
-        node.status = _task_node_status_for_queue(next_queue)
+        node.status = _task_node_status_for_queue(current_node_queue)
         node.retry_count = runtime_state["retry_counters"][failure_type] if failure_type else 0
         node.next_retry_at = available_at
-        node.scheduler_queue = next_queue
+        node.scheduler_queue = current_node_queue
         node.verifier_verdict = verifier_verdict
         node.checkpoint_refs.append(checkpoint_id)
-        node.completion_criteria = list(mission_contract.completion_criteria)
+        if not node.completion_criteria:
+            node.completion_criteria = list(mission_contract.completion_criteria)
         node.metadata.update(
             {
                 "mission_contract_id": mission_contract.contract_id,
@@ -1252,18 +1664,75 @@ class ControlLoopSupervisor:
         if result.success:
             runtime_state["successful_artifacts"][node.node_id] = list(node.artifacts)
 
-        task_graph = DurableTaskGraph(
-            graph_id=runtime_state["graph_id"],
-            goal=objective,
-            nodes=[node],
-            created_at=_utc_datetime(runtime_state["created_at"]),
-            updated_at=_utc_datetime(self._now()),
-            metadata={
-                "runtime_mode": "live_supervisor_phase0",
-                "scheduler_phase": "live_worker",
-                "mission_contract_id": mission_contract.contract_id,
-            },
+        if is_multi_node and result.success:
+            self._queue_ready_dependency_nodes(
+                runtime_state,
+                mission_contract=mission_contract,
+                checkpoint_id=checkpoint_id,
+            )
+
+        runtime_state["queue_state"] = SchedulerQueueState()
+        append_scheduler_queue_entry(runtime_state["queue_state"], queue_entry)
+        if is_multi_node:
+            for graph_node in self._runtime_nodes(runtime_state):
+                if graph_node.node_id == node.node_id:
+                    continue
+                graph_queue = graph_node.scheduler_queue
+                if graph_queue is None:
+                    continue
+                graph_entry = _queue_entry_for_node(
+                    node_id=graph_node.node_id,
+                    queue=graph_queue,
+                    checkpoint_id=checkpoint_id,
+                    available_at=graph_node.next_retry_at,
+                    failure_type=None,
+                    chosen_action=None,
+                    mission_contract=mission_contract,
+                )
+                graph_entry.reason = (
+                    "dependencies_satisfied"
+                    if graph_queue == SchedulerQueueKind.READY
+                    else "waiting_for_dependencies"
+                    if graph_queue == SchedulerQueueKind.BLOCKED
+                    else "preserved_graph_queue"
+                )
+                append_scheduler_queue_entry(runtime_state["queue_state"], graph_entry)
+
+        scheduler_selection = self._select_scheduler_entry(
+            runtime_state,
+            now=self._now(),
         )
+        selected_queue_entry = scheduler_selection.entry or queue_entry
+        if scheduler_selection.entry is not None:
+            worker_next_queue = selected_queue_entry.queue
+        elif current_node_queue in {
+            SchedulerQueueKind.WAITING_FOR_APPROVAL,
+            SchedulerQueueKind.BLOCKED,
+            SchedulerQueueKind.RETRY_LATER,
+            SchedulerQueueKind.PERIODIC_CHECK,
+        }:
+            worker_next_queue = current_node_queue
+        elif all(
+            graph_node.status == DurableTaskNodeStatus.DONE
+            for graph_node in self._runtime_nodes(runtime_state)
+        ):
+            worker_next_queue = SchedulerQueueKind.COMPLETED
+        elif any(
+            graph_node.scheduler_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL
+            for graph_node in self._runtime_nodes(runtime_state)
+        ):
+            worker_next_queue = SchedulerQueueKind.WAITING_FOR_APPROVAL
+        else:
+            worker_next_queue = SchedulerQueueKind.BLOCKED
+        next_actionable_node_id = (
+            scheduler_selection.entry.node_id
+            if scheduler_selection.entry is not None
+            else None
+        )
+        if scheduler_selection.entry is not None:
+            self._set_current_node(runtime_state, scheduler_selection.entry.node_id)
+
+        task_graph = self._runtime_task_graph(runtime_state, objective=objective)
         checkpoint = DurableCheckpoint(
             checkpoint_id=checkpoint_id,
             graph_id=runtime_state["graph_id"],
@@ -1299,28 +1768,24 @@ class ControlLoopSupervisor:
                 budget_exhausted_reasons=budget_reasons,
             ),
             retry_counters={
-                runtime_state["node_id"]: node.retry_count,
+                node.node_id: node.retry_count,
             } if node.retry_count > 0 else {},
             trajectory_ids=[],
             replay_references=[{"child_task_id": child_task_id}],
-            next_actionable_task_node_id=(
-                runtime_state["node_id"]
-                if next_queue == SchedulerQueueKind.READY
-                else None
-            ),
+            next_actionable_task_node_id=next_actionable_node_id,
             created_at=_utc_datetime(self._now()),
         )
         job_run = DurableJobRun(
             run_id=f"{runtime_state['graph_id']}/run-{iteration}",
             graph_id=runtime_state["graph_id"],
-            node_id=runtime_state["node_id"],
+            node_id=node.node_id,
             goal=objective,
             status=job_run_status_from_verdict(verifier_verdict.verdict),
             attempt=iteration,
             trajectory_id=None,
             replay_reference={"child_task_id": child_task_id},
             checkpoint_id=checkpoint_id,
-            scheduler_queue=next_queue,
+            scheduler_queue=current_node_queue,
             verifier_verdict=verifier_verdict,
             started_at=_utc_datetime(self._now()),
             ended_at=_utc_datetime(self._now()),
@@ -1336,8 +1801,10 @@ class ControlLoopSupervisor:
             "failure_type": failure_type,
             "recovery_policy": policy.model_dump(mode="json") if policy is not None else None,
             "recovery_decision": decision.model_dump(mode="json"),
-            "scheduler_queue": next_queue.value,
-            "scheduler_queue_entry": queue_entry.model_dump(mode="json"),
+            "scheduler_queue": worker_next_queue.value,
+            "node_scheduler_queue": current_node_queue.value,
+            "scheduler_queue_entry": selected_queue_entry.model_dump(mode="json"),
+            "scheduler_skipped_entries": scheduler_selection.skipped_entries,
             "budget_state": checkpoint.budget.model_dump(mode="json"),
             "checkpoint": checkpoint.model_dump(mode="json"),
             "job_run": job_run.model_dump(mode="json"),
@@ -1348,6 +1815,152 @@ class ControlLoopSupervisor:
                 else None
             ),
         }
+
+    def _record_supervisor_heartbeat(
+        self,
+        *,
+        task_id: str,
+        runtime_state: dict[str, Any],
+        reason: str,
+        status: str = "running",
+        emit_event: bool = False,
+        objective: str,
+    ) -> dict[str, Any]:
+        heartbeat = {
+            "last_heartbeat_at": self._now(),
+            "status": status,
+            "reason": reason,
+            "active_node_id": str(runtime_state.get("node_id") or ""),
+            "scheduler_queue_counts": runtime_state["queue_state"].counts(),
+        }
+        runtime_state["heartbeat"] = heartbeat
+        self._update_task_record(
+            task_id,
+            artifacts={
+                "progress": {
+                    "heartbeat": heartbeat,
+                    "last_heartbeat_at": heartbeat["last_heartbeat_at"],
+                },
+                "durable_execution": self._serialize_runtime_state(
+                    runtime_state,
+                    objective=objective,
+                ),
+            },
+        )
+        if emit_event:
+            self._append_task_event_record(
+                task_id,
+                event_type="supervisor_heartbeat",
+                status=status,
+                title="Supervisor heartbeat",
+                payload={
+                    "summary": "Supervisor heartbeat recorded.",
+                    "heartbeat": heartbeat,
+                },
+            )
+        return heartbeat
+
+    def watchdog_running_supervisors(
+        self,
+        tasks: list[dict[str, Any]],
+        *,
+        stale_after_seconds: float = 300.0,
+    ) -> list[SupervisorWatchdogFinding]:
+        findings: list[SupervisorWatchdogFinding] = []
+        for task in tasks:
+            finding = self.watchdog_task(
+                task,
+                stale_after_seconds=stale_after_seconds,
+            )
+            if finding is not None:
+                findings.append(finding)
+        return findings
+
+    def watchdog_task(
+        self,
+        task: dict[str, Any],
+        *,
+        stale_after_seconds: float = 300.0,
+    ) -> SupervisorWatchdogFinding | None:
+        task_id = str(task.get("task_id") or "").strip()
+        if not task_id or str(task.get("kind") or "") != "control_supervisor":
+            return None
+        task_status = str(task.get("status") or "unknown")
+        if task_status != "running":
+            return None
+        artifacts = task.get("artifacts") if isinstance(task.get("artifacts"), dict) else {}
+        progress = artifacts.get("progress") if isinstance(artifacts.get("progress"), dict) else {}
+        if progress.get("stop_requested"):
+            self._append_task_event_record(
+                task_id,
+                event_type="supervisor_watchdog_skipped",
+                status=task_status,
+                title="Supervisor watchdog skipped",
+                payload={
+                    "summary": "Watchdog skipped an explicitly stopped supervisor.",
+                    "reason": "explicit_stop_requested",
+                },
+            )
+            return None
+        heartbeat = progress.get("heartbeat") if isinstance(progress.get("heartbeat"), dict) else {}
+        last_heartbeat_at = heartbeat.get("last_heartbeat_at", progress.get("last_heartbeat_at"))
+        try:
+            heartbeat_ts = (
+                float(last_heartbeat_at)
+                if last_heartbeat_at is not None
+                else None
+            )
+        except (TypeError, ValueError):
+            heartbeat_ts = None
+        has_active_handle = (
+            task_id in self._handles and not self._handles[task_id].task.done()
+        )
+        now = self._now()
+        stale = heartbeat_ts is None or now - heartbeat_ts > stale_after_seconds
+        if not stale and has_active_handle:
+            return None
+
+        reason = "missing_heartbeat" if heartbeat_ts is None else "stale_heartbeat"
+        if not has_active_handle and heartbeat_ts is not None and not stale:
+            reason = "missing_live_handle"
+        action = "resume" if not has_active_handle else "require_operator"
+        finding = SupervisorWatchdogFinding(
+            task_id=task_id,
+            status=task_status,
+            reason=reason,
+            action=action,
+            last_heartbeat_at=heartbeat_ts,
+            stale_after_seconds=float(stale_after_seconds),
+            has_active_handle=has_active_handle,
+        )
+        payload = {
+            "summary": f"Supervisor watchdog detected {reason}; recommended action: {action}.",
+            "reason": reason,
+            "action": action,
+            "last_heartbeat_at": heartbeat_ts,
+            "stale_after_seconds": float(stale_after_seconds),
+            "has_active_handle": has_active_handle,
+        }
+        self._update_task_record(
+            task_id,
+            artifacts={
+                "progress": {
+                    "watchdog": payload,
+                }
+            },
+            metadata={
+                "watchdog_reason": reason,
+                "watchdog_action": action,
+            },
+        )
+        self._append_task_event_record(
+            task_id,
+            event_type="supervisor_watchdog_warning",
+            status=task_status,
+            title="Supervisor watchdog warning",
+            payload=payload,
+        )
+        return finding
 
     async def _run_supervisor(
         self,
@@ -1413,10 +2026,54 @@ class ControlLoopSupervisor:
                     if now >= ends_at and completed_iterations > 0:
                         break
 
-                    scheduler_entry = self._next_scheduler_entry(runtime_state)
+                    self._record_supervisor_heartbeat(
+                        task_id=task_id,
+                        runtime_state=runtime_state,
+                        reason="scheduler_selecting",
+                        objective=objective,
+                        emit_event=(iteration == completed_iterations + 1),
+                    )
+                    scheduler_selection = self._select_scheduler_entry(
+                        runtime_state,
+                        now=now,
+                    )
+                    for skipped_entry in scheduler_selection.skipped_entries:
+                        self._append_task_event_record(
+                            task_id,
+                            event_type="scheduler_worker_stale_entry",
+                            status="running",
+                            title="Scheduler entry skipped",
+                            payload={
+                                "summary": "Skipped a stale or expired scheduler queue entry.",
+                                "iteration": iteration,
+                                **skipped_entry,
+                            },
+                        )
+                    scheduler_entry = scheduler_selection.entry
                     if scheduler_entry is not None:
+                        self._set_current_node(runtime_state, scheduler_entry.node_id)
+                        self._append_task_event_record(
+                            task_id,
+                            event_type="scheduler_worker_decision",
+                            status="running",
+                            title="Scheduler worker decision",
+                            payload={
+                                "summary": "Selected scheduler queue entry for worker execution.",
+                                "iteration": iteration,
+                                "queue": scheduler_entry.queue.value,
+                                "entry": scheduler_entry.model_dump(mode="json"),
+                                "skipped_entries": scheduler_selection.skipped_entries,
+                                "queue_counts": runtime_state["queue_state"].counts(),
+                            },
+                        )
                         available_at = _datetime_timestamp(scheduler_entry.available_at)
                         if available_at is not None and available_at > now:
+                            self._record_supervisor_heartbeat(
+                                task_id=task_id,
+                                runtime_state=runtime_state,
+                                reason="scheduler_waiting",
+                                objective=objective,
+                            )
                             self._update_task_record(
                                 task_id,
                                 artifacts={
@@ -1467,7 +2124,23 @@ class ControlLoopSupervisor:
                                 "resumed": resumed,
                             },
                         )
+                    else:
+                        self._append_task_event_record(
+                            task_id,
+                            event_type="scheduler_worker_noop",
+                            status="running",
+                            title="Scheduler worker idle",
+                            payload={
+                                "summary": "No actionable scheduler queue entry remained.",
+                                "iteration": iteration,
+                                "skipped_entries": scheduler_selection.skipped_entries,
+                                "queue_counts": runtime_state["queue_state"].counts(),
+                            },
+                        )
+                        break
 
+                    active_node: DurableTaskNode = runtime_state["node"]
+                    active_goal = active_node.description or loop_goal
                     self._update_task_record(
                         task_id,
                         artifacts={
@@ -1475,6 +2148,7 @@ class ControlLoopSupervisor:
                                 "iteration": iteration,
                                 "next_run_at": now,
                                 "child_task_ids": child_task_ids,
+                                "active_node_id": active_node.node_id,
                             }
                         },
                     )
@@ -1486,6 +2160,7 @@ class ControlLoopSupervisor:
                         payload={
                             "summary": f"Starting iteration {iteration}.",
                             "iteration": iteration,
+                            "active_node_id": active_node.node_id,
                         },
                     )
 
@@ -1494,7 +2169,7 @@ class ControlLoopSupervisor:
                             user_id=user_id,
                             session_id=control_session_id,
                             owner_session_id=owner_session_id,
-                            goal=loop_goal,
+                            goal=active_goal,
                             constraints=constraints,
                             request_id=None,
                             source="supervisor",
@@ -1536,8 +2211,10 @@ class ControlLoopSupervisor:
                         "verification_report_id": result.verification_report_id,
                         "needs_human": bool(result.metadata.get("needs_human")),
                         "child_task_id": child_task_id,
+                        "active_node_id": active_node.node_id,
                         "failure_type": runtime_report["failure_type"],
                         "scheduler_queue": runtime_report["scheduler_queue"],
+                        "node_scheduler_queue": runtime_report["node_scheduler_queue"],
                         "budget_exhausted": bool(
                             runtime_report["budget_state"].get("budget_exhausted")
                         ),
@@ -1568,13 +2245,19 @@ class ControlLoopSupervisor:
                             "runtime": {
                                 "recovery_decision": runtime_report["recovery_decision"],
                                 "scheduler_queue_entry": runtime_report["scheduler_queue_entry"],
+                                "scheduler_skipped_entries": runtime_report[
+                                    "scheduler_skipped_entries"
+                                ],
                                 "budget_state": runtime_report["budget_state"],
                                 "escalation_record": runtime_report["escalation_record"],
                             },
                         },
                     )
 
-                    if runtime_report["scheduler_queue"] == SchedulerQueueKind.WAITING_FOR_APPROVAL.value:
+                    if (
+                        runtime_report["scheduler_queue"]
+                        == SchedulerQueueKind.WAITING_FOR_APPROVAL.value
+                    ):
                         await self._finish_waiting_for_approval(
                             task_id=task_id,
                             owner_session_id=owner_session_id,
@@ -1617,7 +2300,19 @@ class ControlLoopSupervisor:
                     if iteration >= max_iterations or self._now() >= ends_at:
                         break
 
-                    next_run_at = scheduled_next_run_at if scheduled_next_run_at is not None else self._now()
+                    next_run_at = (
+                        self._now()
+                        if runtime_report["scheduler_queue"] == SchedulerQueueKind.READY.value
+                        else scheduled_next_run_at
+                        if scheduled_next_run_at is not None
+                        else self._now()
+                    )
+                    self._record_supervisor_heartbeat(
+                        task_id=task_id,
+                        runtime_state=runtime_state,
+                        reason="supervisor_waiting",
+                        objective=objective,
+                    )
                     self._update_task_record(
                         task_id,
                         artifacts={
@@ -1678,7 +2373,8 @@ class ControlLoopSupervisor:
                     title="Supervisor completed",
                     payload={
                         "summary": (
-                            f"Completed long-running supervision after {completed_iterations} successful iteration(s)."
+                            "Completed long-running supervision after "
+                            f"{completed_iterations} successful iteration(s)."
                         ),
                         "completed_iterations": completed_iterations,
                     },
@@ -1688,7 +2384,8 @@ class ControlLoopSupervisor:
                     source=_SUPERVISOR_AGENT_NAME,
                     status="completed",
                     message=(
-                        f"Long-running control supervisor completed after {completed_iterations} successful iteration(s)."
+                        "Long-running control supervisor completed after "
+                        f"{completed_iterations} successful iteration(s)."
                     ),
                     user_id=user_id,
                     task_id=task_id,
