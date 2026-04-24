@@ -42,6 +42,8 @@ from src.runtime.durable_execution_schema import (
     SchedulerQueueState,
 )
 from src.runtime.mission_contract import (
+    MissionAbortCondition,
+    MissionAbortConditionType,
     MissionContract,
     build_mission_contract,
     normalize_mission_contract,
@@ -98,6 +100,8 @@ __all__ = [
     "SchedulerQueueEntry",
     "SchedulerQueueKind",
     "SchedulerQueueState",
+    "MissionAbortCondition",
+    "MissionAbortConditionType",
     "MissionContract",
     "build_mission_contract",
     "normalize_mission_contract",

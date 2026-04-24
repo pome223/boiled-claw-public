@@ -67,15 +67,16 @@ task artifact / durable_execution / task_graph metadata / scheduler queue metada
 各 live task node から追えるようにする。
 その次の実働 slice では、この artifact を読むだけでなく live worker が scheduler queue の due entry を選んで実行する。
 Gateway restart 時には `running` な control supervisor task を `durable_execution.resume_state` から再開し、
-Mission Contract の abort conditions は `mission_aborted:*` として terminal failure に落とす。
+Mission Contract の typed abort conditions は `mission_aborted:*` として terminal failure に落とす。
 current-tab inspection の結果と verifier report は `evidence_refs` / node artifacts に明示リンクされ、
 Control UI は eval-derived report だけでなく live `artifacts.durable_execution` も同じ task graph /
 scheduler / checkpoint / evidence surface として表示する。
 この live scheduler supervisor runtime は `control_supervisor` task 向けに active だが、
 まだ general multi-node mission scheduler ではない。Startup resume は running supervisor task を page 全体で走査し、
 active handle 重複、stale handle、explicit stop の skip を task event として残す。
-将来の runtime scheduler では複数 scheduler entry の priority / due ordering、
-typed abort condition enum を明示的に扱う。
+`human_approval_required` / `guardrail_budget_exhausted` / `current_tab_connection_unavailable` などの
+abort condition は typed object として保持し、legacy string input は同じ type に正規化する。
+将来の runtime scheduler では複数 scheduler entry の priority / due ordering を明示的に扱う。
 
 その次の #94 / #95 / #96 / #97 は、physical AI 側も同じ contract-first で進める slice として扱う。
 ここで追加するのは live robotics runtime ではなく、simulation-first adapter が永続化する

@@ -327,7 +327,23 @@ HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
                         "objective": {"type": "string"},
                         "allowed_actions": {"type": "array"},
                         "forbidden_actions": {"type": "array"},
-                        "abort_conditions": {"type": "array"},
+                        "abort_conditions": {
+                            "type": "array",
+                            "items": {
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {
+                                        "type": "object",
+                                        "required": ["type"],
+                                        "properties": {
+                                            "type": {"type": "string"},
+                                            "reason": {"type": "string"},
+                                            "metadata": {"type": "object"},
+                                        },
+                                    },
+                                ]
+                            },
+                        },
                         "completion_criteria": {"type": "array"},
                         "evidence_requirements": {"type": "array"},
                         "metadata": {"type": "object"},

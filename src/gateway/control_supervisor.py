@@ -32,7 +32,11 @@ from src.runtime.durable_execution_schema import (
     SchedulerQueueKind,
     SchedulerQueueState,
 )
-from src.runtime.mission_contract import MissionContract, normalize_mission_contract
+from src.runtime.mission_contract import (
+    MissionAbortConditionType,
+    MissionContract,
+    normalize_mission_contract,
+)
 from src.runtime.orchestration_policy import (
     append_scheduler_queue_entry,
     budget_exhaustion_reasons,
@@ -53,6 +57,24 @@ from src.tools.tasks import (
 _SUPERVISOR_AGENT_NAME = "control_supervisor"
 
 
+def _abort_condition_type_values(mission_contract: MissionContract) -> list[str]:
+    return [condition.type.value for condition in mission_contract.abort_conditions]
+
+
+def _abort_condition_payloads(mission_contract: MissionContract) -> list[dict[str, Any]]:
+    return [
+        condition.model_dump(mode="json")
+        for condition in mission_contract.abort_conditions
+    ]
+
+
+def _abort_condition_metadata(mission_contract: MissionContract) -> dict[str, Any]:
+    return {
+        "abort_conditions": _abort_condition_payloads(mission_contract),
+        "abort_condition_types": _abort_condition_type_values(mission_contract),
+    }
+
+
 def _format_mission_contract_section(mission_contract: MissionContract | None) -> str:
     if mission_contract is None:
         return ""
@@ -65,7 +87,7 @@ def _format_mission_contract_section(mission_contract: MissionContract | None) -
     sections = [
         ("allowed_actions", mission_contract.allowed_actions),
         ("forbidden_actions", mission_contract.forbidden_actions),
-        ("abort_conditions", mission_contract.abort_conditions),
+        ("abort_conditions", _abort_condition_type_values(mission_contract)),
         ("completion_criteria", mission_contract.completion_criteria),
         ("evidence_requirements", mission_contract.evidence_requirements),
     ]
@@ -147,7 +169,7 @@ def _queue_entry_for_node(
     }
     if mission_contract is not None:
         metadata["mission_contract_id"] = mission_contract.contract_id
-        metadata["abort_conditions"] = list(mission_contract.abort_conditions)
+        metadata.update(_abort_condition_metadata(mission_contract))
     return SchedulerQueueEntry(
         entry_id=f"{node_id}/queue",
         node_id=node_id,
@@ -783,7 +805,7 @@ class ControlLoopSupervisor:
                 "mission_contract_id": mission_contract.contract_id,
                 "allowed_actions": list(mission_contract.allowed_actions),
                 "forbidden_actions": list(mission_contract.forbidden_actions),
-                "abort_conditions": list(mission_contract.abort_conditions),
+                **_abort_condition_metadata(mission_contract),
                 "evidence_requirements": list(mission_contract.evidence_requirements),
             },
         )
@@ -907,19 +929,19 @@ class ControlLoopSupervisor:
         next_queue: SchedulerQueueKind,
         budget_exhausted: bool,
     ) -> str | None:
-        aborts = {str(item or "").strip().lower() for item in mission_contract.abort_conditions}
+        aborts = mission_contract.abort_condition_types
         if not aborts:
             return None
         if (
-            "human approval required" in aborts
+            MissionAbortConditionType.HUMAN_APPROVAL_REQUIRED in aborts
             and next_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL
         ):
-            return "human approval required"
+            return MissionAbortConditionType.HUMAN_APPROVAL_REQUIRED.value
         if (
-            "guardrail budget exhausted" in aborts
+            MissionAbortConditionType.GUARDRAIL_BUDGET_EXHAUSTED in aborts
             and budget_exhausted
         ):
-            return "guardrail budget exhausted"
+            return MissionAbortConditionType.GUARDRAIL_BUDGET_EXHAUSTED.value
         text = " ".join(
             str(part or "")
             for part in (
@@ -928,17 +950,21 @@ class ControlLoopSupervisor:
                 result.metadata.get("normalized_failure_type"),
             )
         ).lower()
-        if not result.success and "current tab connection unavailable" in aborts and any(
-            token in text
-            for token in (
-                "current tab extension",
-                "current_tab",
-                "all connection attempts failed",
-                "connection unavailable",
-                "disconnected",
+        if (
+            not result.success
+            and MissionAbortConditionType.CURRENT_TAB_CONNECTION_UNAVAILABLE in aborts
+            and any(
+                token in text
+                for token in (
+                    "current tab extension",
+                    "current_tab",
+                    "all connection attempts failed",
+                    "connection unavailable",
+                    "disconnected",
+                )
             )
         ):
-            return "current tab connection unavailable"
+            return MissionAbortConditionType.CURRENT_TAB_CONNECTION_UNAVAILABLE.value
         return None
 
     def _serialize_runtime_state(
@@ -1212,7 +1238,7 @@ class ControlLoopSupervisor:
                 "mission_contract_id": mission_contract.contract_id,
                 "allowed_actions": list(mission_contract.allowed_actions),
                 "forbidden_actions": list(mission_contract.forbidden_actions),
-                "abort_conditions": list(mission_contract.abort_conditions),
+                **_abort_condition_metadata(mission_contract),
                 "evidence_requirements": list(mission_contract.evidence_requirements),
             }
         )
