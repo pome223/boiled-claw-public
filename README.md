@@ -891,7 +891,7 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 
 Use the supervisor surface when you want the existing control loop to keep a long-running objective healthy without turning that objective into app-specific core logic.
 
-The live supervisor now runs as a durable mission worker for `control_supervisor` tasks: each iteration is selected from the persisted scheduler queue, resumed after Gateway restart when the parent task is still `running`, and terminated as `mission_aborted:*` when a Mission Contract abort condition such as `human approval required` matches. Startup resume scans every page of running supervisor tasks and keeps duplicate active handles, stale handles, and explicit operator stops visible as task events. Successful current-tab checks link `current_tab_info` and verifier reports into the durable task graph so the Control UI can show the Mission Contract, queue state, checkpoints, evidence refs, and abort reason from the same task artifact. This runtime intentionally remains supervisor-owned; a general multi-node mission scheduler, stricter queue prioritization, and typed abort condition enums are follow-on work.
+The live supervisor now runs as a durable mission worker for `control_supervisor` tasks: each iteration is selected from the persisted scheduler queue, resumed after Gateway restart when the parent task is still `running`, and terminated as `mission_aborted:*` when a typed Mission Contract abort condition such as `human_approval_required` matches. Startup resume scans every page of running supervisor tasks and keeps duplicate active handles, stale handles, and explicit operator stops visible as task events. Successful current-tab checks link `current_tab_info` and verifier reports into the durable task graph so the Control UI can show the Mission Contract, queue state, checkpoints, evidence refs, and abort reason from the same task artifact. This runtime intentionally remains supervisor-owned; a general multi-node mission scheduler and stricter queue prioritization are follow-on work.
 
 ```bash
 curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
@@ -913,13 +913,19 @@ curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
       "objective": "Keep the current-tab sheet healthy for the next hour",
       "allowed_actions": ["current_tab.read", "current_tab.fill", "desktop.screenshot"],
       "forbidden_actions": ["leave the target sheet"],
-      "abort_conditions": ["human approval required", "guardrail budget exhausted"],
+      "abort_conditions": [
+        {"type": "human_approval_required"},
+        {"type": "guardrail_budget_exhausted"}
+      ],
       "completion_criteria": ["target cell evidence is visible"],
       "evidence_requirements": ["post-action screenshot", "verifier verdict"]
     },
     "duration_seconds": 3600,
     "interval_seconds": 60
   }'
+
+# Legacy strings such as "human approval required" still normalize to typed
+# abort conditions for backwards compatibility.
 
 # Later, request a graceful stop at the current iteration boundary.
 curl -sS -X POST http://127.0.0.1:18789/tasks/{task_id}/cancel

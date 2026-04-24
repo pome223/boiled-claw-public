@@ -9,7 +9,11 @@ from src.gateway.control_supervisor import (
     build_maintenance_goal,
 )
 from src.runtime.durable_execution_schema import GuardrailBudgetPolicy
-from src.runtime.mission_contract import MissionContract, build_mission_contract
+from src.runtime.mission_contract import (
+    MissionAbortConditionType,
+    MissionContract,
+    build_mission_contract,
+)
 from src.runtime.task_store import TaskStore
 
 
@@ -230,13 +234,22 @@ async def test_control_supervisor_persists_mission_contract_in_live_artifacts(tm
     assert "target cell evidence is visible" in child_goals[0]
     durable = parent["artifacts"]["durable_execution"]
     assert durable["mission_contract"]["contract_id"] == "mission-live-test"
+    assert durable["mission_contract"]["abort_conditions"][0]["type"] == (
+        MissionAbortConditionType.HUMAN_APPROVAL_REQUIRED.value
+    )
     assert durable["task_graph"]["metadata"]["mission_contract_id"] == "mission-live-test"
     node = durable["task_graph"]["nodes"][0]
     assert node["completion_criteria"] == ["target cell evidence is visible"]
     assert node["metadata"]["evidence_requirements"] == ["post-action screenshot"]
+    assert node["metadata"]["abort_condition_types"] == [
+        MissionAbortConditionType.HUMAN_APPROVAL_REQUIRED.value
+    ]
     assert node["artifacts"][0]["kind"] == "mission_contract"
     queue_entry = durable["scheduler_state"]["completed_queue"][0]
     assert queue_entry["metadata"]["mission_contract_id"] == "mission-live-test"
+    assert queue_entry["metadata"]["abort_conditions"][0]["type"] == (
+        MissionAbortConditionType.HUMAN_APPROVAL_REQUIRED.value
+    )
 
 
 @pytest.mark.asyncio
@@ -1085,13 +1098,168 @@ async def test_control_supervisor_aborts_when_contract_forbids_human_approval(tm
     parent = store.get(started.task["task_id"])
     assert parent is not None
     assert parent["status"] == "failed"
-    assert parent["error"] == "mission_aborted:human approval required"
+    assert parent["error"] == "mission_aborted:human_approval_required"
     assert parent["artifacts"]["result"]["mission_aborted"] is True
     durable = parent["artifacts"]["durable_execution"]
     assert durable["scheduler_state"]["blocked_queue"][0]["reason"] == (
-        "mission_aborted:human approval required"
+        "mission_aborted:human_approval_required"
     )
     assert durable["scheduler_state"]["waiting_for_approval_queue"] == []
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_aborts_when_typed_budget_condition_matches(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    child_calls: list[int] = []
+    mission_contract = build_mission_contract(
+        contract_id="mission-budget-abort-test",
+        objective="Keep the sheet healthy",
+        abort_conditions=[
+            {"type": MissionAbortConditionType.GUARDRAIL_BUDGET_EXHAUSTED.value}
+        ],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        call_index = len(child_calls) + 1
+        child_calls.append(call_index)
+        child_task = store.create(
+            kind="control_loop",
+            title=f"iteration {call_index}",
+            status="failed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id=f"req-{call_index}",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="Current tab lost the target context.",
+                success=False,
+                metadata={"normalized_failure_type": "target_context_mismatch"},
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+        budget_policy=GuardrailBudgetPolicy(max_same_failure_retries=1),
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=3,
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "failed"
+    assert parent["error"] == "mission_aborted:guardrail_budget_exhausted"
+    assert child_calls == [1, 2]
+    durable = parent["artifacts"]["durable_execution"]
+    assert durable["scheduler_state"]["blocked_queue"][0]["reason"] == (
+        "mission_aborted:guardrail_budget_exhausted"
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_aborts_when_typed_current_tab_condition_matches(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    mission_contract = build_mission_contract(
+        contract_id="mission-current-tab-abort-test",
+        objective="Keep the current tab healthy",
+        abort_conditions=[
+            {"type": MissionAbortConditionType.CURRENT_TAB_CONNECTION_UNAVAILABLE.value}
+        ],
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="current tab unavailable",
+            status="failed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-current-tab",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="All connection attempts failed.",
+                success=False,
+                metadata={"error": "Current Tab extension disconnected"},
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=1,
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "failed"
+    assert parent["error"] == "mission_aborted:current_tab_connection_unavailable"
+    durable = parent["artifacts"]["durable_execution"]
+    assert durable["scheduler_state"]["blocked_queue"][0]["reason"] == (
+        "mission_aborted:current_tab_connection_unavailable"
+    )
 
 
 @pytest.mark.asyncio

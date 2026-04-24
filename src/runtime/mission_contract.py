@@ -2,16 +2,23 @@
 
 from __future__ import annotations
 
+from enum import Enum
 from hashlib import sha256
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
-_DEFAULT_ABORT_CONDITIONS = [
-    "human_approval_required",
-    "guardrail_budget_exhausted",
-    "mission_contract_violation",
+class MissionAbortConditionType(str, Enum):
+    HUMAN_APPROVAL_REQUIRED = "human_approval_required"
+    GUARDRAIL_BUDGET_EXHAUSTED = "guardrail_budget_exhausted"
+    CURRENT_TAB_CONNECTION_UNAVAILABLE = "current_tab_connection_unavailable"
+    MISSION_CONTRACT_VIOLATION = "mission_contract_violation"
+    TELEMETRY_HEALTH_UNSAFE = "telemetry_health_unsafe"
+
+
+_DEFAULT_ABORT_CONDITION_TYPES = [
+    MissionAbortConditionType.MISSION_CONTRACT_VIOLATION,
 ]
 _DEFAULT_COMPLETION_CRITERIA = [
     "objective_satisfied",
@@ -33,6 +40,65 @@ def _clean_text_list(items: list[str] | tuple[str, ...] | str | None) -> list[st
     return [str(item).strip() for item in items if str(item).strip()]
 
 
+def _normalize_abort_condition_type(value: Any) -> MissionAbortConditionType:
+    if isinstance(value, MissionAbortConditionType):
+        return value
+    text = str(value or "").strip()
+    normalized = text.lower().replace("-", "_").replace(" ", "_")
+    return MissionAbortConditionType(normalized)
+
+
+class MissionAbortCondition(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: MissionAbortConditionType
+    reason: str = ""
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_legacy_string(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return {"type": value}
+        return value
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def _strip_type(cls, value: Any) -> MissionAbortConditionType:
+        return _normalize_abort_condition_type(value)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _strip_reason(cls, value: Any) -> str:
+        return str(value or "").strip()
+
+
+def _clean_abort_conditions(
+    items: list[Any] | tuple[Any, ...] | str | dict[str, Any] | MissionAbortCondition | None,
+) -> list[MissionAbortCondition]:
+    if items is None:
+        return []
+    if isinstance(items, MissionAbortCondition):
+        return [items]
+    if isinstance(items, (str, dict)):
+        candidate: Any = items.strip() if isinstance(items, str) else items
+        return [MissionAbortCondition.model_validate(candidate)] if candidate else []
+
+    conditions: list[MissionAbortCondition] = []
+    for item in items:
+        if isinstance(item, str) and not item.strip():
+            continue
+        conditions.append(MissionAbortCondition.model_validate(item))
+    return conditions
+
+
+def _default_abort_conditions() -> list[MissionAbortCondition]:
+    return [
+        MissionAbortCondition(type=condition_type)
+        for condition_type in _DEFAULT_ABORT_CONDITION_TYPES
+    ]
+
+
 def _default_contract_id(objective: str) -> str:
     digest = sha256(objective.encode("utf-8")).hexdigest()[:12]
     return f"mission_{digest}"
@@ -45,7 +111,7 @@ class MissionContract(BaseModel):
     objective: str = Field(min_length=1)
     allowed_actions: list[str] = Field(default_factory=list)
     forbidden_actions: list[str] = Field(default_factory=list)
-    abort_conditions: list[str] = Field(default_factory=list)
+    abort_conditions: list[MissionAbortCondition] = Field(default_factory=list)
     completion_criteria: list[str] = Field(default_factory=list)
     evidence_requirements: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -58,7 +124,6 @@ class MissionContract(BaseModel):
     @field_validator(
         "allowed_actions",
         "forbidden_actions",
-        "abort_conditions",
         "completion_criteria",
         "evidence_requirements",
         mode="before",
@@ -66,6 +131,15 @@ class MissionContract(BaseModel):
     @classmethod
     def _strip_text_list(cls, value: Any) -> list[str]:
         return _clean_text_list(value)
+
+    @field_validator("abort_conditions", mode="before")
+    @classmethod
+    def _strip_abort_conditions(cls, value: Any) -> list[MissionAbortCondition]:
+        return _clean_abort_conditions(value)
+
+    @property
+    def abort_condition_types(self) -> set[MissionAbortConditionType]:
+        return {condition.type for condition in self.abort_conditions}
 
 
 def build_mission_contract(
@@ -75,7 +149,7 @@ def build_mission_contract(
     contract_id: str = "",
     allowed_actions: list[str] | tuple[str, ...] | str | None = None,
     forbidden_actions: list[str] | tuple[str, ...] | str | None = None,
-    abort_conditions: list[str] | tuple[str, ...] | str | None = None,
+    abort_conditions: list[Any] | tuple[Any, ...] | str | dict[str, Any] | None = None,
     completion_criteria: list[str] | tuple[str, ...] | str | None = None,
     evidence_requirements: list[str] | tuple[str, ...] | str | None = None,
     metadata: dict[str, Any] | None = None,
@@ -99,8 +173,8 @@ def build_mission_contract(
         objective=normalized_objective,
         allowed_actions=_clean_text_list(allowed_actions),
         forbidden_actions=normalized_forbidden_actions,
-        abort_conditions=_clean_text_list(abort_conditions)
-        or list(_DEFAULT_ABORT_CONDITIONS),
+        abort_conditions=_clean_abort_conditions(abort_conditions)
+        or _default_abort_conditions(),
         completion_criteria=_clean_text_list(completion_criteria)
         or list(_DEFAULT_COMPLETION_CRITERIA),
         evidence_requirements=_clean_text_list(evidence_requirements)
@@ -145,7 +219,7 @@ def normalize_mission_contract(
     if legacy_constraints and not resolved.forbidden_actions:
         updates["forbidden_actions"] = legacy_constraints
     if not resolved.abort_conditions:
-        updates["abort_conditions"] = list(_DEFAULT_ABORT_CONDITIONS)
+        updates["abort_conditions"] = _default_abort_conditions()
     if not resolved.completion_criteria:
         updates["completion_criteria"] = list(_DEFAULT_COMPLETION_CRITERIA)
     if not resolved.evidence_requirements:
