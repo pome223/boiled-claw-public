@@ -213,7 +213,6 @@ async def _run_cli(
 @click.pass_context
 def web(ctx, host, port, model, dry_run):
     """Start the WebSocket Gateway server."""
-    _require_api_key()
     from src.config.settings import get_settings
     from src.gateway.server import create_gateway
 
@@ -230,6 +229,12 @@ def web(ctx, host, port, model, dry_run):
     if dry_run:
         console.print("[green]Config OK. Dry-run mode — exiting.[/green]")
         return
+
+    if not os.getenv("GOOGLE_API_KEY"):
+        console.print(
+            "[yellow]![/yellow] GOOGLE_API_KEY is not set. Gateway can start, "
+            "but model-backed chat will fail until a key is configured."
+        )
 
     console.print(Panel(
         "[bold cyan]boiled-claw Gateway Server[/bold cyan] 🦀\n"
@@ -333,6 +338,46 @@ async def _run_channels():
     except KeyboardInterrupt:
         console.print("\n[dim]Stopping channels...[/dim]")
         await registry.stop_all_channels()
+
+
+# ── quickstart smoke ──────────────────────────────────────────────
+
+
+@cli.command("quickstart-smoke")
+@click.option("--gateway-url", default="http://127.0.0.1:18789", help="Gateway base URL.")
+@click.option("--user-id", default="quickstart", help="Owner user id for the smoke task.")
+@click.option(
+    "--session-id",
+    default="quickstart-local",
+    help="Owner session id for the smoke task.",
+)
+@click.option(
+    "--json",
+    "json_output",
+    is_flag=True,
+    default=False,
+    help="Print machine-readable JSON.",
+)
+def quickstart_smoke(gateway_url, user_id, session_id, json_output):
+    """Create a deterministic no-model smoke task and timeline."""
+    from src.quickstart_smoke import run_quickstart_smoke
+
+    result = run_quickstart_smoke(
+        gateway_url=gateway_url,
+        user_id=user_id,
+        session_id=session_id,
+    )
+    if json_output:
+        click.echo(json.dumps(result, ensure_ascii=True, sort_keys=True))
+        return
+
+    console.print("[green]Quickstart smoke completed.[/green]")
+    console.print(f"Task: {result['task_url']}")
+    console.print(f"Timeline: {result['timeline_url']}")
+    console.print(f"Control UI: {result['control_ui_url']}")
+    console.print(
+        "[dim]No GOOGLE_API_KEY, Chrome extension, Host Bridge, or Desktop Bridge required.[/dim]"
+    )
 
 
 # ── status ───────────────────────────────────────────────────────

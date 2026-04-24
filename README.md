@@ -28,7 +28,23 @@ Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstrea
 
 If you want the shortest path from clone to a working session, start here:
 
-1. Create your local config and set `GOOGLE_API_KEY`:
+```bash
+make quickstart
+```
+
+This creates `.env` from `.env.example` if needed, builds and starts the Gateway,
+waits for `/health` and `/protocol`, then writes a deterministic smoke task and
+verifies it through `/tasks/{task_id}` and `/tasks/{task_id}/timeline`.
+
+The quickstart smoke intentionally does **not** require a real `GOOGLE_API_KEY`,
+the Chrome extension, Host Bridge, or Desktop Bridge. It proves the first-run
+runtime is alive before you connect model-backed or host-side automation.
+
+After it completes, open `http://127.0.0.1:18789/chat`.
+
+Manual fallback:
+
+1. Create your local config:
 
    ```bash
    cp .env.example .env
@@ -56,7 +72,8 @@ Use the startup path that matches what you are trying to do:
 
 | What you want | Command | Notes |
 | --- | --- | --- |
-| Try chat / search / task UI only | `docker compose up -d --build boiled-claw-gateway` | Starts the Gateway only. This is the shortest path for the Control UI and CLI. |
+| Prove a first local runtime works | `make quickstart` | Starts the Gateway, waits for health/protocol, creates a no-model task, and verifies its timeline through HTTP. |
+| Try chat / search / task UI only | `docker compose up -d --build boiled-claw-gateway` | Starts the Gateway only. Use this after quickstart when you already have local config. |
 | Use desktop or host-side computer control too | `bash scripts/bridge_runtime.sh start` | Starts the host-side Host Bridge and Desktop Bridge processes outside Docker. This is the supported wrapper around commands such as `python -m src.main bridge desktop`. |
 | Reflect Python source changes quickly | `bash scripts/deploy_runtime.sh sync` | Starts bridges if needed, copies `src/` into the running container, and restarts the Gateway without a full rebuild. |
 | Rebuild the runtime image and restart | `bash scripts/deploy_runtime.sh build` | Starts bridges if needed, rebuilds the Gateway image, and recreates the container. |
