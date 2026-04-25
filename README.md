@@ -948,6 +948,18 @@ approved, rejected, and expired candidates remain inert runtime artifacts in
 this layer: planning, recovery, and mission reuse do not consume them yet.
 Actual reuse belongs to the future reuse-planner layer.
 
+Mission templates are contract presets, not a new execution API. The runtime
+can render named presets such as `observation_review`, `weak_evidence_probe`,
+`budget_exhaustion_probe`, `current_tab_research_to_report`, and
+`repo_maintenance_review` into validated `MissionContract v2` payloads with
+safe defaults for actions, forbidden actions, recovery policy, memory policy,
+and improvement policy. The generated contract still enters through the
+existing `POST /tasks/supervisors/control-loop` surface, and the resulting
+`control_supervisor` task remains the durable mission record. Template overrides
+may narrow allowed actions or add metadata, but default forbidden actions are
+preserved. This layer does not add `/missions`, a `missions` table, template
+execution UI, memory reuse, benchmark promotion, or physical replay.
+
 ```bash
 curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
   -H "Content-Type: application/json" \
