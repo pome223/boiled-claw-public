@@ -27,7 +27,9 @@ from src.runtime.durable_execution_schema import (
     DurableVerifierVerdictValue,
     GuardrailBudgetPolicy,
     RecoveryActionType,
+    RecoveryBudgetImpact,
     RecoveryDecision,
+    RecoveryLadderStep,
     SchedulerQueueEntry,
     SchedulerQueueKind,
     SchedulerQueueState,
@@ -44,10 +46,14 @@ from src.runtime.orchestration_policy import (
     default_guardrail_budget_policy,
     default_recovery_policies,
     job_run_status_from_verdict,
+    recovery_action_for_ladder_step,
     recovery_ladder_step_for_decision,
+    recovery_outcome_for_queue,
     recovery_policy_for_failure_type,
     repair_depth_increment,
+    scheduler_queue_for_recovery_ladder_step,
     scheduler_queue_reason,
+    select_recovery_ladder_step,
 )
 from src.runtime.mission_runtime import (
     build_mission_memory_links,
@@ -230,10 +236,10 @@ def _verdict_for_result(
     result: ExecutionResult,
     failure_type: str | None,
 ) -> DurableVerifierVerdictValue:
-    if result.success:
-        return DurableVerifierVerdictValue.PASS
     if str(failure_type or "") == "weak_evidence":
         return DurableVerifierVerdictValue.UNCERTAIN
+    if result.success:
+        return DurableVerifierVerdictValue.PASS
     return DurableVerifierVerdictValue.FAIL
 
 
@@ -361,6 +367,58 @@ def _build_live_verifier_verdict(
         replay_reference=replay_reference,
         created_at=_utc_datetime(created_at),
     )
+
+
+def _recovery_source_refs(
+    *,
+    child_task_id: str,
+    result: ExecutionResult,
+    verifier_verdict: DurableVerifierVerdict,
+) -> list[str]:
+    refs: list[str] = []
+
+    def _add_ref(value: object) -> None:
+        ref = str(value or "").strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+
+    _add_ref(f"task:{child_task_id}")
+    for ref in verifier_verdict.evidence_refs:
+        _add_ref(ref)
+    if result.verification_report_id:
+        _add_ref(f"verification_report:{result.verification_report_id}")
+    if str(result.metadata.get("error") or "").strip():
+        _add_ref(f"runtime_error:{child_task_id}")
+    return refs
+
+
+def _recovery_budget_snapshot(
+    *,
+    runtime_state: dict[str, Any],
+    runtime_hours_used: int,
+    retry_count: int,
+    pending_approvals_count: int,
+    budget_policy: GuardrailBudgetPolicy,
+    mission_contract: MissionContract,
+) -> dict[str, Any]:
+    recovery_policy = getattr(mission_contract, "recovery_policy", None)
+    max_retries_per_step = int(
+        getattr(recovery_policy, "max_retries_per_step", 0) or 0
+    )
+    return {
+        "runtime_hours_used": runtime_hours_used,
+        "llm_calls_used": runtime_state["llm_calls_used"],
+        "tool_calls_used": runtime_state["tool_calls_used"],
+        "repair_depth_used": runtime_state["repair_depth_used"],
+        "pending_approvals_count": pending_approvals_count,
+        "same_failure_retry_count": retry_count,
+        "retry_budget_remaining": max(
+            0,
+            budget_policy.max_same_failure_retries - retry_count,
+        ),
+        "max_same_failure_retries": budget_policy.max_same_failure_retries,
+        "max_retries_per_step": max_retries_per_step,
+    }
 
 
 @dataclass(frozen=True)
@@ -1011,6 +1069,7 @@ class ControlLoopSupervisor:
             "job_runs": [],
             "checkpoints": [],
             "escalations": [],
+            "recovery_decisions": [],
             "successful_artifacts": {},
             "heartbeat": {
                 "last_heartbeat_at": created_at,
@@ -1072,6 +1131,11 @@ class ControlLoopSupervisor:
         runtime_state["escalations"] = [
             DurableEscalationRecord.model_validate(item)
             for item in durable_execution.get("escalations") or []
+            if isinstance(item, dict)
+        ]
+        runtime_state["recovery_decisions"] = [
+            RecoveryDecision.model_validate(item)
+            for item in durable_execution.get("recovery_decisions") or []
             if isinstance(item, dict)
         ]
         if runtime_state["checkpoints"]:
@@ -1369,6 +1433,10 @@ class ControlLoopSupervisor:
                 key: value.model_dump(mode="json")
                 for key, value in default_recovery_policies().items()
             },
+            "recovery_decisions": [
+                item.model_dump(mode="json")
+                for item in runtime_state.get("recovery_decisions") or []
+            ],
             "scheduler_state": runtime_state["queue_state"].model_dump(mode="json"),
             "escalations": [
                 item.model_dump(mode="json") for item in runtime_state["escalations"]
@@ -1581,9 +1649,17 @@ class ControlLoopSupervisor:
             child_task_id=child_task_id,
             created_at=self._now(),
         )
+        needs_recovery = (
+            not result.success
+            or verifier_verdict.verdict != DurableVerifierVerdictValue.PASS
+            or bool(failure_type)
+        )
         policy = None
         chosen_action = None
-        if result.success:
+        preferred_step = None
+        selected_step = None
+        selection_reason = "no_recovery_needed"
+        if not needs_recovery:
             current_node_queue = SchedulerQueueKind.COMPLETED if is_multi_node else (
                 SchedulerQueueKind.PERIODIC_CHECK
                 if has_more_iterations
@@ -1598,16 +1674,6 @@ class ControlLoopSupervisor:
                 else SchedulerQueueKind.BLOCKED
             )
         retry_count = runtime_state["retry_counters"][failure_type] if failure_type else 0
-        runtime_state["llm_calls_used"] += 1 + (
-            policy.budget_impact.llm_calls if policy is not None else 0
-        )
-        runtime_state["tool_calls_used"] += max(1, len(verifier_verdict.evidence_refs)) + (
-            policy.budget_impact.tool_calls if policy is not None else 0
-        )
-        runtime_state["repair_depth_used"] += repair_depth_increment(chosen_action)
-        pending_approvals_after = runtime_state["pending_approvals_count"] + (
-            1 if current_node_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL else 0
-        )
         # Phase 0 uses a coarse hourly budget counter so live supervisor artifacts
         # stay shape-compatible with eval-derived substrate reports. If a future
         # worker needs shorter smoke budgets, promote this to a finer-grained clock.
@@ -1615,19 +1681,78 @@ class ControlLoopSupervisor:
             1,
             math.ceil(max(0.0, self._now() - runtime_state["created_at"]) / 3600.0),
         )
+        budget_before = _recovery_budget_snapshot(
+            runtime_state=runtime_state,
+            runtime_hours_used=runtime_hours_used,
+            retry_count=retry_count,
+            pending_approvals_count=runtime_state["pending_approvals_count"],
+            budget_policy=self._budget_policy,
+            mission_contract=mission_contract,
+        )
+        recovery_policy = getattr(mission_contract, "recovery_policy", None)
+        recovery_ladder = getattr(recovery_policy, "ladder", None)
+        max_retries_per_step = int(
+            getattr(recovery_policy, "max_retries_per_step", 0) or 0
+        )
+        if needs_recovery:
+            preferred_step = recovery_ladder_step_for_decision(
+                chosen_action=chosen_action,
+                next_scheduler_queue=current_node_queue,
+                budget_exhausted=False,
+            )
+            selected_step, selection_reason = select_recovery_ladder_step(
+                preferred_step=preferred_step,
+                ladder=recovery_ladder,
+                retry_count=retry_count,
+                max_retries_per_step=max_retries_per_step,
+            )
+            chosen_action = recovery_action_for_ladder_step(
+                selected_step,
+                fallback=chosen_action,
+            )
+            current_node_queue = scheduler_queue_for_recovery_ladder_step(
+                selected_step,
+                fallback=current_node_queue,
+            )
+
+        runtime_state["llm_calls_used"] += 1 + (
+            policy.budget_impact.llm_calls if policy is not None else 0
+        )
+        runtime_state["tool_calls_used"] += max(1, len(verifier_verdict.evidence_refs)) + (
+            policy.budget_impact.tool_calls if policy is not None else 0
+        )
+        runtime_state["repair_depth_used"] += repair_depth_increment(chosen_action)
         budget_reasons = budget_exhaustion_reasons(
             budget_policy=self._budget_policy,
             runtime_hours_used=runtime_hours_used,
             llm_calls_used=runtime_state["llm_calls_used"],
             tool_calls_used=runtime_state["tool_calls_used"],
             repair_depth_used=runtime_state["repair_depth_used"],
-            pending_approvals_count=pending_approvals_after,
+            pending_approvals_count=runtime_state["pending_approvals_count"],
             next_scheduler_queue=current_node_queue,
             failure_type=failure_type,
             retry_count=retry_count,
         )
+        if (
+            current_node_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL
+            and runtime_state["pending_approvals_count"] + 1
+            > self._budget_policy.max_pending_approvals
+            and "max_pending_approvals_exhausted" not in budget_reasons
+        ):
+            budget_reasons.append("max_pending_approvals_exhausted")
         budget_exhausted = bool(budget_reasons)
         if budget_exhausted:
+            selected_step, selection_reason = select_recovery_ladder_step(
+                preferred_step=preferred_step,
+                ladder=recovery_ladder,
+                retry_count=retry_count,
+                max_retries_per_step=max_retries_per_step,
+                budget_exhausted=True,
+            )
+            chosen_action = recovery_action_for_ladder_step(
+                selected_step,
+                fallback=RecoveryActionType.MARK_FAILED,
+            )
             current_node_queue = SchedulerQueueKind.BLOCKED
         abort_reason = self._mission_contract_abort_reason(
             mission_contract=mission_contract,
@@ -1638,14 +1763,40 @@ class ControlLoopSupervisor:
         if abort_reason:
             current_node_queue = SchedulerQueueKind.BLOCKED
             chosen_action = RecoveryActionType.MARK_FAILED
+            selected_step = RecoveryLadderStep.PAUSE_OR_BLOCK
+            selection_reason = f"mission_contract_abort:{abort_reason}"
+        pending_approvals_after = runtime_state["pending_approvals_count"] + (
+            1 if current_node_queue == SchedulerQueueKind.WAITING_FOR_APPROVAL else 0
+        )
+        budget_after = _recovery_budget_snapshot(
+            runtime_state=runtime_state,
+            runtime_hours_used=runtime_hours_used,
+            retry_count=retry_count + (1 if failure_type and needs_recovery else 0),
+            pending_approvals_count=pending_approvals_after,
+            budget_policy=self._budget_policy,
+            mission_contract=mission_contract,
+        )
         decision = RecoveryDecision(
             node_id=runtime_state["node_id"],
             failure_type=failure_type,
             chosen_action=chosen_action,
-            recovery_ladder_step=recovery_ladder_step_for_decision(
-                chosen_action=chosen_action,
-                next_scheduler_queue=current_node_queue,
-                budget_exhausted=budget_exhausted,
+            recovery_ladder_step=selected_step,
+            selected_step=selected_step,
+            attempt_index=retry_count + (1 if failure_type and needs_recovery else 0),
+            budget_before=budget_before,
+            budget_after=budget_after,
+            outcome=recovery_outcome_for_queue(
+                current_node_queue,
+                result_success=result.success and not needs_recovery,
+                aborted=bool(abort_reason),
+            ),
+            budget_consumption=(
+                policy.budget_impact if policy is not None else RecoveryBudgetImpact()
+            ),
+            source_refs=_recovery_source_refs(
+                child_task_id=child_task_id,
+                result=result,
+                verifier_verdict=verifier_verdict,
             ),
             policy=policy,
             next_scheduler_queue=current_node_queue,
@@ -1658,6 +1809,13 @@ class ControlLoopSupervisor:
         )
         if abort_reason:
             queue_reason = f"mission_aborted:{abort_reason}"
+        decision.reason = (
+            queue_reason
+            if selection_reason in {"mission_recovery_policy_selected", "no_recovery_needed"}
+            else f"{selection_reason}:{queue_reason}"
+        )
+        if selected_step is not None or needs_recovery or budget_exhausted or abort_reason:
+            runtime_state["recovery_decisions"].append(decision)
         available_at = _available_at_for_queue(
             current_node_queue,
             next_run_at=next_run_at,
@@ -1698,10 +1856,16 @@ class ControlLoopSupervisor:
             queue_entry.metadata["recovery_ladder_step"] = (
                 decision.recovery_ladder_step.value
             )
+        if decision.selected_step is not None:
+            queue_entry.metadata["selected_step"] = decision.selected_step.value
+        if decision.outcome is not None:
+            queue_entry.metadata["recovery_outcome"] = decision.outcome.value
+        if decision.reason:
+            queue_entry.metadata["recovery_reason"] = decision.reason
         if abort_reason:
             queue_entry.metadata["abort_reason"] = abort_reason
 
-        if failure_type and not result.success:
+        if failure_type and needs_recovery:
             runtime_state["retry_counters"][failure_type] += 1
 
         node.status = _task_node_status_for_queue(current_node_queue)
@@ -1728,10 +1892,10 @@ class ControlLoopSupervisor:
             mission_contract=mission_contract,
         )
 
-        if result.success:
+        if result.success and not needs_recovery:
             runtime_state["successful_artifacts"][node.node_id] = list(node.artifacts)
 
-        if is_multi_node and result.success:
+        if is_multi_node and result.success and not needs_recovery:
             self._queue_ready_dependency_nodes(
                 runtime_state,
                 mission_contract=mission_contract,

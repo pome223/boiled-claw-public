@@ -339,6 +339,8 @@ async def test_control_supervisor_graceful_stop_marks_task_cancelled(tmp_path):
     assert parent["status"] == "cancelled"
     assert parent["artifacts"]["progress"]["stop_requested"] is True
     assert parent["artifacts"]["progress"]["completed_iterations"] == 1
+    assert "mission_review" not in parent["artifacts"]
+    assert parent["error"] is None
 
 
 @pytest.mark.asyncio
@@ -582,6 +584,16 @@ async def test_control_supervisor_blocks_when_retry_budget_is_exhausted(tmp_path
         "max_same_failure_retries_exhausted"
     ]
     assert durable["resume_state"]["reason"] == "awaiting_unblock_or_human_input"
+    decisions = durable["recovery_decisions"]
+    assert len(decisions) == 2
+    assert [decision["selected_step"] for decision in decisions] == [
+        "alternate_capability",
+        "pause_or_block",
+    ]
+    assert [decision["attempt_index"] for decision in decisions] == [1, 2]
+    assert decisions[-1]["outcome"] == "blocked"
+    assert decisions[-1]["budget_before"]["retry_budget_remaining"] == 0
+    assert decisions[-1]["budget_after"]["same_failure_retry_count"] == 2
 
 
 @pytest.mark.asyncio
@@ -652,6 +664,88 @@ async def test_control_supervisor_weak_evidence_waits_for_approval(tmp_path):
     assert durable["scheduler_state"]["waiting_for_approval_queue"][0]["node_id"].endswith("/maintain-objective")
     assert durable["escalations"][0]["approval_request_id"].startswith("approval:")
     assert durable["resume_state"]["reason"] == "awaiting_approval"
+    decision = durable["recovery_decisions"][0]
+    assert decision["failure_type"] == "weak_evidence"
+    assert decision["selected_step"] == "verify_state"
+    assert decision["outcome"] == "paused"
+    assert decision["attempt_index"] == 1
+    assert decision["budget_before"]["retry_budget_remaining"] == 3
+    assert decision["budget_after"]["same_failure_retry_count"] == 1
+    assert decision["source_refs"][0].startswith("task:")
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_success_with_weak_evidence_enters_recovery(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-weak-success",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="Action completed, but destination-bound evidence is weak.",
+                success=True,
+                metadata={
+                    "verification_status": "partial_pass",
+                    "verification_report": {"failure_type": "weak_evidence"},
+                },
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="Keep the sheet healthy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=2,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "pending"
+    durable = parent["artifacts"]["durable_execution"]
+    verdict = durable["job_runs"][0]["verifier_verdict"]
+    assert verdict["verdict"] == "uncertain"
+    assert verdict["failure_type"] == "weak_evidence"
+    decision = durable["recovery_decisions"][0]
+    assert decision["failure_type"] == "weak_evidence"
+    assert decision["selected_step"] == "verify_state"
+    assert decision["outcome"] == "paused"
+    assert durable["scheduler_state"]["waiting_for_approval_queue"]
 
 
 @pytest.mark.asyncio
@@ -706,6 +800,267 @@ async def test_control_supervisor_classifies_child_policy_exception(tmp_path):
     assert durable["scheduler_state"]["waiting_for_approval_queue"][0]["reason"] == (
         "human_approval_required"
     )
+    decision = durable["recovery_decisions"][0]
+    assert decision["selected_step"] == "request_approval"
+    assert decision["outcome"] == "paused"
+    assert any(ref.startswith("runtime_error:") for ref in decision["source_refs"])
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_tool_failure_persists_recovery_decision_and_recovers(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    child_calls: list[int] = []
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        call_index = len(child_calls) + 1
+        child_calls.append(call_index)
+        child_task = store.create(
+            kind="control_loop",
+            title=f"iteration {call_index}",
+            status="failed" if call_index == 1 else "completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        if call_index == 1:
+            return (
+                ExecutionResult(
+                    request_id="req-tool-timeout",
+                    session_id=kwargs["session_id"],
+                    user_id=kwargs["user_id"],
+                    final_text="Tool call timed out.",
+                    success=False,
+                    metadata={
+                        "normalized_failure_type": "tool_timeout",
+                        "error": "tool timeout",
+                    },
+                ),
+                child_task["task_id"],
+            )
+        return (
+            ExecutionResult(
+                request_id="req-recovered",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="Recovered after retry.",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="Keep the tool-backed mission healthy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=2,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "completed"
+    assert child_calls == [1, 2]
+    durable = parent["artifacts"]["durable_execution"]
+    decision = durable["recovery_decisions"][0]
+    assert decision["failure_type"] == "tool_timeout"
+    assert decision["selected_step"] == "retry_smaller_step"
+    assert decision["outcome"] == "recovery_scheduled"
+    assert decision["next_scheduler_queue"] == "retry_later"
+    assert any(ref.startswith("runtime_error:") for ref in decision["source_refs"])
+    assert durable["mission_contract"]["recovery_policy"]["ladder"]
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_mission_recovery_policy_can_escalate_to_approval(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    mission_contract = build_mission_contract(
+        contract_id="mission-recovery-policy-approval",
+        objective="Keep the tool-backed mission healthy",
+        recovery_policy={
+            "max_retries_per_step": 0,
+            "ladder": ["retry_smaller_step", "request_approval", "pause_or_block"],
+        },
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="iteration",
+            status="failed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-tool-timeout",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="Tool call timed out.",
+                success=False,
+                metadata={
+                    "normalized_failure_type": "tool_timeout",
+                    "error": "tool timeout",
+                },
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=2,
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "pending"
+    durable = parent["artifacts"]["durable_execution"]
+    decision = durable["recovery_decisions"][0]
+    assert decision["selected_step"] == "request_approval"
+    assert decision["chosen_action"] == "request_human_approval"
+    assert decision["outcome"] == "paused"
+    assert decision["reason"].startswith(
+        "mission_recovery_step_retry_limit_exhausted:"
+    )
+    assert durable["scheduler_state"]["waiting_for_approval_queue"][0][
+        "metadata"
+    ]["selected_step"] == "request_approval"
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_approval_step_respects_pending_approval_budget(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    mission_contract = {
+        "contract_id": "legacy-mission-approval-budget",
+        "objective": "Keep the tool-backed mission healthy",
+        "recovery_policy": {
+            "max_retries_per_step": 0,
+            "ladder": ["retry_smaller_step", "request_approval", "pause_or_block"],
+        },
+    }
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(session_id: str, *, source: str, status: str, message: str, **kwargs):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_task = store.create(
+            kind="control_loop",
+            title="iteration",
+            status="failed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+        )
+        return (
+            ExecutionResult(
+                request_id="req-tool-timeout",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="Tool call timed out.",
+                success=False,
+                metadata={
+                    "normalized_failure_type": "tool_timeout",
+                    "error": "tool timeout",
+                },
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+        budget_policy=GuardrailBudgetPolicy(max_pending_approvals=0),
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=2,
+        mission_contract=mission_contract,
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    assert parent["status"] == "blocked"
+    durable = parent["artifacts"]["durable_execution"]
+    assert durable["scheduler_state"]["waiting_for_approval_queue"] == []
+    assert durable["scheduler_state"]["blocked_queue"][0]["reason"] == "guardrail_budget_exhausted"
+    assert durable["checkpoints"][-1]["budget"]["pending_approvals_count"] == 0
+    decision = durable["recovery_decisions"][0]
+    assert decision["selected_step"] == "pause_or_block"
+    assert decision["outcome"] == "blocked"
+    assert decision["budget_exhausted_reasons"] == ["max_pending_approvals_exhausted"]
+    assert decision["budget_after"]["pending_approvals_count"] == 0
 
 
 @pytest.mark.asyncio
