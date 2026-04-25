@@ -213,6 +213,16 @@ metric regression, while still representing operator approval as required. This
 is groundwork for future benchmark-gated promotion; it does not promote memory,
 run canaries, reuse approved artifacts, add UI, or introduce mission storage.
 
+Promotion packages are the artifact-only bridge from post-mission review to a
+future promotion pipeline. `mission_review.improvement_candidates` can be
+normalized into typed promotion candidates, mapped to required eval suites, and
+packaged with baseline/candidate `mission_eval_result.v1`,
+`mission_regression_gate.v1`, and optional security eval evidence. The package
+always remains `approval_status=pending` and `requires_operator_approval=true`.
+It makes the benchmark-gate decision inspectable, but it does not create
+approved memory, skills, capabilities, policies, code patches, runtime reuse,
+UI behavior, `/missions`, or a `missions` table.
+
 Non-goals for this layer: no memory promotion, no approved improvements, no
 canary benchmark execution, no `/missions` API, and no `missions` table.
 
