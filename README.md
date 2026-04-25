@@ -5,24 +5,74 @@
 <h1 align="center">boiled-claw</h1>
 
 <p align="center">
-  A hackable self-improving closed-loop agent bridging computer use and physical AI.
+  Closed-loop agent runtime for browser-first work and simulation-first physical validation.
 </p>
 
 <p align="center">
-  Browser-first. Policy-bounded. Physical-ready.
+  Browser-first. Verification-driven. Mission-oriented. Simulation-ready.
 </p>
 
-**Browser-first computer use needs more than tool calling.** boiled-claw is an open, lightweight reference system for agents that can plan, execute, verify, repair, and improve across browsers, desktop apps, and simulation-first physical AI environments.
+boiled-claw is an open, lightweight reference system for agents that can plan,
+execute, verify, repair, review, and improve across browsers, desktop apps, and
+simulation-first physical AI environments.
 
-Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly, upstream-curated.
+Built on Google Agent Development Kit (ADK). MIT License. Fork-friendly,
+upstream-curated.
 
-> [!WARNING]
-> boiled-claw can execute shell commands, read and write files, control browsers, and drive desktop UI on the host machine.
-> This repository is a reference implementation, not a hardened security product. Tool approvals and security policies reduce risk, but do not guarantee safety.
-> Do not expose Gateway / Host Bridge / Desktop Bridge to untrusted networks. Run it only in environments you control, and prefer isolated or disposable machines for experimentation.
-> By using or running this code, you accept all risk. To the maximum extent permitted by law, the author disclaims all liability for any damage, data loss, security incident, account action, system instability, or other harm resulting from its use, misuse, or modification.
+> [!CAUTION]
+> This is a reference implementation, not a hardened security product. It can
+> run shell/file/browser/desktop actions on machines you control. Keep Gateway
+> and bridges on loopback or trusted networks, and use disposable environments
+> for experiments.
+> By using or running this code, you accept responsibility for any effects on
+> your machine, accounts, data, or connected services.
 
-> **Note:** This is a maintainer-led reference implementation. Upstream is curated for design coherence — no support or review commitment. See [CONTRIBUTING.md](CONTRIBUTING.md).
+## Why boiled-claw
+
+The next important open agent framework will not be the biggest model wrapper.
+It will be the most editable closed-loop system that can move from browser tasks
+toward real-world operations without changing its core philosophy.
+
+The winning agent stack in 2026 is not just "LLM + tools." It is closer to an
+AutoResearch-style research / act / evaluate loop:
+
+```text
+observe -> act -> verify -> store trajectory -> improve
+```
+
+boiled-claw keeps the OpenClaw spirit of local-first, composable, inspectable
+tooling, but puts verification and recovery at the center. Browser automation
+and physical AI look different at the actuator layer, but they share the same
+control vocabulary: mission contract, evidence, verifier verdict, recovery
+decision, replay, benchmark gate, and operator approval.
+
+## Demo
+
+Example flow: the operator asks boiled-claw, in Japanese, to research notable
+`新々刀` swordsmiths and summarize the findings into Google Sheets. The animation
+is a README-friendly conversion of a real execution recording, followed by the
+captured result state from the Control UI.
+
+![Current-browser Google Sheets execution demo](assets/current-browser-sheets-demo-20260421.gif)
+
+![Current-browser Google Sheets result screenshot](assets/current-browser-sheets-result-20260421.jpg)
+
+## What boiled-claw Is
+
+- A verification-driven control plane across current tabs, managed browsers,
+  desktop fallback, and simulation-first adapters.
+- A trajectory-native closed-loop runtime where evidence, replay, recovery, and
+  review are first-class artifacts.
+- A maintainer-led reference system for approval-gated self-improvement:
+  candidates are measured in canaries before memory, skill, capability, policy,
+  or code promotion.
+
+## What boiled-claw Is Not
+
+- An unstoppable agent without a kill switch.
+- A fully autonomous robotics stack.
+- A safety-free self-modifying runtime.
+- A polished SaaS abstraction that hides the internals.
 
 ## Quickstart
 
@@ -97,41 +147,12 @@ The UI above shows the typical flow: a user request, router handoff, an approval
 
 ## Architecture Overview
 
-Start with the short English overview in [architecture/README.md](architecture/README.md) if you want the system shape before reading the deeper design notes.
-The root [ARCHITECTURE.md](ARCHITECTURE.md) is a detailed Japanese-first deep dive, while the `architecture/` directory contains focused notes on routing, host bridges, desktop bridges, control-loop memory, and trajectory-native self-improvement.
-
-## Thesis
-
-boiled-claw keeps the OpenClaw spirit of local-first, composable, inspectable tooling, but reframes it around the agent stack that matters in 2026: browser-first computer use, verification-driven recovery, measured improvement, and a clear adapter path toward physical AI environments.
-
-The winning agent stack in 2026 is not just "LLM + tools." It is a Karpathy-style AutoResearch closed loop: observe -> act -> verify -> store trajectory -> improve.
-
-Most open agents stop at browser automation. Most physical AI stacks stop at simulation and robotics infrastructure. boiled-claw sits between them as a policy-bounded control plane that can operate current tabs, managed browsers, desktop UI, and future simulator / robotics adapters without changing its core philosophy.
-
-## What boiled-claw Is
-
-- A browser-first computer-use system with current-tab preference and desktop fallback
-- A closed-loop execution runtime with verification and repair
-- A local-first, Docker-ready reference system for skills, MCP servers, and agent orchestration
-- A trajectory-aware computer-use runtime with recovery-aware tooling and inspection
-- A self-improvement workflow with offline canaries, benchmark gates, and typed memory
-- A physical-ready adapter surface for simulators and robotics runtimes
-
-## What boiled-claw Is Not
-
-- An unstoppable agent without a kill switch
-- A fully autonomous robotics stack
-- A safety-free self-modifying runtime
-- A polished SaaS abstraction that hides the internals
-
-## Design Principles
-
-- Browser first: prefer structured current-tab and browser actions before pixel-only desktop control
-- Recovery over bravado: detect failure, retry carefully, escalate when needed
-- Improvement through evidence: keep trajectories, score outcomes, and learn from measured failures
-- Self-improvement with boundaries: candidate changes belong in isolated canaries before promotion
-- Physical-ready, not robotics-bloated: start with simulator and adapter surfaces before claiming end-to-end autonomy
-- Small enough to fork: keep the system understandable, inspectable, and hackable
+Start with the short English overview in
+[architecture/README.md](architecture/README.md) if you want the system shape
+before reading deeper design notes. The root [ARCHITECTURE.md](ARCHITECTURE.md)
+is a Japanese-first deep dive, while `architecture/` contains focused notes on
+routing, bridges, control-loop memory, Mission OS, and trajectory-native
+self-improvement.
 
 ## Current Direction
 
@@ -160,7 +181,7 @@ What exists today:
 - Live `control_supervisor` missions with Mission Contract, task graph,
   scheduler queue, heartbeat, checkpoint, resume, and typed recovery decisions.
 - Mission scorecards, post-mission review, approval-gated memory candidates,
-  mission templates, and deterministic mission eval suites.
+  mission templates, deterministic mission eval suites, and promotion packages.
 - Current-tab Google Sheets vertical slice with destination-bound evidence and
   Control UI visibility.
 - Simulation-first physical runtime artifacts for validation, telemetry,
@@ -168,7 +189,7 @@ What exists today:
 
 Near-term work is focused on the promotion loop:
 
-- Connect improvement candidates to canary benchmark promotion.
+- Aggregate promotion packages across canary benchmark suites.
 - Separate approved memory, skill, capability, and policy promotion paths.
 - Add mission reuse planning with visible provenance.
 - Keep physical work simulation-first until replay and eval gates are mature.
@@ -178,42 +199,34 @@ overview and
 [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md)
 for the deeper design.
 
-## The Bet
+## Differentiating Features
 
-The next important open agent framework will not be the biggest model wrapper. It will be the most editable closed-loop system that can move from browser tasks toward real-world operations without changing its core philosophy.
-
-## Features
-
-- 🤖 **Gemini 3.1 Flash Lite Preview** - Default high-speed AI model
-- 🔍 **Web Search** - Via DuckDuckGo API
-- 🌐 **Browser Automation** - Scraping and screenshots with Playwright
-- 🧷 **Current Tab Adapter** - Directly operate "the tab you're viewing" via Chrome extension relay
-- 🖥️ **Reliable Computer Use** - Browser-first observe / evaluate / act / recover flows with SQLite trajectory capture
-- 🧪 **Offline Self-Improvement** - Canary worktrees, benchmark gating, candidate packaging, cleanup, and approved-improvement reuse injected into repair prompts
-- 🤖 **Simulation-First Physical AI** - Mission contracts, persisted validation, telemetry-aware verifier results, safety-governed ROS2 envelopes, and offline replay plans
-- 💻 **Shell Execution** - Guarded execution with shell AST parsing, intent classification, and approvals
-- 📁 **File Operations** - Read and write support
-- 🧩 **Host Bridge** - Run host OS shell / file / browser in a separate process
-- 🧠 **Memory System** - SQLite + vector search
-- 💬 **Control UI + CLI** - Web UI, WebSocket protocol, and CLI over one Gateway surface
-- 🤝 **Multi-Agent Delegation** - ADK sub_agents + AgentTool + sessions_spawn
-- 🗂️ **First-Class Task Objects** - Persistent task IDs for subagents, self-improvement searches, and physical replay flows
-- 📊 **Task / Approval Dashboard** - Control UI now does server-side search / paging over task + approval state, subscribes to task / approval deltas over WebSocket, exposes a clickable detail / intervention panel, renders long-running scheduler / checkpoint / approval-wait state for eval-backed tasks, and lets operators replay / compare control-loop runs from the task detail view
-- 🕵️ **Audit Log Explorer** - Filter audit events by actor / session / tool / source / result, deep-link from task or approval detail, inspect approval resolve before / after state, and stream indexed audit appends in the browser
-- 🔧 **Dynamic Agent Generation** - Generate agents at runtime with attached MCP servers
-- 🧱 **Runtime Substrate** - Common `resource_*` / `capability_*` registry over skills, browser, current-tab, desktop, and host surfaces
-- 🧭 **Typed Gateway Protocol** - `chat.send` / `chat.history` / `chat.abort` / `tools.approval`
-- 📝 **Persistent Transcript** - Gateway holds SQLite-backed session history
-- 🗃️ **Redis Sessions** - Optional Redis-backed ADK live session state while transcript / task / memory stores remain SQLite-backed
-- ⏰ **Cron Platform** - System event integration, delivery targets, and retry support
-- 🔌 **MCP Support** - Bundled sample MCP server supporting SSE / HTTP / stdio connections
-- 🔒 **Security** - Audit logs, command policies, stateful tool approvals, and approval resolve history with actor / source tracking
-- 📦 **Extensible** - Skill plugin system
-- 🐳 **Docker Ready** - Easy deployment with `docker compose`
+- **Current-tab first computer use**: operate the browser tab the operator is
+  actually viewing, then fall back to managed browser or desktop control when
+  needed.
+- **Mission Contract runtime**: long-running `control_supervisor` tasks carry a
+  manifest, task graph, scheduler queue, checkpoints, resume state, verifier
+  evidence, and recovery decisions.
+- **Trajectory-native recovery**: failed or uncertain actions produce evidence,
+  verifier verdicts, typed recovery decisions, replayable timelines, and audit
+  records instead of silent retries.
+- **Approval-gated self-improvement**: mission reviews produce improvement and
+  memory candidates; eval gates and promotion packages keep reuse explicit and
+  operator-approved.
+- **Simulation-first physical path**: physical-adjacent work starts as mission
+  contracts, verifier results, telemetry snapshots, action envelopes, governor
+  decisions, and offline replay plans.
+- **Operator-visible runtime**: Control UI exposes chat, task dashboard, audit
+  explorer, timeline, replay/compare, mission scorecard, recovery, review, and
+  candidate state.
+- **Hackable reference stack**: Dockerized Gateway, host/desktop bridges, MCP,
+  skills, SQLite-backed task/memory state, and an ADK-backed model layer with
+  Gemini currently used as the default backend.
 
 ## Architecture
 
-Inspired by OpenClaw's control plane / execution plane separation, boiled-claw is composed of the following three layers:
+Inspired by OpenClaw's control plane / execution plane separation, boiled-claw
+is composed of the following layers:
 
 - **Gateway (Docker / control plane)**: Routing, session, transcript, cron, approvals, UI event stream
 - **Host Bridge (host OS / execution plane)**: Runs shell, file, and browser operations in a separate process on the host
@@ -413,15 +426,6 @@ Loading the Chrome extension:
 This extension requires `<all_urls>` host permission because it uses `chrome.scripting` on the active tab. This is necessary to perform selector click / fill / text extraction on "whichever tab the user is currently viewing" regardless of the site. Communication itself is limited to the local relay only, restricted by loopback bind, origin check, and an optional token.
 
 Current-browser spreadsheet plans normalize navigation through `current_tab.navigate` instead of relying on a Desktop `Cmd/Ctrl+T` hotkey. When the active tab is the boiled-claw Control UI chat, the runtime preserves that chat tab by opening a separate task tab before navigating. Spreadsheet entry steps also now locate and click a real grid cell such as `A1` before typing so writes land in the sheet instead of the browser chrome or Sheets toolbar.
-
-Example flow: the operator asks boiled-claw, in Japanese, to research notable
-`新々刀` swordsmiths and summarize the findings into Google Sheets. The animation
-below is a README-friendly conversion of a real execution recording, followed by
-the captured result state from the Control UI.
-
-![Current-browser Google Sheets execution demo](assets/current-browser-sheets-demo-20260421.gif)
-
-![Current-browser Google Sheets result screenshot](assets/current-browser-sheets-result-20260421.jpg)
 
 The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 
@@ -862,58 +866,18 @@ In other words, when auth is enabled, the `user_id` in the path/body is not trus
 
 ### Long-Running Control Supervisor
 
-Use the supervisor surface when you want the existing control loop to keep a long-running objective healthy without turning that objective into app-specific core logic.
+Use the supervisor surface when you want the existing control loop to keep a
+long-running objective healthy without turning that objective into app-specific
+core logic.
 
-The live supervisor now runs as a durable mission worker for `control_supervisor` tasks: each iteration is selected from the persisted scheduler queue, resumed after Gateway restart when the parent task is still `running`, and terminated as `mission_aborted:*` when a typed Mission Contract abort condition such as `human_approval_required` matches. Startup resume scans every page of running supervisor tasks and keeps duplicate active handles, stale handles, explicit operator stops, heartbeat, and watchdog warnings visible as task events/artifacts. Successful current-tab checks link `current_tab_info` and verifier reports into the durable task graph so the Control UI can show the Mission Contract, queue state, checkpoints, evidence refs, and abort reason from the same task artifact. The runtime remains supervisor-owned, but it now supports explicit multi-node Mission Contract graphs, deterministic queue priority, stale-entry skipping, and resume from the next actionable node.
-Mission Contract v2 extends that same task substrate with manifest-level fields (`success_metrics`, `risk_budget`, `capability_policy`, `memory_policy`, `recovery_policy`, and `improvement_policy`) instead of introducing a separate `/missions` table. Live supervisor artifacts now include a read-only `mission_scorecard`, typed `recovery_ladder_step` decisions, deterministic post-mission `mission_review`, and approval-gated `memory_promotion_candidate` links with `last_verified_at` / `expires_at` metadata. The Control UI task detail reads these artifacts directly so operators can inspect mission status, active node, task graph, recovery decisions, verifier evidence, budget state, post-mission review, and pending memory candidates from the same `control_supervisor` task. These artifacts make the `control_supervisor` task behave as the Mission record while keeping promotion and memory writes review-only.
+The supervisor stores a `mission_contract`, `durable_execution`, task graph,
+scheduler queue, checkpoints, resume state, verifier evidence, recovery
+decisions, mission scorecard, post-mission review, memory candidates, and
+promotion packages on the same `control_supervisor` task. It does not introduce
+a separate `/missions` API or `missions` table.
 
-Recovery Ladder v1 connects verifier/tool failures to bounded live recovery decisions. The supervisor records each failed tick in `durable_execution.recovery_decisions[]` with `schema_version`, `selected_step`, `reason`, `attempt_index`, budget snapshots, outcome, and source refs. Non-terminal steps keep the existing scheduler policy, while `request_approval` moves the mission into approval wait and exhausted policy/budget moves it to `blocked`. State semantics stay explicit: `failed` means execution was attempted and failed, `blocked` means policy/budget/environment prevents progress, `paused` means approval or operator input is needed, and `cancelled` means an explicit operator stop.
-
-Post-mission review is deterministic and read-only. When a supervisor reaches `completed`, `blocked`, `failed`, or approval-wait `paused`, it reads the existing mission runtime artifacts and writes `artifacts.mission_review` with the final status, scorecard snapshot, failure buckets, repeated failure patterns, recovery effectiveness, evidence quality, candidate-only improvement and memory proposals, recommended contract edits, and source refs. A `paused` review is an interim review for the current approval-wait boundary; if the mission later resumes and reaches `completed`, `blocked`, or `failed`, the later terminal review replaces it on the task artifact. This does not promote memory, create approved improvements, run canary benchmarks, add UI behavior, add a `/missions` API, or add a `missions` table.
-
-Memory promotion candidates are now formal approval-gated artifacts. The
-review keeps its embedded candidates as `candidate_only`, while
-`artifacts.memory_promotion_candidates` stores normalized candidate records with
-`pending`, `approved`, `rejected`, or `expired` approval state, source refs,
-expiry, invalidation rules, approver metadata, and rejection reason. Pending,
-approved, rejected, and expired candidates remain inert runtime artifacts in
-this layer: planning, recovery, and mission reuse do not consume them yet.
-Actual reuse belongs to the future reuse-planner layer.
-
-Mission templates are contract presets, not a new execution API. The runtime
-can render named presets such as `observation_review`, `weak_evidence_probe`,
-`budget_exhaustion_probe`, `current_tab_research_to_report`, and
-`repo_maintenance_review` into validated `MissionContract v2` payloads with
-safe defaults for actions, forbidden actions, recovery policy, memory policy,
-and improvement policy. The generated contract still enters through the
-existing `POST /tasks/supervisors/control-loop` surface, and the resulting
-`control_supervisor` task remains the durable mission record. Template overrides
-may narrow allowed actions or add metadata, but default forbidden actions are
-preserved. This layer does not add `/missions`, a `missions` table, template
-execution UI, memory reuse, benchmark promotion, or physical replay.
-
-Mission eval suites are deterministic regression gates over existing Mission OS
-artifacts. They read `durable_execution`, `mission_scorecard`, `mission_review`,
-`recovery_decisions`, and `memory_promotion_candidates` to emit versioned
-`mission_eval_result.v1` records, then compare baseline and candidate results
-through `mission_regression_gate.v1`. The initial repo-local suites cover
-weak-evidence handling, budget exhaustion, blocked-state correctness,
-approval-required paths, mission review shape, memory candidate approval
-boundaries, template contract generation, and a Control UI mission-panel artifact
-smoke. These gates only measure and block; they do not promote improvements,
-reuse memory, add UI behavior, add `/missions`, or create a `missions` table.
-
-Promotion packages connect post-mission improvement candidates to those eval
-gates without promoting anything. `mission_review.improvement_candidates` can be
-normalized into typed promotion candidates such as `verifier_improvement`,
-`recovery_strategy`, `benchmark_case`, `memory_rule`, `skill_recipe`,
-`capability_patch`, `policy_patch`, and `code_patch`. Each candidate type maps to
-required deterministic eval suites, and security-sensitive patch types require
-an explicit security eval. The resulting `promotion_package.v1` contains the
-candidate refs, baseline/candidate eval results, regression gate result,
-optional security eval result, recommendation, and `approval_status=pending`.
-It is still artifact-only: no approved memory, skill, capability, policy, code,
-runtime reuse, UI, `/missions` API, or `missions` table is created here.
+For the detailed Mission OS artifact contract, read
+[architecture/README.md](architecture/README.md).
 
 ```bash
 curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
@@ -953,90 +917,27 @@ curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
 curl -sS -X POST http://127.0.0.1:18789/tasks/{task_id}/cancel
 ```
 
-## Feature List
+## Detailed Capabilities
 
-### Tools
+The default root agent exposes tool families for web search, browser
+automation, current-tab control, desktop observation/control, shell/file access,
+memory, task objects, self-improvement canaries, simulation-first physical
+validation, dynamic subagents, skills, resources, and capabilities.
 
-The default root agent exposes these tool families:
+MCP support covers SSE, streamable HTTP, and stdio connections. A FastMCP sample
+server is bundled in `src/mcp_servers/sample_server.py` with simple `echo`,
+`add`, `current_time`, and `reverse_text` tools for local integration tests.
 
-- `web_search`, `stock_price`
-- `browser_navigate`, `browser_click`, `browser_fill`, `browser_press`, `browser_screenshot`, `browser_extract_text`
-- `control_ui_chat_send_message`
-- `computer_observe`, `computer_evaluate`, `computer_click`, `computer_fill`, `computer_trajectory_recent`
-- `desktop_view_*`, `desktop_wait_*`, `desktop_runtime_*`, `desktop_control_*`
-- `run_shell`, `read_file`, `write_file`
-- `memory_store`, `memory_search`, `memory_stats`, `memory_delete`
-- `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_demo_from_trajectory`, `self_improvement_search_from_trajectory`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
-- `physical_ai_submit_simulation`, `physical_ai_validation_status`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`, `physical_ai_replay_computer_trajectory`
-- `agents_list`, `sessions_spawn`, `sessions_spawn_dynamic`, `subagents_list`, `subagents_steer`, `subagents_kill`
-- `task_create`, `task_get`, `task_list`, `task_update`
-- `resource_list`, `resource_read`, `capability_list`, `capability_invoke`
-- `skill_list`, `skill_execute`
+Skills are loaded from `skills/<name>/SKILL.md` using the OpenClaw-compatible
+format, with legacy `skills/*.py` loading kept for compatibility. Use
+`GET /skills`, `skill_list`, `resource_list`, and `capability_list` to inspect
+what the Gateway loaded.
 
-### Dynamic Agent Generation (sessions_spawn_dynamic)
+### Security Notes
 
-You can dynamically generate custom agents at runtime by specifying a system prompt and MCP servers.
-
-```bash
-# Launch an agent (example: attach the sample MCP server)
-curl -sS -X POST http://127.0.0.1:18789/agent/run \
-  -H "Content-Type: application/json" \
-  -d '{
-    "user_id": "my_user",
-    "message": "Launch an agent with sessions_spawn_dynamic. instruction=\"You are a calculation agent\", mcp_servers=[{\"type\":\"sse\",\"url\":\"http://boiled-claw-mcp-sample:8765/sse\"}], task=\"Calculate 100 + 200\""
-  }'
-
-# Check execution results
-curl http://127.0.0.1:18789/subagents/{session_id}
-
-# Or inspect the persistent task object returned by sessions_spawn(_dynamic)
-curl http://127.0.0.1:18789/tasks/{task_id}
-```
-
-**MCP Connection Types:**
-
-| type | Description | Configuration Example |
-|------|-------------|----------------------|
-| `sse` | SSE connection | `{"type": "sse", "url": "http://..."}` |
-| `http` | Streamable HTTP connection | `{"type": "http", "url": "http://..."}` |
-| `stdio` | Subprocess launch | `{"type": "stdio", "command": "npx", "args": [...]}` |
-
-### Sample MCP Server
-
-A FastMCP-based sample server is bundled in `src/mcp_servers/sample_server.py`.
-
-**Provided Tools:**
-
-| Tool | Description |
-|------|-------------|
-| `echo(text)` | Returns the text as-is |
-| `add(a, b)` | Adds two numbers |
-| `current_time()` | Returns the current datetime in ISO 8601 |
-| `reverse_text(text)` | Reverses the text |
-
-**How to Start:**
-
-```bash
-# SSE mode (defined in docker-compose.yml)
-docker compose up -d boiled-claw-mcp-sample
-# → Available within the Docker network at http://boiled-claw-mcp-sample:8765/sse
-```
-
-Within the Docker network, connect via `http://boiled-claw-mcp-sample:8765/sse`.
-
-### Using Skills
-
-- Adding `skills/<name>/SKILL.md` will auto-load it at startup (OpenClaw format).
-- For backward compatibility, the legacy `skills/*.py` format is still loaded.
-- After the Gateway starts, check loading status via `GET /skills`.
-- Use `skill_list` and `skill_execute` to inspect and run bundled skill content.
-- Use `resource_list` / `resource_read` to inspect bundled skills and bridge resources through one canonical surface.
-- Use `capability_list` / `capability_invoke` when you want a transport-neutral registry over shell, file, browser, current-tab, desktop, and skill capabilities.
-- Bundled skills include `skills/auto-fix/SKILL.md`, `skills/code-review/SKILL.md`, `skills/coding-agent/SKILL.md`, `skills/computer-use/SKILL.md`, `skills/e2e-test/SKILL.md`, and `skills/multi-llm-judge/SKILL.md`.
-- `skills/computer-use/SKILL.md` is the repo-local entry point for the browser-first computer-use stack.
-- `skills/e2e-test/SKILL.md` includes smoke checks for skill loading and recent computer-use / CLI surfaces.
-
-### Security
+boiled-claw is a reference implementation. Tool approvals and policies reduce
+risk, but do not make shell, file, browser, desktop, or bridge control safe for
+untrusted environments. Run it only where you are prepared to own the outcome.
 
 - Audit logs (all operations are recorded)
 - Command blocklist
@@ -1066,37 +967,41 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 
 ## Roadmap
 
-- [x] Core agent structure (Google ADK)
-- [x] Gemini 3.1 Flash Lite Preview model
-- [x] Web search tool
-- [x] Shell execution tool
-- [x] File operations tool
-- [x] Browser automation (Playwright)
-- [x] Memory system (SQLite + vector search)
-- [x] WebSocket gateway
-- [x] Typed Gateway Protocol v1
-- [x] Gateway-owned transcript / history persistence
-- [x] Cron platform (delivery target / retry / system events)
-- [x] Tool security / approvals
-- [x] Security (audit logs + policies)
-- [x] Docker support
-- [x] Multi-agent (sub-agents)
-- [x] Skill plugin system
-- [x] Dynamic agent generation (sessions_spawn_dynamic)
-- [x] MCP support (SSE / HTTP / stdio) + sample server
-- [x] Reliable computer use (evaluation, recovery, trajectory capture)
-- [x] Offline canary self-improvement workflow
-- [x] Simulation-first physical AI adapters
-- [x] Redis sessions
+### Done
 
-> [!NOTE]
-> The next planned work remains the trajectory-native eval / promotion / reuse spine described above and in [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md). The product story is intentionally centered on browser-first execution, durable artifacts, and simulation-first physical replay rather than new chat surfaces.
+- Browser-first control loop with Playwright, Current Tab relay, desktop
+  fallback, trajectory capture, replay, and repair.
+- Gateway, typed protocol, Control UI, task dashboard, audit explorer,
+  approvals, transcript persistence, cron, skills, MCP, and Docker runtime.
+- Mission Contract substrate: task graph, scheduler queue, checkpoints, resume
+  state, recovery decisions, scorecard, post-mission review, templates, eval
+  suites, memory candidates, and promotion packages.
+- Simulation-first physical AI artifacts: validation state, telemetry-aware
+  verifier results, safety-governed action envelopes, and offline replay plans.
+
+### In Progress
+
+- Aggregate benchmark gates over promotion packages from mission improvement
+  candidates.
+- Approved memory / skill / capability / policy promotion paths.
+- Mission reuse planning with visible provenance and expiry/invalidation checks.
+
+### Planned
+
+- Aggregate promotion gates across multiple eval suites and canary runs.
+- Deeper current-tab / desktop practical tasks for Sheets, Docs, SaaS
+  extraction, and cross-app workflows.
+- Simulation-first physical replay PoCs that keep the same mission and
+  trajectory vocabulary before any live robotics claims.
 
 ## References
 
 - [OpenClaw](https://github.com/openclaw/openclaw) - Inspiration source (large-scale TypeScript project with 1,500-2,000 files)
 - [Google ADK](https://google.github.io/adk-docs/) - Agent framework
 - [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) - Tool connection protocol
+- [Anthropic Computer Use](https://docs.anthropic.com/en/docs/build-with-claude/computer-use) - Contemporary computer-use reference surface
+- [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim) - Simulation-first robotics validation context
+- [ROS 2 Documentation](https://docs.ros.org/) - Robotics middleware and ecosystem context
 
 ## License
 
