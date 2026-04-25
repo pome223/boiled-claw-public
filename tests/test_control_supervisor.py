@@ -664,6 +664,15 @@ async def test_control_supervisor_weak_evidence_waits_for_approval(tmp_path):
     assert durable["scheduler_state"]["waiting_for_approval_queue"][0]["node_id"].endswith("/maintain-objective")
     assert durable["escalations"][0]["approval_request_id"].startswith("approval:")
     assert durable["resume_state"]["reason"] == "awaiting_approval"
+    assert parent["artifacts"]["mission_review"]["final_status"] == "paused"
+    assert parent["artifacts"]["mission_review"]["mission_task_id"] == started.task["task_id"]
+    assert parent["artifacts"]["mission_review"]["failure_buckets"] == [
+        {"failure_type": "weak_evidence", "count": 1}
+    ]
+    assert "post_mission_review_recorded" in {
+        event["event_type"]
+        for event in store.query_timeline(started.task["task_id"], page_size=100)["events"]
+    }
     decision = durable["recovery_decisions"][0]
     assert decision["failure_type"] == "weak_evidence"
     assert decision["selected_step"] == "verify_state"
@@ -1474,6 +1483,8 @@ async def test_control_supervisor_aborts_when_contract_forbids_human_approval(tm
         "mission_aborted:human_approval_required"
     )
     assert durable["scheduler_state"]["waiting_for_approval_queue"] == []
+    assert parent["artifacts"]["mission_review"]["final_status"] == "failed"
+    assert parent["artifacts"]["mission_review"]["source_refs"]
 
 
 @pytest.mark.asyncio

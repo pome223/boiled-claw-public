@@ -68,6 +68,7 @@ class MissionImprovementCandidate(BaseModel):
     requires_benchmark: bool = True
     requires_approval: bool = True
     source_artifact_ref: str
+    approval_status: str = "candidate_only"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -86,6 +87,7 @@ class MissionMemoryPromotionCandidate(BaseModel):
     promotion_reason: str
     invalidation_rule: str = ""
     approval_required: bool = True
+    approval_status: str = "candidate_only"
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -93,15 +95,18 @@ class MissionReview(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: str = MISSION_REVIEW_SCHEMA_VERSION
+    mission_task_id: str = ""
     summary: str
     final_status: str
     scorecard_snapshot: dict[str, Any]
     failure_buckets: list[dict[str, Any]] = Field(default_factory=list)
     repeated_failure_patterns: list[dict[str, Any]] = Field(default_factory=list)
     recovery_effectiveness: dict[str, Any] = Field(default_factory=dict)
+    evidence_quality: dict[str, Any] = Field(default_factory=dict)
     improvement_candidates: list[dict[str, Any]] = Field(default_factory=list)
     memory_promotion_candidates: list[dict[str, Any]] = Field(default_factory=list)
     recommended_next_contract_edits: list[str] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=_utc_now)
 
 
@@ -138,6 +143,124 @@ def _failure_counts(durable_execution: dict[str, Any]) -> Counter[str]:
         if failure_type and verdict_value != "pass":
             counts[failure_type] += 1
     return counts
+
+
+def _recovery_decisions(durable_execution: dict[str, Any]) -> list[dict[str, Any]]:
+    return [_as_dict(item) for item in _as_list(durable_execution.get("recovery_decisions"))]
+
+
+def _counter_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    for item in items:
+        value = str(item.get(key) or "").strip()
+        if value:
+            counts[value] += 1
+    return dict(sorted(counts.items()))
+
+
+def _artifact_source_refs(
+    durable_execution: dict[str, Any],
+    *,
+    source_task_id: str | None,
+    child_task_ids: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    refs: list[str] = []
+
+    def add(value: object) -> None:
+        ref = str(value or "").strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+
+    add(f"task:{source_task_id}" if source_task_id else "")
+    contract_id = str(_as_dict(durable_execution.get("mission_contract")).get("contract_id") or "")
+    add(f"mission_contract:{contract_id}" if contract_id else "")
+
+    for child_task_id in child_task_ids or []:
+        add(f"child_task:{child_task_id}")
+    for run in _job_runs(durable_execution):
+        add(f"job_run:{run.get('run_id')}" if run.get("run_id") else "")
+        replay = _as_dict(run.get("replay_reference"))
+        add(f"child_task:{replay.get('child_task_id')}" if replay.get("child_task_id") else "")
+        verdict = _as_dict(run.get("verifier_verdict"))
+        for evidence_ref in _str_list(verdict.get("evidence_refs")):
+            add(evidence_ref)
+    for verdict in _verdicts(durable_execution):
+        for evidence_ref in _str_list(verdict.get("evidence_refs")):
+            add(evidence_ref)
+        replay = _as_dict(verdict.get("replay_reference"))
+        add(f"child_task:{replay.get('child_task_id')}" if replay.get("child_task_id") else "")
+    for checkpoint in _as_list(durable_execution.get("checkpoints")):
+        checkpoint_dict = _as_dict(checkpoint)
+        add(
+            f"checkpoint:{checkpoint_dict.get('checkpoint_id')}"
+            if checkpoint_dict.get("checkpoint_id")
+            else ""
+        )
+        for replay_ref in _as_list(checkpoint_dict.get("replay_references")):
+            replay = _as_dict(replay_ref)
+            add(f"child_task:{replay.get('child_task_id')}" if replay.get("child_task_id") else "")
+    for decision in _recovery_decisions(durable_execution):
+        for source_ref in _str_list(decision.get("source_refs")):
+            add(source_ref)
+    for escalation in _as_list(durable_execution.get("escalations")):
+        escalation_dict = _as_dict(escalation)
+        add(
+            f"escalation:{escalation_dict.get('escalation_id')}"
+            if escalation_dict.get("escalation_id")
+            else ""
+        )
+        add(
+            f"approval:{escalation_dict.get('approval_request_id')}"
+            if escalation_dict.get("approval_request_id")
+            else ""
+        )
+    return refs
+
+
+def _evidence_quality(durable_execution: dict[str, Any]) -> dict[str, Any]:
+    verdicts = _verdicts(durable_execution)
+    total_verdicts = len(verdicts)
+    evidence_ref_count = 0
+    verdicts_with_evidence = 0
+    weak_evidence_count = 0
+    unsafe_count = 0
+    failed_without_evidence_count = 0
+    for verdict in verdicts:
+        verdict_value = str(verdict.get("verdict") or "").strip()
+        failure_type = str(verdict.get("failure_type") or "").strip()
+        evidence_refs = _str_list(verdict.get("evidence_refs"))
+        if evidence_refs:
+            verdicts_with_evidence += 1
+            evidence_ref_count += len(evidence_refs)
+        if failure_type == "weak_evidence":
+            weak_evidence_count += 1
+        if verdict_value == "unsafe":
+            unsafe_count += 1
+        if verdict_value in {"fail", "uncertain", "unsafe"} and not evidence_refs:
+            failed_without_evidence_count += 1
+
+    coverage_rate = verdicts_with_evidence / total_verdicts if total_verdicts else 0.0
+    if not verdicts:
+        quality = "unknown"
+    elif weak_evidence_count or failed_without_evidence_count:
+        quality = "weak"
+    elif unsafe_count:
+        quality = "unsafe"
+    elif coverage_rate >= 0.8:
+        quality = "strong"
+    else:
+        quality = "mixed"
+
+    return {
+        "quality": quality,
+        "total_verifier_verdicts": total_verdicts,
+        "verdicts_with_evidence": verdicts_with_evidence,
+        "evidence_ref_count": evidence_ref_count,
+        "evidence_coverage_rate": coverage_rate,
+        "weak_evidence_count": weak_evidence_count,
+        "unsafe_count": unsafe_count,
+        "failed_without_evidence_count": failed_without_evidence_count,
+    }
 
 
 def _objective_progress(
@@ -332,6 +455,8 @@ def build_mission_review(
     *,
     final_status: str,
     source_task_id: str | None = None,
+    child_task_ids: list[str] | tuple[str, ...] | None = None,
+    mission_scorecard: dict[str, Any] | None = None,
     created_at: datetime | None = None,
 ) -> MissionReview:
     current_time = created_at or _utc_now()
@@ -340,6 +465,7 @@ def build_mission_review(
         final_status=final_status,
         updated_at=current_time,
     )
+    scorecard_snapshot = _as_dict(mission_scorecard) or scorecard.model_dump(mode="json")
     failure_counts = _failure_counts(durable_execution)
     failure_buckets = [
         {"failure_type": failure_type, "count": count}
@@ -371,6 +497,37 @@ def build_mission_review(
     if memory_candidates:
         recommendations.append("Review memory_promotion_candidates before operator-approved promotion.")
 
+    recovery_decisions = _recovery_decisions(durable_execution)
+    recovery_outcome_counts = _counter_by_key(recovery_decisions, "outcome")
+    selected_step_counts = _counter_by_key(recovery_decisions, "selected_step")
+    recovery_failure_counts = _counter_by_key(recovery_decisions, "failure_type")
+    recovered_count = int(recovery_outcome_counts.get("completed", 0))
+    scheduled_count = int(recovery_outcome_counts.get("recovery_scheduled", 0))
+    blocked_recovery_count = int(recovery_outcome_counts.get("blocked", 0))
+    paused_recovery_count = int(recovery_outcome_counts.get("paused", 0))
+    budget_exhausted_count = sum(
+        1 for decision in recovery_decisions if bool(decision.get("budget_exhausted"))
+    )
+    effectiveness = {
+        "recovery_success_rate": scorecard.recovery_success_rate,
+        "blocked_count": scorecard.blocked_count,
+        "approval_wait_count": scorecard.approval_wait_count,
+        "recovery_decision_count": len(recovery_decisions),
+        "recovery_outcome_counts": recovery_outcome_counts,
+        "selected_step_counts": selected_step_counts,
+        "failure_type_counts": recovery_failure_counts,
+        "recovered_count": recovered_count,
+        "scheduled_count": scheduled_count,
+        "blocked_recovery_count": blocked_recovery_count,
+        "paused_recovery_count": paused_recovery_count,
+        "budget_exhausted_count": budget_exhausted_count,
+    }
+    evidence_quality = _evidence_quality(durable_execution)
+    source_refs = _artifact_source_refs(
+        durable_execution,
+        source_task_id=source_task_id,
+        child_task_ids=child_task_ids,
+    )
     summary = (
         f"Mission ended as {final_status or 'unknown'} with "
         f"{scorecard.metadata.get('total_job_runs', 0)} job run(s), "
@@ -378,21 +535,43 @@ def build_mission_review(
         f"objective_progress={scorecard.objective_progress.value}."
     )
     return MissionReview(
+        mission_task_id=str(source_task_id or ""),
         summary=summary,
         final_status=str(final_status or "unknown"),
-        scorecard_snapshot=scorecard.model_dump(mode="json"),
+        scorecard_snapshot=scorecard_snapshot,
         failure_buckets=failure_buckets,
         repeated_failure_patterns=repeated,
-        recovery_effectiveness={
-            "recovery_success_rate": scorecard.recovery_success_rate,
-            "blocked_count": scorecard.blocked_count,
-            "approval_wait_count": scorecard.approval_wait_count,
-        },
+        recovery_effectiveness=effectiveness,
+        evidence_quality=evidence_quality,
         improvement_candidates=improvement_candidates,
         memory_promotion_candidates=memory_candidates,
         recommended_next_contract_edits=recommendations,
+        source_refs=source_refs,
         created_at=current_time,
     )
+
+
+def build_post_mission_review_artifacts(
+    durable_execution: dict[str, Any],
+    *,
+    final_status: str,
+    source_task_id: str | None = None,
+    child_task_ids: list[str] | tuple[str, ...] | None = None,
+    created_at: datetime | None = None,
+) -> dict[str, Any]:
+    review = build_mission_review(
+        durable_execution,
+        final_status=final_status,
+        source_task_id=source_task_id,
+        child_task_ids=child_task_ids,
+        created_at=created_at,
+    )
+    return {
+        "durable_execution": durable_execution,
+        "mission_scorecard": review.scorecard_snapshot,
+        "mission_review": review.model_dump(mode="json"),
+        "mission_memory_links": build_mission_memory_links(review),
+    }
 
 
 def build_mission_memory_links(

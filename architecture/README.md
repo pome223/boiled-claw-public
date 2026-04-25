@@ -162,8 +162,21 @@ State semantics remain explicit:
 | `paused` | Approval or operator input is required before continuing. | Can resume after the approval/input is resolved. |
 | `cancelled` | An operator explicitly stopped the mission. | Does not auto-resume. |
 
-Non-goals for this layer: no memory promotion, no post-mission review behavior,
-no `/missions` API, and no `missions` table.
+Post-mission review is the next read-only layer. It reads `mission_contract`,
+`durable_execution`, scheduler state, checkpoints, job runs, verifier verdicts,
+recovery decisions, budget state, escalations, child task refs, and scorecard
+state, then writes a versioned `mission_review` artifact. The review summarizes
+the mission outcome, failure buckets, repeated failure patterns, recovery
+effectiveness, evidence quality, candidate-only improvement proposals,
+candidate-only memory promotion proposals, recommended contract edits, and
+source refs.
+A `paused` review is intentionally interim: it captures the approval-wait
+boundary for operators, and a later terminal `completed`, `blocked`, or `failed`
+review may replace it after the mission resumes.
+
+Non-goals for this layer: no memory promotion, no approved improvements, no
+canary benchmark execution, no UI change, no `/missions` API, and no `missions`
+table.
 
 ## Current Maturity
 
