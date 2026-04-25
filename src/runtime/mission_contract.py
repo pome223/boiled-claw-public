@@ -94,6 +94,116 @@ class MissionTaskNode(BaseModel):
         return _clean_text_list(value)
 
 
+class MissionRiskBudgetPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_runtime_hours: int | None = Field(default=None, ge=1)
+    max_total_llm_calls: int | None = Field(default=None, ge=1)
+    max_total_tool_calls: int | None = Field(default=None, ge=1)
+    max_same_failure_retries: int | None = Field(default=None, ge=0)
+    max_repair_depth: int | None = Field(default=None, ge=0)
+    max_pending_approvals: int | None = Field(default=None, ge=0)
+
+
+class MissionCapabilityPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    allow: list[str] = Field(default_factory=list)
+    approval_required: list[str] = Field(default_factory=list)
+    deny: list[str] = Field(default_factory=list)
+
+    @field_validator("allow", "approval_required", "deny", mode="before")
+    @classmethod
+    def _strip_text_list(cls, value: Any) -> list[str]:
+        return _clean_text_list(value)
+
+
+class MissionMemoryPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    promote_only: list[str] = Field(
+        default_factory=lambda: [
+            "fact",
+            "procedure",
+            "failure_pattern",
+            "recovery_pattern",
+            "approved_improvement",
+            "mission_summary",
+        ]
+    )
+    never_promote: list[str] = Field(
+        default_factory=lambda: ["raw_transcript", "secret", "one_off_noise"]
+    )
+    require_operator_approval: bool = True
+    candidate_ttl_seconds: int | None = Field(default=2_592_000, ge=1)
+
+    @field_validator("promote_only", "never_promote", mode="before")
+    @classmethod
+    def _strip_text_list(cls, value: Any) -> list[str]:
+        return _clean_text_list(value)
+
+
+class MissionRecoveryPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    max_retries_per_step: int = Field(default=2, ge=0)
+    ladder: list[str] = Field(
+        default_factory=lambda: [
+            "observe_again",
+            "verify_state",
+            "retry_same_step",
+            "retry_smaller_step",
+            "alternate_capability",
+            "diagnostic_task",
+            "request_approval",
+            "pause_or_block",
+            "create_improvement_candidate",
+        ]
+    )
+    terminal_statuses: list[str] = Field(
+        default_factory=lambda: [
+            "failed",
+            "blocked",
+            "paused",
+            "improvement_candidate",
+        ]
+    )
+
+    @field_validator("ladder", "terminal_statuses", mode="before")
+    @classmethod
+    def _strip_text_list(cls, value: Any) -> list[str]:
+        return _clean_text_list(value)
+
+
+class MissionImprovementPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: str = "canary_only"
+    require_benchmark_pass: bool = True
+    require_human_promotion: bool = True
+    candidate_kinds: list[str] = Field(
+        default_factory=lambda: [
+            "benchmark_case",
+            "failure_classifier",
+            "verifier_improvement",
+            "recovery_strategy",
+            "prompt_improvement",
+            "policy_adjustment",
+            "code_patch",
+        ]
+    )
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _strip_mode(cls, value: Any) -> str:
+        return str(value or "").strip() or "canary_only"
+
+    @field_validator("candidate_kinds", mode="before")
+    @classmethod
+    def _strip_text_list(cls, value: Any) -> list[str]:
+        return _clean_text_list(value)
+
+
 def _clean_abort_conditions(
     items: list[Any] | tuple[Any, ...] | str | dict[str, Any] | MissionAbortCondition | None,
 ) -> list[MissionAbortCondition]:
@@ -143,6 +253,7 @@ def _default_contract_id(objective: str) -> str:
 class MissionContract(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = "mission_contract.v2"
     contract_id: str = ""
     objective: str = Field(min_length=1)
     allowed_actions: list[str] = Field(default_factory=list)
@@ -151,9 +262,15 @@ class MissionContract(BaseModel):
     completion_criteria: list[str] = Field(default_factory=list)
     evidence_requirements: list[str] = Field(default_factory=list)
     task_nodes: list[MissionTaskNode] = Field(default_factory=list)
+    success_metrics: list[str] = Field(default_factory=list)
+    risk_budget: MissionRiskBudgetPolicy | None = None
+    capability_policy: MissionCapabilityPolicy | None = None
+    memory_policy: MissionMemoryPolicy = Field(default_factory=MissionMemoryPolicy)
+    recovery_policy: MissionRecoveryPolicy = Field(default_factory=MissionRecoveryPolicy)
+    improvement_policy: MissionImprovementPolicy = Field(default_factory=MissionImprovementPolicy)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("contract_id", "objective", mode="before")
+    @field_validator("schema_version", "contract_id", "objective", mode="before")
     @classmethod
     def _strip_text(cls, value: Any) -> str:
         return str(value or "").strip()
@@ -163,6 +280,7 @@ class MissionContract(BaseModel):
         "forbidden_actions",
         "completion_criteria",
         "evidence_requirements",
+        "success_metrics",
         mode="before",
     )
     @classmethod
@@ -219,6 +337,12 @@ def build_mission_contract(
     completion_criteria: list[str] | tuple[str, ...] | str | None = None,
     evidence_requirements: list[str] | tuple[str, ...] | str | None = None,
     task_nodes: list[Any] | tuple[Any, ...] | dict[str, Any] | None = None,
+    success_metrics: list[str] | tuple[str, ...] | str | None = None,
+    risk_budget: dict[str, Any] | MissionRiskBudgetPolicy | None = None,
+    capability_policy: dict[str, Any] | MissionCapabilityPolicy | None = None,
+    memory_policy: dict[str, Any] | MissionMemoryPolicy | None = None,
+    recovery_policy: dict[str, Any] | MissionRecoveryPolicy | None = None,
+    improvement_policy: dict[str, Any] | MissionImprovementPolicy | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> MissionContract:
     normalized_objective = str(objective or "").strip()
@@ -247,6 +371,32 @@ def build_mission_contract(
         evidence_requirements=_clean_text_list(evidence_requirements)
         or list(_DEFAULT_EVIDENCE_REQUIREMENTS),
         task_nodes=_clean_task_nodes(task_nodes),
+        success_metrics=_clean_text_list(success_metrics),
+        risk_budget=(
+            MissionRiskBudgetPolicy.model_validate(risk_budget)
+            if risk_budget is not None
+            else None
+        ),
+        capability_policy=(
+            MissionCapabilityPolicy.model_validate(capability_policy)
+            if capability_policy is not None
+            else None
+        ),
+        memory_policy=(
+            MissionMemoryPolicy.model_validate(memory_policy)
+            if memory_policy is not None
+            else MissionMemoryPolicy()
+        ),
+        recovery_policy=(
+            MissionRecoveryPolicy.model_validate(recovery_policy)
+            if recovery_policy is not None
+            else MissionRecoveryPolicy()
+        ),
+        improvement_policy=(
+            MissionImprovementPolicy.model_validate(improvement_policy)
+            if improvement_policy is not None
+            else MissionImprovementPolicy()
+        ),
         metadata=normalized_metadata,
     )
 
