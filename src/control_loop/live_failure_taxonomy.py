@@ -70,7 +70,12 @@ def classify_control_loop_failure(
     error: str | None = None,
     existing_failure_type: str | None = None,
 ) -> dict[str, Any]:
-    if success:
+    normalized_existing = str(existing_failure_type or "").strip() or None
+    verification_failure = _from_verification_result(
+        verification_status=verification_status,
+        verification_report=verification_report,
+    )
+    if success and not normalized_existing and not needs_human and not verification_failure:
         return {
             "preliminary_failure_type": None,
             "normalized_failure_type": None,
@@ -79,15 +84,11 @@ def classify_control_loop_failure(
             "operator_override": None,
         }
 
-    normalized_existing = str(existing_failure_type or "").strip() or None
     inferred = (
         normalized_existing
         or ("policy_blocked" if needs_human else None)
-        or _from_verification_result(
-            verification_status=verification_status,
-            verification_report=verification_report,
-        )
-        or _from_text(final_text=final_text, error=error)
+        or verification_failure
+        or (None if success else _from_text(final_text=final_text, error=error))
         or "unknown"
     )
     return {

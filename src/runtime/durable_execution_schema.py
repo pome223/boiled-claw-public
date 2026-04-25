@@ -64,6 +64,15 @@ class RecoveryLadderStep(str, Enum):
     CREATE_IMPROVEMENT_CANDIDATE = "create_improvement_candidate"
 
 
+class RecoveryOutcome(str, Enum):
+    COMPLETED = "completed"
+    RECOVERY_SCHEDULED = "recovery_scheduled"
+    PAUSED = "paused"
+    BLOCKED = "blocked"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
 class EscalationStatus(str, Enum):
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     APPROVED = "approved"
@@ -239,6 +248,14 @@ class RecoveryDecision(BaseModel):
     failure_type: str | None = None
     chosen_action: RecoveryActionType | None = None
     recovery_ladder_step: RecoveryLadderStep | None = None
+    selected_step: RecoveryLadderStep | None = None
+    reason: str = ""
+    attempt_index: int = Field(default=0, ge=0)
+    budget_before: dict[str, Any] = Field(default_factory=dict)
+    budget_after: dict[str, Any] = Field(default_factory=dict)
+    outcome: RecoveryOutcome | None = None
+    budget_consumption: RecoveryBudgetImpact = Field(default_factory=RecoveryBudgetImpact)
+    source_refs: list[str] = Field(default_factory=list)
     policy: RecoveryPolicy | None = None
     next_scheduler_queue: SchedulerQueueKind
     budget_exhausted: bool = False

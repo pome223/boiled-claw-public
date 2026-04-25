@@ -15,11 +15,30 @@ from src.runtime.durable_execution_schema import (
     RecoveryBudgetImpact,
     RecoveryDecision,
     RecoveryLadderStep,
+    RecoveryOutcome,
     RecoveryPolicy,
     SchedulerQueueEntry,
     SchedulerQueueKind,
     SchedulerQueueState,
 )
+
+_DEFAULT_RECOVERY_LADDER = [
+    RecoveryLadderStep.OBSERVE_AGAIN,
+    RecoveryLadderStep.VERIFY_STATE,
+    RecoveryLadderStep.RETRY_SAME_STEP,
+    RecoveryLadderStep.RETRY_SMALLER_STEP,
+    RecoveryLadderStep.ALTERNATE_CAPABILITY,
+    RecoveryLadderStep.DIAGNOSTIC_TASK,
+    RecoveryLadderStep.REQUEST_APPROVAL,
+    RecoveryLadderStep.PAUSE_OR_BLOCK,
+    RecoveryLadderStep.CREATE_IMPROVEMENT_CANDIDATE,
+]
+
+_TERMINAL_RECOVERY_STEPS = {
+    RecoveryLadderStep.REQUEST_APPROVAL,
+    RecoveryLadderStep.PAUSE_OR_BLOCK,
+    RecoveryLadderStep.CREATE_IMPROVEMENT_CANDIDATE,
+}
 
 
 def task_node_status_from_verdict(
@@ -205,6 +224,9 @@ def recovery_ladder_step_for_decision(
     next_scheduler_queue: SchedulerQueueKind,
     budget_exhausted: bool = False,
 ) -> RecoveryLadderStep | None:
+    # This is the compatibility adapter from existing recovery actions/queues to
+    # the abstract ladder vocabulary. `select_recovery_ladder_step()` remains the
+    # final mission-policy and budget-aware selection authority.
     if budget_exhausted:
         return RecoveryLadderStep.PAUSE_OR_BLOCK
     if next_scheduler_queue == SchedulerQueueKind.COMPLETED:
@@ -229,6 +251,123 @@ def recovery_ladder_step_for_decision(
     }:
         return RecoveryLadderStep.PAUSE_OR_BLOCK
     return RecoveryLadderStep.RETRY_SAME_STEP
+
+
+def normalize_recovery_ladder(
+    ladder: list[str] | tuple[str, ...] | None,
+) -> list[RecoveryLadderStep]:
+    steps: list[RecoveryLadderStep] = []
+    for item in ladder or []:
+        try:
+            step = RecoveryLadderStep(str(item).strip())
+        except ValueError:
+            continue
+        if step not in steps:
+            steps.append(step)
+    return steps or list(_DEFAULT_RECOVERY_LADDER)
+
+
+def select_recovery_ladder_step(
+    *,
+    preferred_step: RecoveryLadderStep | None,
+    ladder: list[str] | tuple[str, ...] | None,
+    retry_count: int,
+    max_retries_per_step: int,
+    budget_exhausted: bool = False,
+) -> tuple[RecoveryLadderStep | None, str]:
+    if budget_exhausted:
+        return RecoveryLadderStep.PAUSE_OR_BLOCK, "budget_exhausted"
+    if preferred_step is None:
+        return None, "no_recovery_needed"
+
+    allowed_steps = normalize_recovery_ladder(ladder)
+    if preferred_step not in allowed_steps:
+        fallback = allowed_steps[0]
+        return fallback, "preferred_step_not_allowed_by_mission_policy"
+
+    if retry_count >= max(0, int(max_retries_per_step)):
+        preferred_index = allowed_steps.index(preferred_step)
+        later_steps = allowed_steps[preferred_index + 1 :] + allowed_steps[:preferred_index]
+        for step in later_steps:
+            if step in _TERMINAL_RECOVERY_STEPS:
+                return step, "mission_recovery_step_retry_limit_exhausted"
+        return RecoveryLadderStep.PAUSE_OR_BLOCK, "mission_recovery_step_retry_limit_exhausted"
+
+    return preferred_step, "mission_recovery_policy_selected"
+
+
+def recovery_action_for_ladder_step(
+    step: RecoveryLadderStep | None,
+    *,
+    fallback: RecoveryActionType | None = None,
+) -> RecoveryActionType | None:
+    if step == RecoveryLadderStep.OBSERVE_AGAIN:
+        return RecoveryActionType.RESELECT_SURFACE
+    if step == RecoveryLadderStep.VERIFY_STATE:
+        return RecoveryActionType.GATHER_DESTINATION_EVIDENCE
+    if step in {
+        RecoveryLadderStep.RETRY_SAME_STEP,
+        RecoveryLadderStep.RETRY_SMALLER_STEP,
+    }:
+        return RecoveryActionType.RETRY_WITH_BACKOFF
+    if step == RecoveryLadderStep.ALTERNATE_CAPABILITY:
+        return RecoveryActionType.SWITCH_SURFACE
+    if step == RecoveryLadderStep.DIAGNOSTIC_TASK:
+        return RecoveryActionType.INSPECT_REPLAY
+    if step == RecoveryLadderStep.REQUEST_APPROVAL:
+        return RecoveryActionType.REQUEST_HUMAN_APPROVAL
+    if step in {
+        RecoveryLadderStep.PAUSE_OR_BLOCK,
+        RecoveryLadderStep.CREATE_IMPROVEMENT_CANDIDATE,
+    }:
+        return RecoveryActionType.MARK_FAILED
+    return fallback
+
+
+def scheduler_queue_for_recovery_ladder_step(
+    step: RecoveryLadderStep | None,
+    *,
+    fallback: SchedulerQueueKind,
+) -> SchedulerQueueKind:
+    if step is None:
+        return fallback
+    if step == RecoveryLadderStep.REQUEST_APPROVAL:
+        return SchedulerQueueKind.WAITING_FOR_APPROVAL
+    if step in {
+        RecoveryLadderStep.PAUSE_OR_BLOCK,
+        RecoveryLadderStep.CREATE_IMPROVEMENT_CANDIDATE,
+    }:
+        return SchedulerQueueKind.BLOCKED
+    if step in {
+        RecoveryLadderStep.OBSERVE_AGAIN,
+        RecoveryLadderStep.VERIFY_STATE,
+        RecoveryLadderStep.RETRY_SAME_STEP,
+        RecoveryLadderStep.RETRY_SMALLER_STEP,
+        RecoveryLadderStep.ALTERNATE_CAPABILITY,
+        RecoveryLadderStep.DIAGNOSTIC_TASK,
+    }:
+        return fallback
+    return fallback
+
+
+def recovery_outcome_for_queue(
+    queue: SchedulerQueueKind,
+    *,
+    result_success: bool,
+    aborted: bool = False,
+    cancelled: bool = False,
+) -> RecoveryOutcome:
+    if cancelled:
+        return RecoveryOutcome.CANCELLED
+    if aborted:
+        return RecoveryOutcome.FAILED
+    if queue == SchedulerQueueKind.WAITING_FOR_APPROVAL:
+        return RecoveryOutcome.PAUSED
+    if queue == SchedulerQueueKind.BLOCKED:
+        return RecoveryOutcome.BLOCKED
+    if queue == SchedulerQueueKind.COMPLETED or result_success:
+        return RecoveryOutcome.COMPLETED
+    return RecoveryOutcome.RECOVERY_SCHEDULED
 
 
 def scheduler_available_at(

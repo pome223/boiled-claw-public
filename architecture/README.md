@@ -126,6 +126,45 @@ improvement_policy:
   require_human_promotion: true
 ```
 
+## Recovery Ladder
+
+Recovery Ladder v1 is the live bridge from verifier/tool failures to bounded
+runtime behavior. A failed tick is classified, mapped to a typed ladder step,
+checked against `mission_contract.recovery_policy`, and persisted as a
+`recovery_decision` artifact in `durable_execution.recovery_decisions[]`.
+
+Initial steps are:
+
+```text
+observe_again
+verify_state
+retry_same_step
+retry_smaller_step
+alternate_capability
+diagnostic_task
+request_approval
+pause_or_block
+create_improvement_candidate
+```
+
+Each persisted decision records the selected step, reason, attempt index,
+budget before/after snapshots, outcome, and source refs to task/verifier/runtime
+evidence when available. Non-terminal steps preserve the existing scheduler
+policy; `request_approval` pauses into approval wait, and exhausted policy or
+budget becomes `blocked`.
+
+State semantics remain explicit:
+
+| State | Meaning | Resume path |
+| --- | --- | --- |
+| `failed` | Execution was attempted and failed. | Requires repair or a new run. |
+| `blocked` | Policy, budget, safety, environment, or recovery exhaustion prevents progress. | Requires operator or policy/budget intervention. |
+| `paused` | Approval or operator input is required before continuing. | Can resume after the approval/input is resolved. |
+| `cancelled` | An operator explicitly stopped the mission. | Does not auto-resume. |
+
+Non-goals for this layer: no memory promotion, no post-mission review behavior,
+no `/missions` API, and no `missions` table.
+
 ## Current Maturity
 
 boiled-claw already has the main contract surfaces: task objects, audit events,
