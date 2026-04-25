@@ -688,12 +688,20 @@ textarea {
 .status-tag.status-denied,
 .status-tag.status-failed,
 .status-tag.status-cancelled,
-.status-tag.status-expired {
+.status-tag.status-expired,
+.status-tag.status-rejected {
   color: var(--bad);
 }
 
 .status-tag.status-completed {
   color: var(--blue);
+}
+
+.status-tag.status-blocked,
+.status-tag.status-candidate_only,
+.status-tag.status-paused,
+.status-tag.status-waiting_for_approval {
+  color: var(--warn);
 }
 
 .status-tag.status-unknown,
