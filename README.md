@@ -960,6 +960,17 @@ may narrow allowed actions or add metadata, but default forbidden actions are
 preserved. This layer does not add `/missions`, a `missions` table, template
 execution UI, memory reuse, benchmark promotion, or physical replay.
 
+Mission eval suites are deterministic regression gates over existing Mission OS
+artifacts. They read `durable_execution`, `mission_scorecard`, `mission_review`,
+`recovery_decisions`, and `memory_promotion_candidates` to emit versioned
+`mission_eval_result.v1` records, then compare baseline and candidate results
+through `mission_regression_gate.v1`. The initial repo-local suites cover
+weak-evidence handling, budget exhaustion, blocked-state correctness,
+approval-required paths, mission review shape, memory candidate approval
+boundaries, template contract generation, and a Control UI mission-panel artifact
+smoke. These gates only measure and block; they do not promote improvements,
+reuse memory, add UI behavior, add `/missions`, or create a `missions` table.
+
 ```bash
 curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
   -H "Content-Type: application/json" \

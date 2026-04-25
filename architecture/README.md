@@ -204,6 +204,15 @@ probing, current-tab research reports, and repository maintenance review.
 Overrides may narrow allowed actions or add metadata, but they preserve default
 forbidden actions so a template cannot silently drop safety constraints.
 
+Mission eval suites are the measurement layer for the same artifact substrate.
+They are deterministic and repo-local: a suite reads existing mission artifacts,
+emits a serializable `mission_eval_result.v1`, and the regression gate compares
+baseline vs candidate results as `mission_regression_gate.v1`. The gate blocks
+on candidate failures, artifact-shape incompatibility, security eval failure, or
+metric regression, while still representing operator approval as required. This
+is groundwork for future benchmark-gated promotion; it does not promote memory,
+run canaries, reuse approved artifacts, add UI, or introduce mission storage.
+
 Non-goals for this layer: no memory promotion, no approved improvements, no
 canary benchmark execution, no `/missions` API, and no `missions` table.
 
