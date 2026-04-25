@@ -14,6 +14,7 @@ from src.runtime.durable_execution_schema import (
     RecoveryActionType,
     RecoveryBudgetImpact,
     RecoveryDecision,
+    RecoveryLadderStep,
     RecoveryPolicy,
     SchedulerQueueEntry,
     SchedulerQueueKind,
@@ -196,6 +197,38 @@ def repair_depth_increment(chosen_action: RecoveryActionType | None) -> int:
     }:
         return 1
     return 0
+
+
+def recovery_ladder_step_for_decision(
+    *,
+    chosen_action: RecoveryActionType | None,
+    next_scheduler_queue: SchedulerQueueKind,
+    budget_exhausted: bool = False,
+) -> RecoveryLadderStep | None:
+    if budget_exhausted:
+        return RecoveryLadderStep.PAUSE_OR_BLOCK
+    if next_scheduler_queue == SchedulerQueueKind.COMPLETED:
+        return None
+    if chosen_action == RecoveryActionType.GATHER_DESTINATION_EVIDENCE:
+        return RecoveryLadderStep.VERIFY_STATE
+    if chosen_action == RecoveryActionType.RESELECT_SURFACE:
+        return RecoveryLadderStep.OBSERVE_AGAIN
+    if chosen_action == RecoveryActionType.SWITCH_SURFACE:
+        return RecoveryLadderStep.ALTERNATE_CAPABILITY
+    if chosen_action == RecoveryActionType.RETRY_WITH_BACKOFF:
+        return RecoveryLadderStep.RETRY_SMALLER_STEP
+    if chosen_action == RecoveryActionType.INSPECT_REPLAY:
+        return RecoveryLadderStep.DIAGNOSTIC_TASK
+    if chosen_action == RecoveryActionType.REQUEST_HUMAN_APPROVAL:
+        return RecoveryLadderStep.REQUEST_APPROVAL
+    if chosen_action == RecoveryActionType.MARK_FAILED:
+        return RecoveryLadderStep.PAUSE_OR_BLOCK
+    if next_scheduler_queue in {
+        SchedulerQueueKind.BLOCKED,
+        SchedulerQueueKind.WAITING_FOR_APPROVAL,
+    }:
+        return RecoveryLadderStep.PAUSE_OR_BLOCK
+    return RecoveryLadderStep.RETRY_SAME_STEP
 
 
 def scheduler_available_at(

@@ -1704,6 +1704,17 @@ async def test_control_supervisor_runs_multi_node_graph_in_dependency_order(tmp_
         DurableTaskNodeStatus.DONE.value
     }
     assert durable["resume_state"]["reason"] == "graph_complete"
+    assert durable["mission_scorecard"]["objective_progress"] == "satisfied"
+    assert durable["mission_scorecard"]["verification_pass_rate"] == 1.0
+    assert parent["artifacts"]["mission_scorecard"]["objective_progress"] == "satisfied"
+    assert parent["artifacts"]["mission_review"]["final_status"] == "completed"
+    assert parent["artifacts"]["mission_review"]["scorecard_snapshot"] == parent[
+        "artifacts"
+    ]["mission_scorecard"]
+    timeline = store.query_timeline(started.task["task_id"], page_size=100)
+    assert "post_mission_review_recorded" in {
+        event["event_type"] for event in timeline["events"]
+    }
 
 
 @pytest.mark.asyncio
@@ -1937,3 +1948,24 @@ async def test_control_supervisor_blocked_node_does_not_stop_independent_ready_n
         "independent_branch": "done",
         "dependent_branch": "blocked",
     }
+    assert durable["mission_scorecard"]["objective_progress"] == "blocked"
+    assert parent["artifacts"]["mission_review"]["final_status"] == "blocked"
+    assert parent["artifacts"]["mission_review"]["improvement_candidates"][0][
+        "candidate_type"
+    ] == "diagnostic_task"
+    assert parent["artifacts"]["mission_memory_links"]["memory_promotion_candidates"][0][
+        "type"
+    ] == "failure_pattern"
+    timeline = store.query_timeline(started.task["task_id"], page_size=100)
+    events = timeline["events"]
+    assert "post_mission_review_recorded" in {event["event_type"] for event in events}
+    iteration_events = [
+        event
+        for event in events
+        if event["event_type"] == "supervisor_iteration_completed"
+    ]
+    assert any(
+        event["payload"]["runtime"]["recovery_decision"]["recovery_ladder_step"]
+        == "diagnostic_task"
+        for event in iteration_events
+    )

@@ -92,3 +92,49 @@ def test_mission_contract_rejects_unknown_task_node_dependency():
                 {"node_id": "verify", "depends_on": ["missing"]},
             ],
         )
+
+
+def test_mission_contract_v2_fields_are_backward_compatible():
+    contract = MissionContract.model_validate({"objective": "Keep a mission healthy"})
+
+    assert contract.schema_version == "mission_contract.v2"
+    assert contract.success_metrics == []
+    assert contract.memory_policy.require_operator_approval is True
+    assert contract.memory_policy.candidate_ttl_seconds == 2_592_000
+    assert "create_improvement_candidate" in contract.recovery_policy.ladder
+    assert contract.improvement_policy.mode == "canary_only"
+
+
+def test_build_mission_contract_accepts_manifest_policy_fields():
+    contract = build_mission_contract(
+        objective="Keep research watch current",
+        success_metrics=["fresh sources found", "duplicates avoided"],
+        risk_budget={"max_runtime_hours": 12, "max_repair_depth": 1},
+        capability_policy={
+            "allow": ["web.search", "browser.read"],
+            "approval_required": ["shell.run"],
+            "deny": ["browser.form_submit"],
+        },
+        memory_policy={
+            "promote_only": ["failure_pattern", "recovery_pattern"],
+            "never_promote": ["raw_transcript", "secret"],
+            "candidate_ttl_seconds": 3600,
+        },
+        recovery_policy={"max_retries_per_step": 1, "ladder": ["verify_state"]},
+        improvement_policy={
+            "mode": "canary_only",
+            "candidate_kinds": ["benchmark_case", "verifier_improvement"],
+        },
+    )
+
+    payload = contract.model_dump(mode="json")
+    assert payload["schema_version"] == "mission_contract.v2"
+    assert payload["success_metrics"] == ["fresh sources found", "duplicates avoided"]
+    assert payload["risk_budget"]["max_runtime_hours"] == 12
+    assert payload["capability_policy"]["approval_required"] == ["shell.run"]
+    assert payload["memory_policy"]["candidate_ttl_seconds"] == 3600
+    assert payload["recovery_policy"]["ladder"] == ["verify_state"]
+    assert payload["improvement_policy"]["candidate_kinds"] == [
+        "benchmark_case",
+        "verifier_improvement",
+    ]

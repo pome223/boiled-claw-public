@@ -1571,6 +1571,12 @@ function renderLongRunningTaskState(task) {
   const missionContract = durable.mission_contract && typeof durable.mission_contract === "object"
     ? durable.mission_contract
     : (task.artifacts?.mission_contract && typeof task.artifacts.mission_contract === "object" ? task.artifacts.mission_contract : {});
+  const missionScorecard = durable.mission_scorecard && typeof durable.mission_scorecard === "object"
+    ? durable.mission_scorecard
+    : (task.artifacts?.mission_scorecard && typeof task.artifacts.mission_scorecard === "object" ? task.artifacts.mission_scorecard : {});
+  const missionReview = task.artifacts?.mission_review && typeof task.artifacts.mission_review === "object"
+    ? task.artifacts.mission_review
+    : (durable.mission_review && typeof durable.mission_review === "object" ? durable.mission_review : {});
   const resumeState = durable.resume_state && typeof durable.resume_state === "object"
     ? durable.resume_state
     : {};
@@ -1681,6 +1687,46 @@ function renderLongRunningTaskState(task) {
     `</div>`,
   ].join("");
 
+  const renderMissionScorecard = () => {
+    if (!missionScorecard || !Object.keys(missionScorecard).length) return "";
+    const metadata = missionScorecard.metadata && typeof missionScorecard.metadata === "object" ? missionScorecard.metadata : {};
+    const failureCounts = metadata.failure_type_counts && typeof metadata.failure_type_counts === "object"
+      ? Object.entries(metadata.failure_type_counts).map(([key, value]) => `${key}=${value}`).join(" · ")
+      : "";
+    return [
+      `<div class="detail-section">`,
+      `<div class="k">Mission Scorecard</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Progress</div><div>${escapeHtml(humanizeLongRunningToken(missionScorecard.objective_progress || "-"))}</div><div class="item-meta mono">${escapeHtml(missionScorecard.last_verifier_verdict || "-")}</div></div>`,
+      `<div class="detail-card"><div class="k">Verification</div><div>${escapeHtml(Number(missionScorecard.verification_pass_rate || 0).toFixed(2))}</div><div class="item-meta mono">${escapeHtml(`recovery=${Number(missionScorecard.recovery_success_rate || 0).toFixed(2)}`)}</div></div>`,
+      `<div class="detail-card"><div class="k">Friction</div><div>${escapeHtml(`blocked=${missionScorecard.blocked_count ?? 0} approvals=${missionScorecard.approval_wait_count ?? 0}`)}</div><div class="item-meta mono">${escapeHtml(`repeated=${missionScorecard.repeated_failure_count ?? 0}`)}</div></div>`,
+      `<div class="detail-card"><div class="k">Candidates</div><div>${escapeHtml(`improve=${missionScorecard.improvement_candidate_count ?? 0}`)}</div><div class="item-meta mono">${escapeHtml(`memory=${missionScorecard.memory_promotion_candidate_count ?? 0}`)}</div></div>`,
+      `</div>`,
+      failureCounts ? `<div class="item-meta mono">${escapeHtml(`failures=${failureCounts}`)}</div>` : "",
+      `</div>`,
+    ].join("");
+  };
+
+  const renderMissionReview = () => {
+    if (!missionReview || !Object.keys(missionReview).length) return "";
+    const failures = Array.isArray(missionReview.failure_buckets) ? missionReview.failure_buckets : [];
+    const improvements = Array.isArray(missionReview.improvement_candidates) ? missionReview.improvement_candidates : [];
+    const memoryCandidates = Array.isArray(missionReview.memory_promotion_candidates) ? missionReview.memory_promotion_candidates : [];
+    const recommendations = Array.isArray(missionReview.recommended_next_contract_edits) ? missionReview.recommended_next_contract_edits : [];
+    const renderBucket = (bucket) => `<div class="detail-card"><div class="k">${escapeHtml(bucket.failure_type || "failure")}</div><div>${escapeHtml(String(bucket.count ?? 0))}</div></div>`;
+    const renderCandidate = (candidate) => `<div class="detail-card"><div class="k">${escapeHtml(candidate.candidate_type || candidate.type || "candidate")}</div><div class="item-detail">${escapeHtml(candidate.summary || candidate.content || "-")}</div><div class="item-meta mono">${escapeHtml(candidate.failure_type || candidate.candidate_id || candidate.source_artifact_ref || "-")}</div></div>`;
+    return [
+      `<div class="detail-section">`,
+      `<div class="k">Post-Mission Review</div>`,
+      `<div class="detail-card"><div class="item-detail">${escapeHtml(missionReview.summary || "-")}</div><div class="item-meta mono">${escapeHtml(`${missionReview.schema_version || "-"} · ${missionReview.final_status || "-"}`)}</div></div>`,
+      failures.length ? `<div class="k">Failure Buckets</div><div class="detail-grid">${failures.map(renderBucket).join("")}</div>` : "",
+      improvements.length ? `<div class="k">Improvement Candidates</div><div class="detail-grid">${improvements.map(renderCandidate).join("")}</div>` : "",
+      memoryCandidates.length ? `<div class="k">Memory Promotion Candidates</div><div class="detail-grid">${memoryCandidates.map(renderCandidate).join("")}</div>` : "",
+      recommendations.length ? `<div class="item-meta">${escapeHtml(`next contract edits: ${recommendations.join(" · ")}`)}</div>` : "",
+      `</div>`,
+    ].join("");
+  };
+
   return [
     `<div class="detail-section">`,
     `<div class="k">Long-Running State</div>`,
@@ -1729,6 +1775,8 @@ function renderLongRunningTaskState(task) {
       ? `<div class="detail-grid">${budgetExhaustedJobs.map(renderRunJob).join("")}</div>`
       : `<div class="muted">No budget exhaustion recorded.</div>`,
     `</div>`,
+    renderMissionScorecard(),
+    renderMissionReview(),
   ].join("");
 }
 

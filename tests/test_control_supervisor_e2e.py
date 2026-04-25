@@ -210,6 +210,11 @@ async def test_e2e_control_supervisor_resumes_multi_node_graph_after_gateway_res
             }
             assert durable["resume_state"]["reason"] == "graph_complete"
             assert durable["supervisor_health"]["active_node_id"].endswith("/verify")
+            assert durable["mission_scorecard"]["objective_progress"] == "satisfied"
+            assert completed_task["artifacts"]["mission_review"]["final_status"] == "completed"
+            assert completed_task["artifacts"]["mission_review"]["schema_version"] == (
+                "mission_review.v1"
+            )
             assert completed_task["artifacts"]["progress"]["heartbeat"][
                 "last_heartbeat_at"
             ]
@@ -226,6 +231,7 @@ async def test_e2e_control_supervisor_resumes_multi_node_graph_after_gateway_res
             assert "supervisor_resumed" in event_types
             assert "scheduler_worker_decision" in event_types
             assert "supervisor_heartbeat" in event_types
+            assert "post_mission_review_recorded" in event_types
             assert "supervisor_completed" in event_types
     finally:
         await _stop_gateway(second_server, second_server_task)

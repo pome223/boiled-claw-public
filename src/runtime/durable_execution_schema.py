@@ -52,6 +52,18 @@ class RecoveryActionType(str, Enum):
     MARK_FAILED = "mark_failed"
 
 
+class RecoveryLadderStep(str, Enum):
+    OBSERVE_AGAIN = "observe_again"
+    VERIFY_STATE = "verify_state"
+    RETRY_SAME_STEP = "retry_same_step"
+    RETRY_SMALLER_STEP = "retry_smaller_step"
+    ALTERNATE_CAPABILITY = "alternate_capability"
+    DIAGNOSTIC_TASK = "diagnostic_task"
+    REQUEST_APPROVAL = "request_approval"
+    PAUSE_OR_BLOCK = "pause_or_block"
+    CREATE_IMPROVEMENT_CANDIDATE = "create_improvement_candidate"
+
+
 class EscalationStatus(str, Enum):
     WAITING_FOR_APPROVAL = "waiting_for_approval"
     APPROVED = "approved"
@@ -222,9 +234,11 @@ class RecoveryPolicy(BaseModel):
 class RecoveryDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    schema_version: str = "recovery_decision.v1"
     node_id: str
     failure_type: str | None = None
     chosen_action: RecoveryActionType | None = None
+    recovery_ladder_step: RecoveryLadderStep | None = None
     policy: RecoveryPolicy | None = None
     next_scheduler_queue: SchedulerQueueKind
     budget_exhausted: bool = False

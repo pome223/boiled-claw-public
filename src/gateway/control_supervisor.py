@@ -44,9 +44,15 @@ from src.runtime.orchestration_policy import (
     default_guardrail_budget_policy,
     default_recovery_policies,
     job_run_status_from_verdict,
+    recovery_ladder_step_for_decision,
     recovery_policy_for_failure_type,
     repair_depth_increment,
     scheduler_queue_reason,
+)
+from src.runtime.mission_runtime import (
+    build_mission_memory_links,
+    build_mission_review,
+    build_mission_scorecard,
 )
 from src.tools.tasks import (
     append_task_event_record,
@@ -90,6 +96,7 @@ def _format_mission_contract_section(mission_contract: MissionContract | None) -
         ("abort_conditions", _abort_condition_type_values(mission_contract)),
         ("completion_criteria", mission_contract.completion_criteria),
         ("evidence_requirements", mission_contract.evidence_requirements),
+        ("success_metrics", mission_contract.success_metrics),
     ]
     for label, values in sections:
         if values:
@@ -299,7 +306,9 @@ def _mission_contract_artifact_ref(
         ref=mission_contract.contract_id,
         label="mission_contract",
         metadata={
+            "schema_version": mission_contract.schema_version,
             "objective": mission_contract.objective,
+            "success_metrics": list(mission_contract.success_metrics),
             "completion_criteria": list(mission_contract.completion_criteria),
             "evidence_requirements": list(mission_contract.evidence_requirements),
         },
@@ -1344,7 +1353,7 @@ class ControlLoopSupervisor:
                 scheduler_queue_counts=runtime_state["queue_state"].counts(),
                 reason="resume_from_open_task",
             )
-        return {
+        durable_execution = {
             "mission_contract": mission_contract.model_dump(mode="json"),
             "task_graph": task_graph.model_dump(mode="json"),
             "job_runs": [
@@ -1367,6 +1376,55 @@ class ControlLoopSupervisor:
             "resume_state": resume_state.model_dump(mode="json"),
             "supervisor_health": dict(runtime_state.get("heartbeat") or {}),
         }
+        durable_execution["mission_scorecard"] = build_mission_scorecard(
+            durable_execution,
+        ).model_dump(mode="json")
+        return durable_execution
+
+    def _terminal_mission_artifacts(
+        self,
+        *,
+        task_id: str,
+        durable_execution: dict[str, Any],
+        final_status: str,
+    ) -> dict[str, Any]:
+        review = build_mission_review(
+            durable_execution,
+            final_status=final_status,
+            source_task_id=task_id,
+            created_at=_utc_datetime(self._now()),
+        )
+        return {
+            "durable_execution": durable_execution,
+            "mission_scorecard": review.scorecard_snapshot,
+            "mission_review": review.model_dump(mode="json"),
+            "mission_memory_links": build_mission_memory_links(review),
+        }
+
+    def _append_post_mission_review_event(
+        self,
+        task_id: str,
+        *,
+        final_status: str,
+        artifacts: dict[str, Any],
+    ) -> None:
+        review = artifacts.get("mission_review")
+        if not isinstance(review, dict):
+            return
+        self._append_task_event_record(
+            task_id,
+            event_type="post_mission_review_recorded",
+            status=final_status,
+            title="Post-mission review recorded",
+            payload={
+                "summary": review.get("summary") or "Post-mission review recorded.",
+                "final_status": final_status,
+                "scorecard": artifacts.get("mission_scorecard") or {},
+                "failure_buckets": review.get("failure_buckets") or [],
+                "improvement_candidates": review.get("improvement_candidates") or [],
+                "memory_promotion_candidates": review.get("memory_promotion_candidates") or [],
+            },
+        )
 
     def _initial_durable_execution_payload(
         self,
@@ -1584,6 +1642,11 @@ class ControlLoopSupervisor:
             node_id=runtime_state["node_id"],
             failure_type=failure_type,
             chosen_action=chosen_action,
+            recovery_ladder_step=recovery_ladder_step_for_decision(
+                chosen_action=chosen_action,
+                next_scheduler_queue=current_node_queue,
+                budget_exhausted=budget_exhausted,
+            ),
             policy=policy,
             next_scheduler_queue=current_node_queue,
             budget_exhausted=budget_exhausted,
@@ -1631,6 +1694,10 @@ class ControlLoopSupervisor:
             ),
         )
         queue_entry.reason = queue_reason
+        if decision.recovery_ladder_step is not None:
+            queue_entry.metadata["recovery_ladder_step"] = (
+                decision.recovery_ladder_step.value
+            )
         if abort_reason:
             queue_entry.metadata["abort_reason"] = abort_reason
 
@@ -1798,6 +1865,7 @@ class ControlLoopSupervisor:
         )
         return {
             "durable_execution": durable_execution,
+            "mission_scorecard": durable_execution.get("mission_scorecard"),
             "failure_type": failure_type,
             "recovery_policy": policy.model_dump(mode="json") if policy is not None else None,
             "recovery_decision": decision.model_dump(mode="json"),
@@ -2349,6 +2417,15 @@ class ControlLoopSupervisor:
                         )
                         return
 
+                final_durable_execution = self._serialize_runtime_state(
+                    runtime_state,
+                    objective=objective,
+                )
+                terminal_artifacts = self._terminal_mission_artifacts(
+                    task_id=task_id,
+                    durable_execution=final_durable_execution,
+                    final_status="completed",
+                )
                 self._update_task_record(
                     task_id,
                     status="completed",
@@ -2358,13 +2435,15 @@ class ControlLoopSupervisor:
                             "child_task_ids": child_task_ids,
                             "next_run_at": None,
                         },
-                        "durable_execution": self._serialize_runtime_state(
-                            runtime_state,
-                            objective=objective,
-                        ),
+                        **terminal_artifacts,
                     },
                     metadata={"completed_iterations": completed_iterations},
                     error=None,
+                )
+                self._append_post_mission_review_event(
+                    task_id,
+                    final_status="completed",
+                    artifacts=terminal_artifacts,
                 )
                 self._append_task_event_record(
                     task_id,
@@ -2462,6 +2541,7 @@ class ControlLoopSupervisor:
                     "scheduler_queue": runtime_report.get("scheduler_queue"),
                 },
                 "durable_execution": runtime_report["durable_execution"],
+                "mission_scorecard": runtime_report.get("mission_scorecard") or {},
             },
             metadata={
                 "needs_human": True,
@@ -2510,6 +2590,11 @@ class ControlLoopSupervisor:
         result: ExecutionResult,
         runtime_report: dict[str, Any],
     ) -> None:
+        terminal_artifacts = self._terminal_mission_artifacts(
+            task_id=task_id,
+            durable_execution=runtime_report["durable_execution"],
+            final_status="blocked",
+        )
         self._update_task_record(
             task_id,
             status="blocked",
@@ -2527,7 +2612,7 @@ class ControlLoopSupervisor:
                     "failure_type": runtime_report.get("failure_type"),
                     "scheduler_queue": runtime_report.get("scheduler_queue"),
                 },
-                "durable_execution": runtime_report["durable_execution"],
+                **terminal_artifacts,
             },
             metadata={
                 "blocking_child_task_id": child_task_id,
@@ -2539,6 +2624,11 @@ class ControlLoopSupervisor:
                 or "control supervisor blocked"
             ),
             ended_at=self._now(),
+        )
+        self._append_post_mission_review_event(
+            task_id,
+            final_status="blocked",
+            artifacts=terminal_artifacts,
         )
         self._append_task_event_record(
             task_id,
@@ -2578,6 +2668,11 @@ class ControlLoopSupervisor:
         runtime_report: dict[str, Any],
     ) -> None:
         abort_reason = str(runtime_report.get("abort_reason") or "").strip()
+        terminal_artifacts = self._terminal_mission_artifacts(
+            task_id=task_id,
+            durable_execution=runtime_report["durable_execution"],
+            final_status="failed",
+        )
         self._update_task_record(
             task_id,
             status="failed",
@@ -2597,7 +2692,7 @@ class ControlLoopSupervisor:
                     "failure_type": runtime_report.get("failure_type"),
                     "scheduler_queue": runtime_report.get("scheduler_queue"),
                 },
-                "durable_execution": runtime_report["durable_execution"],
+                **terminal_artifacts,
             },
             metadata={
                 "mission_aborted": True,
@@ -2607,6 +2702,11 @@ class ControlLoopSupervisor:
             },
             error=f"mission_aborted:{abort_reason or 'abort_condition'}",
             ended_at=self._now(),
+        )
+        self._append_post_mission_review_event(
+            task_id,
+            final_status="failed",
+            artifacts=terminal_artifacts,
         )
         self._append_task_event_record(
             task_id,
