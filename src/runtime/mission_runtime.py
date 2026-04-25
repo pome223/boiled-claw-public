@@ -9,7 +9,6 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-
 MISSION_SCORECARD_SCHEMA_VERSION = "mission_scorecard.v1"
 MISSION_REVIEW_SCHEMA_VERSION = "mission_review.v1"
 MEMORY_PROMOTION_CANDIDATE_SCHEMA_VERSION = "memory_promotion_candidate.v1"
@@ -39,6 +38,14 @@ class MissionObjectiveProgress(str, Enum):
     PARTIAL = "partial"
     SATISFIED = "satisfied"
     BLOCKED = "blocked"
+
+
+class MemoryPromotionApprovalStatus(str, Enum):
+    CANDIDATE_ONLY = "candidate_only"
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
 
 
 class MissionScorecard(BaseModel):
@@ -87,7 +94,13 @@ class MissionMemoryPromotionCandidate(BaseModel):
     promotion_reason: str
     invalidation_rule: str = ""
     approval_required: bool = True
-    approval_status: str = "candidate_only"
+    approval_status: MemoryPromotionApprovalStatus = (
+        MemoryPromotionApprovalStatus.CANDIDATE_ONLY
+    )
+    approved_by: str = ""
+    approved_at: datetime | None = None
+    rejected_reason: str = ""
+    source_refs: list[str] = Field(default_factory=list)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -120,7 +133,9 @@ def _job_runs(durable_execution: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _verdicts(durable_execution: dict[str, Any]) -> list[dict[str, Any]]:
-    explicit = [_as_dict(item) for item in _as_list(durable_execution.get("verifier_verdicts"))]
+    explicit = [
+        _as_dict(item) for item in _as_list(durable_execution.get("verifier_verdicts"))
+    ]
     if explicit:
         return explicit
     verdicts: list[dict[str, Any]] = []
@@ -146,7 +161,9 @@ def _failure_counts(durable_execution: dict[str, Any]) -> Counter[str]:
 
 
 def _recovery_decisions(durable_execution: dict[str, Any]) -> list[dict[str, Any]]:
-    return [_as_dict(item) for item in _as_list(durable_execution.get("recovery_decisions"))]
+    return [
+        _as_dict(item) for item in _as_list(durable_execution.get("recovery_decisions"))
+    ]
 
 
 def _counter_by_key(items: list[dict[str, Any]], key: str) -> dict[str, int]:
@@ -172,7 +189,9 @@ def _artifact_source_refs(
             refs.append(ref)
 
     add(f"task:{source_task_id}" if source_task_id else "")
-    contract_id = str(_as_dict(durable_execution.get("mission_contract")).get("contract_id") or "")
+    contract_id = str(
+        _as_dict(durable_execution.get("mission_contract")).get("contract_id") or ""
+    )
     add(f"mission_contract:{contract_id}" if contract_id else "")
 
     for child_task_id in child_task_ids or []:
@@ -180,7 +199,11 @@ def _artifact_source_refs(
     for run in _job_runs(durable_execution):
         add(f"job_run:{run.get('run_id')}" if run.get("run_id") else "")
         replay = _as_dict(run.get("replay_reference"))
-        add(f"child_task:{replay.get('child_task_id')}" if replay.get("child_task_id") else "")
+        add(
+            f"child_task:{replay.get('child_task_id')}"
+            if replay.get("child_task_id")
+            else ""
+        )
         verdict = _as_dict(run.get("verifier_verdict"))
         for evidence_ref in _str_list(verdict.get("evidence_refs")):
             add(evidence_ref)
@@ -188,7 +211,11 @@ def _artifact_source_refs(
         for evidence_ref in _str_list(verdict.get("evidence_refs")):
             add(evidence_ref)
         replay = _as_dict(verdict.get("replay_reference"))
-        add(f"child_task:{replay.get('child_task_id')}" if replay.get("child_task_id") else "")
+        add(
+            f"child_task:{replay.get('child_task_id')}"
+            if replay.get("child_task_id")
+            else ""
+        )
     for checkpoint in _as_list(durable_execution.get("checkpoints")):
         checkpoint_dict = _as_dict(checkpoint)
         add(
@@ -198,7 +225,11 @@ def _artifact_source_refs(
         )
         for replay_ref in _as_list(checkpoint_dict.get("replay_references")):
             replay = _as_dict(replay_ref)
-            add(f"child_task:{replay.get('child_task_id')}" if replay.get("child_task_id") else "")
+            add(
+                f"child_task:{replay.get('child_task_id')}"
+                if replay.get("child_task_id")
+                else ""
+            )
     for decision in _recovery_decisions(durable_execution):
         for source_ref in _str_list(decision.get("source_refs")):
             add(source_ref)
@@ -282,7 +313,8 @@ def _memory_policy(durable_execution: dict[str, Any]) -> dict[str, Any]:
     contract = _as_dict(durable_execution.get("mission_contract"))
     policy = _as_dict(contract.get("memory_policy"))
     return {
-        "promote_only": _str_list(policy.get("promote_only")) or [
+        "promote_only": _str_list(policy.get("promote_only"))
+        or [
             "fact",
             "procedure",
             "failure_pattern",
@@ -290,14 +322,265 @@ def _memory_policy(durable_execution: dict[str, Any]) -> dict[str, Any]:
             "approved_improvement",
             "mission_summary",
         ],
-        "never_promote": _str_list(policy.get("never_promote")) or [
+        "never_promote": _str_list(policy.get("never_promote"))
+        or [
             "raw_transcript",
             "secret",
             "one_off_noise",
         ],
-        "require_operator_approval": bool(policy.get("require_operator_approval", True)),
+        "require_operator_approval": bool(
+            policy.get("require_operator_approval", True)
+        ),
         "candidate_ttl_seconds": policy.get("candidate_ttl_seconds", 2_592_000),
     }
+
+
+def _normalize_approval_status(value: Any) -> MemoryPromotionApprovalStatus:
+    if isinstance(value, MemoryPromotionApprovalStatus):
+        return value
+    text = str(value or "").strip().lower()
+    for status in MemoryPromotionApprovalStatus:
+        if text == status.value:
+            return status
+    return MemoryPromotionApprovalStatus.CANDIDATE_ONLY
+
+
+def _candidate_source_refs(
+    *,
+    source_task_id: str | None,
+    source_artifact_ref: str,
+    existing_refs: list[Any] | None = None,
+) -> list[str]:
+    refs: list[str] = []
+
+    def add(value: object) -> None:
+        ref = str(value or "").strip()
+        if ref and ref not in refs:
+            refs.append(ref)
+
+    for ref in existing_refs or []:
+        add(ref)
+    add(f"task:{source_task_id}" if source_task_id else "")
+    add(f"mission_review:{source_task_id}" if source_task_id else "")
+    add(source_artifact_ref)
+    return refs
+
+
+def _memory_candidate_is_expired(
+    candidate: MissionMemoryPromotionCandidate,
+    *,
+    now: datetime,
+) -> bool:
+    return candidate.expires_at is not None and candidate.expires_at <= now
+
+
+def normalize_memory_promotion_candidate(
+    candidate: MissionMemoryPromotionCandidate | dict[str, Any],
+    *,
+    default_status: (
+        MemoryPromotionApprovalStatus | str
+    ) = MemoryPromotionApprovalStatus.CANDIDATE_ONLY,
+    source_task_id: str | None = None,
+    source_artifact_ref: str | None = None,
+    now: datetime | None = None,
+) -> MissionMemoryPromotionCandidate:
+    payload = (
+        candidate.model_dump(mode="python")
+        if isinstance(candidate, MissionMemoryPromotionCandidate)
+        else dict(_as_dict(candidate))
+    )
+    resolved_source_task_id = (
+        str(source_task_id or payload.get("source_task_id") or "").strip() or None
+    )
+    resolved_source_ref = str(
+        source_artifact_ref
+        or payload.get("source_artifact_ref")
+        or "mission_review.memory_promotion_candidates"
+    ).strip()
+    metadata = dict(_as_dict(payload.get("metadata")))
+    if not payload.get("expires_at"):
+        metadata.setdefault(
+            "no_expiry_reason", "legacy candidate did not include expires_at"
+        )
+    status = _normalize_approval_status(
+        payload.get("approval_status") or default_status
+    )
+    if status == MemoryPromotionApprovalStatus.CANDIDATE_ONLY:
+        status = _normalize_approval_status(default_status)
+
+    payload.update(
+        {
+            "schema_version": str(
+                payload.get("schema_version")
+                or MEMORY_PROMOTION_CANDIDATE_SCHEMA_VERSION
+            ),
+            "candidate_id": str(payload.get("candidate_id") or "").strip(),
+            "type": str(payload.get("type") or "failure_pattern").strip(),
+            "content": str(payload.get("content") or "").strip(),
+            "source_task_id": resolved_source_task_id,
+            "source_artifact_ref": resolved_source_ref,
+            "confidence": float(payload.get("confidence") or 0.0),
+            "last_verified_at": payload.get("last_verified_at") or (now or _utc_now()),
+            "promotion_reason": str(
+                payload.get("promotion_reason") or "mission review candidate"
+            ).strip(),
+            "invalidation_rule": str(
+                payload.get("invalidation_rule")
+                or "Invalidate when the source mission review is superseded."
+            ).strip(),
+            "approval_required": bool(payload.get("approval_required", True)),
+            "approval_status": status,
+            "approved_by": str(payload.get("approved_by") or "").strip(),
+            "approved_at": payload.get("approved_at"),
+            "rejected_reason": str(payload.get("rejected_reason") or "").strip(),
+            "source_refs": _candidate_source_refs(
+                source_task_id=resolved_source_task_id,
+                source_artifact_ref=resolved_source_ref,
+                existing_refs=_as_list(payload.get("source_refs")),
+            ),
+            "metadata": metadata,
+        }
+    )
+    normalized = MissionMemoryPromotionCandidate(**payload)
+    current_time = now or _utc_now()
+    if _memory_candidate_is_expired(
+        normalized, now=current_time
+    ) and normalized.approval_status in {
+        MemoryPromotionApprovalStatus.CANDIDATE_ONLY,
+        MemoryPromotionApprovalStatus.PENDING,
+    }:
+        normalized = normalized.model_copy(
+            update={"approval_status": MemoryPromotionApprovalStatus.EXPIRED}
+        )
+    return normalized
+
+
+def approve_memory_promotion_candidate(
+    candidate: MissionMemoryPromotionCandidate | dict[str, Any],
+    *,
+    approved_by: str,
+    approved_at: datetime | None = None,
+) -> MissionMemoryPromotionCandidate:
+    approver = str(approved_by or "").strip()
+    if not approver:
+        raise ValueError("approved_by is required")
+    current_time = approved_at or _utc_now()
+    normalized = normalize_memory_promotion_candidate(
+        candidate,
+        default_status=MemoryPromotionApprovalStatus.PENDING,
+        now=current_time,
+    )
+    if normalized.approval_status == MemoryPromotionApprovalStatus.EXPIRED:
+        raise ValueError("expired memory promotion candidates cannot be approved")
+    return normalized.model_copy(
+        update={
+            "approval_status": MemoryPromotionApprovalStatus.APPROVED,
+            "approved_by": approver,
+            "approved_at": current_time,
+            "rejected_reason": "",
+        }
+    )
+
+
+def reject_memory_promotion_candidate(
+    candidate: MissionMemoryPromotionCandidate | dict[str, Any],
+    *,
+    rejected_reason: str,
+    now: datetime | None = None,
+) -> MissionMemoryPromotionCandidate:
+    reason = str(rejected_reason or "").strip()
+    if not reason:
+        raise ValueError("rejected_reason is required")
+    normalized = normalize_memory_promotion_candidate(
+        candidate,
+        default_status=MemoryPromotionApprovalStatus.PENDING,
+        now=now or _utc_now(),
+    )
+    return normalized.model_copy(
+        update={
+            "approval_status": MemoryPromotionApprovalStatus.REJECTED,
+            "approved_by": "",
+            "approved_at": None,
+            "rejected_reason": reason,
+        }
+    )
+
+
+def is_memory_promotion_candidate_approved(
+    candidate: MissionMemoryPromotionCandidate | dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    current_time = now or _utc_now()
+    normalized = normalize_memory_promotion_candidate(candidate, now=current_time)
+    return (
+        normalized.approval_status == MemoryPromotionApprovalStatus.APPROVED
+        and not _memory_candidate_is_expired(normalized, now=current_time)
+    )
+
+
+def is_memory_promotion_candidate_approval_ready(
+    candidate: MissionMemoryPromotionCandidate | dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> bool:
+    normalized = normalize_memory_promotion_candidate(
+        candidate,
+        default_status=MemoryPromotionApprovalStatus.PENDING,
+        now=now or _utc_now(),
+    )
+    return (
+        normalized.approval_required
+        and normalized.approval_status == MemoryPromotionApprovalStatus.PENDING
+    )
+
+
+def approval_ready_memory_promotion_candidates(
+    candidates: list[MissionMemoryPromotionCandidate | dict[str, Any]],
+    *,
+    now: datetime | None = None,
+) -> list[MissionMemoryPromotionCandidate]:
+    current_time = now or _utc_now()
+    return [
+        normalize_memory_promotion_candidate(
+            candidate,
+            default_status=MemoryPromotionApprovalStatus.PENDING,
+            now=current_time,
+        )
+        for candidate in candidates
+        if is_memory_promotion_candidate_approval_ready(
+            candidate,
+            now=current_time,
+        )
+    ]
+
+
+def build_memory_promotion_candidate_artifacts(
+    review: MissionReview | dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    review_payload = (
+        review.model_dump(mode="python")
+        if isinstance(review, MissionReview)
+        else _as_dict(review)
+    )
+    source_task_id = str(review_payload.get("mission_task_id") or "").strip() or None
+    current_time = now or _utc_now()
+    artifacts: list[dict[str, Any]] = []
+    for candidate in _as_list(review_payload.get("memory_promotion_candidates")):
+        normalized = normalize_memory_promotion_candidate(
+            _as_dict(candidate),
+            default_status=MemoryPromotionApprovalStatus.PENDING,
+            source_task_id=source_task_id,
+            source_artifact_ref=str(
+                _as_dict(candidate).get("source_artifact_ref")
+                or "mission_review.memory_promotion_candidates"
+            ),
+            now=current_time,
+        )
+        artifacts.append(normalized.model_dump(mode="json"))
+    return artifacts
 
 
 def build_memory_promotion_candidates(
@@ -319,7 +602,10 @@ def build_memory_promotion_candidates(
         expires_at = current_time + timedelta(seconds=ttl)
 
     candidates: list[MissionMemoryPromotionCandidate] = []
-    contract_id = str(_as_dict(durable_execution.get("mission_contract")).get("contract_id") or "mission")
+    contract_id = str(
+        _as_dict(durable_execution.get("mission_contract")).get("contract_id")
+        or "mission"
+    )
     for failure_type, count in sorted(_failure_counts(durable_execution).items()):
         confidence = min(0.9, 0.55 + (0.1 * max(1, count)))
         candidates.append(
@@ -465,17 +751,15 @@ def build_mission_review(
         final_status=final_status,
         updated_at=current_time,
     )
-    scorecard_snapshot = _as_dict(mission_scorecard) or scorecard.model_dump(mode="json")
+    scorecard_snapshot = _as_dict(mission_scorecard) or scorecard.model_dump(
+        mode="json"
+    )
     failure_counts = _failure_counts(durable_execution)
     failure_buckets = [
         {"failure_type": failure_type, "count": count}
         for failure_type, count in sorted(failure_counts.items())
     ]
-    repeated = [
-        item
-        for item in failure_buckets
-        if int(item.get("count") or 0) > 1
-    ]
+    repeated = [item for item in failure_buckets if int(item.get("count") or 0) > 1]
     improvement_candidates = [
         item.model_dump(mode="json")
         for item in _build_improvement_candidates(durable_execution)
@@ -493,9 +777,13 @@ def build_mission_review(
     if not _str_list(contract.get("success_metrics")):
         recommendations.append("Add explicit success_metrics to the MissionContract.")
     if failure_buckets:
-        recommendations.append("Review recovery_policy ladder coverage for observed failure buckets.")
+        recommendations.append(
+            "Review recovery_policy ladder coverage for observed failure buckets."
+        )
     if memory_candidates:
-        recommendations.append("Review memory_promotion_candidates before operator-approved promotion.")
+        recommendations.append(
+            "Review memory_promotion_candidates before operator-approved promotion."
+        )
 
     recovery_decisions = _recovery_decisions(durable_execution)
     recovery_outcome_counts = _counter_by_key(recovery_decisions, "outcome")
@@ -566,18 +854,32 @@ def build_post_mission_review_artifacts(
         child_task_ids=child_task_ids,
         created_at=created_at,
     )
+    memory_candidate_artifacts = build_memory_promotion_candidate_artifacts(
+        review,
+        now=review.created_at,
+    )
     return {
         "durable_execution": durable_execution,
         "mission_scorecard": review.scorecard_snapshot,
         "mission_review": review.model_dump(mode="json"),
-        "mission_memory_links": build_mission_memory_links(review),
+        "memory_promotion_candidates": memory_candidate_artifacts,
+        "mission_memory_links": build_mission_memory_links(
+            review,
+            memory_promotion_candidates=memory_candidate_artifacts,
+        ),
     }
 
 
 def build_mission_memory_links(
     review: MissionReview,
+    *,
+    memory_promotion_candidates: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": MISSION_MEMORY_LINKS_SCHEMA_VERSION,
-        "memory_promotion_candidates": list(review.memory_promotion_candidates),
+        "memory_promotion_candidates": (
+            memory_promotion_candidates
+            if memory_promotion_candidates is not None
+            else list(review.memory_promotion_candidates)
+        ),
     }

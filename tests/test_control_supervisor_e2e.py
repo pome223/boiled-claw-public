@@ -16,6 +16,10 @@ from src.runtime.durable_execution_schema import (
     SchedulerQueueEntry,
     SchedulerQueueKind,
 )
+from src.runtime.mission_evals import (
+    compare_mission_eval_results,
+    run_mission_eval_suite,
+)
 from src.runtime.mission_contract import build_mission_contract
 from src.runtime.mission_templates import build_mission_contract_from_template
 from src.runtime.task_store import reset_task_store
@@ -325,6 +329,21 @@ async def test_e2e_control_supervisor_accepts_generated_mission_template_contrac
             assert completed_task["artifacts"]["mission_review"]["final_status"] == (
                 "completed"
             )
+            template_eval = run_mission_eval_suite(
+                "template_contract_generation",
+                completed_task["artifacts"],
+                subject_id=task_id,
+            )
+            panel_eval = run_mission_eval_suite(
+                "control_ui_mission_panel_smoke",
+                completed_task["artifacts"],
+                subject_id=task_id,
+            )
+            gate = compare_mission_eval_results(template_eval, template_eval)
+            assert template_eval.passed is True
+            assert panel_eval.passed is True
+            assert gate.passed is True
+            assert gate.requires_operator_approval is True
     finally:
         await _stop_gateway(server, server_task)
 
