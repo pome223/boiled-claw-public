@@ -195,6 +195,15 @@ task graph, scheduler queues, recovery decisions, verifier evidence refs,
 approval waits, budget exhaustion, mission scorecard, post-mission review, and
 approval-gated memory candidate state without adding a separate mission API.
 
+Mission templates are a small preset layer on top of `MissionContract v2`.
+They generate validated contracts from typed inputs and safe defaults, then hand
+the resulting payload to the existing `control_supervisor` API. Templates do not
+create missions, runs, tables, or execution behavior by themselves. Initial
+presets cover observation review, weak-evidence probing, budget-exhaustion
+probing, current-tab research reports, and repository maintenance review.
+Overrides may narrow allowed actions or add metadata, but they preserve default
+forbidden actions so a template cannot silently drop safety constraints.
+
 Non-goals for this layer: no memory promotion, no approved improvements, no
 canary benchmark execution, no `/missions` API, and no `missions` table.
 

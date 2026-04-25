@@ -55,6 +55,13 @@ from src.runtime.mission_contract import (
     build_mission_contract,
     normalize_mission_contract,
 )
+from src.runtime.mission_templates import (
+    MissionTemplate,
+    MissionTemplateError,
+    build_mission_contract_from_template,
+    get_mission_template,
+    list_mission_templates,
+)
 from src.runtime.mission_runtime import (
     MissionImprovementCandidate,
     MissionMemoryPromotionCandidate,
@@ -131,6 +138,11 @@ __all__ = [
     "MissionContract",
     "build_mission_contract",
     "normalize_mission_contract",
+    "MissionTemplate",
+    "MissionTemplateError",
+    "build_mission_contract_from_template",
+    "get_mission_template",
+    "list_mission_templates",
     "MissionImprovementCandidate",
     "MissionMemoryPromotionCandidate",
     "MissionObjectiveProgress",

@@ -17,8 +17,8 @@ from src.runtime.durable_execution_schema import (
     SchedulerQueueKind,
 )
 from src.runtime.mission_contract import build_mission_contract
+from src.runtime.mission_templates import build_mission_contract_from_template
 from src.runtime.task_store import reset_task_store
-
 
 pytestmark = pytest.mark.e2e
 
@@ -211,7 +211,10 @@ async def test_e2e_control_supervisor_resumes_multi_node_graph_after_gateway_res
             assert durable["resume_state"]["reason"] == "graph_complete"
             assert durable["supervisor_health"]["active_node_id"].endswith("/verify")
             assert durable["mission_scorecard"]["objective_progress"] == "satisfied"
-            assert completed_task["artifacts"]["mission_review"]["final_status"] == "completed"
+            assert (
+                completed_task["artifacts"]["mission_review"]["final_status"]
+                == "completed"
+            )
             assert completed_task["artifacts"]["mission_review"]["schema_version"] == (
                 "mission_review.v1"
             )
@@ -241,6 +244,94 @@ async def test_e2e_control_supervisor_resumes_multi_node_graph_after_gateway_res
         "first:Repair state",
         "resumed:Repair state",
         "resumed:Verify state",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_e2e_control_supervisor_accepts_generated_mission_template_contract(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("TASK_STORE_DB_PATH", str(tmp_path / "tasks.db"))
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.log"))
+    monkeypatch.setenv(
+        "COMPUTER_TRAJECTORY_DB_PATH",
+        str(tmp_path / "computer_trajectories.db"),
+    )
+    monkeypatch.setenv(
+        "PHYSICAL_AI_VALIDATION_DB_PATH",
+        str(tmp_path / "physical_ai_validation.db"),
+    )
+    reset_settings()
+    reset_task_store()
+
+    contract = build_mission_contract_from_template(
+        "current_tab_research_to_report",
+        {
+            "topic": "Mission OS templates",
+            "report_target": "reports/mission-templates.md",
+        },
+    )
+    calls: list[str] = []
+
+    async def _template_gateway_child(**kwargs):
+        calls.append(kwargs["goal"].splitlines()[0])
+        task = kwargs["parent_task_id"] + f"/template-child-{len(calls)}"
+        return (
+            ExecutionResult(
+                request_id=f"req-template-{len(calls)}",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="template node ok",
+                success=True,
+            ),
+            task,
+        )
+
+    server, server_task, base_url = await _start_gateway(_template_gateway_child)
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+            response = await client.post(
+                "/tasks/supervisors/control-loop",
+                json={
+                    "user_id": "e2e_template",
+                    "mission_contract": contract.model_dump(mode="json"),
+                    "duration_seconds": 60,
+                    "interval_seconds": 5,
+                },
+            )
+            response.raise_for_status()
+            accepted = response.json()
+            task_id = accepted["task"]["task_id"]
+            assert accepted["mission_contract"]["metadata"]["template_id"] == (
+                "current_tab_research_to_report"
+            )
+
+            completed_task = await _wait_for_task_status(client, task_id, "completed")
+            durable = completed_task["artifacts"]["durable_execution"]
+            assert durable["mission_contract"]["metadata"]["template_id"] == (
+                "current_tab_research_to_report"
+            )
+            assert [
+                node["node_id"].split("/")[-1]
+                for node in durable["task_graph"]["nodes"]
+            ] == ["research", "write_report", "verify_report"]
+            assert [run["node_id"].split("/")[-1] for run in durable["job_runs"]] == [
+                "research",
+                "write_report",
+                "verify_report",
+            ]
+            assert completed_task["artifacts"]["mission_review"]["final_status"] == (
+                "completed"
+            )
+    finally:
+        await _stop_gateway(server, server_task)
+
+    assert calls == [
+        "Collect source-backed findings",
+        "Write the local report",
+        "Verify report evidence",
     ]
 
 
@@ -358,9 +449,10 @@ async def test_e2e_control_supervisor_startup_watchdog_and_stale_queue_skip(
                 seeded_task["task_id"],
                 "completed",
             )
-            assert completed_task["artifacts"]["progress"]["watchdog"][
-                "reason"
-            ] == "stale_heartbeat"
+            assert (
+                completed_task["artifacts"]["progress"]["watchdog"]["reason"]
+                == "stale_heartbeat"
+            )
             durable = completed_task["artifacts"]["durable_execution"]
             assert durable["scheduler_state"]["completed_queue"][0]["node_id"].endswith(
                 "/maintain-objective"
