@@ -903,6 +903,18 @@ boundaries, template contract generation, and a Control UI mission-panel artifac
 smoke. These gates only measure and block; they do not promote improvements,
 reuse memory, add UI behavior, add `/missions`, or create a `missions` table.
 
+Promotion packages connect post-mission improvement candidates to those eval
+gates without promoting anything. `mission_review.improvement_candidates` can be
+normalized into typed promotion candidates such as `verifier_improvement`,
+`recovery_strategy`, `benchmark_case`, `memory_rule`, `skill_recipe`,
+`capability_patch`, `policy_patch`, and `code_patch`. Each candidate type maps to
+required deterministic eval suites, and security-sensitive patch types require
+an explicit security eval. The resulting `promotion_package.v1` contains the
+candidate refs, baseline/candidate eval results, regression gate result,
+optional security eval result, recommendation, and `approval_status=pending`.
+It is still artifact-only: no approved memory, skill, capability, policy, code,
+runtime reuse, UI, `/missions` API, or `missions` table is created here.
+
 ```bash
 curl -sS -X POST http://127.0.0.1:18789/tasks/supervisors/control-loop \
   -H "Content-Type: application/json" \
