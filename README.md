@@ -133,75 +133,64 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 - Physical-ready, not robotics-bloated: start with simulator and adapter surfaces before claiming end-to-end autonomy
 - Small enough to fork: keep the system understandable, inspectable, and hackable
 
-## Near-Term Direction
+## Current Direction
 
-- The next development spine is **trajectory-native self-improvement**, not horizontal channel expansion. See [architecture/README.md](architecture/README.md) for a short English overview and [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md) for the detailed design.
-- Priority 1: trajectory-driven eval / replay for browser-first and desktop fallback tasks
-- Priority 2: failure-to-skill / capability promotion from benchmarked trajectories
-- Priority 3: policy-bounded self-improvement with security evals, audit, and approval gates
-- Priority 4: deeper current-tab / desktop practical tasks such as Sheets, Docs, SaaS extraction, and cross-app workflows
-- Priority 5: physical replay PoC that reuses the same trajectory schema in simulation-first validation
+boiled-claw is now moving from a closed-loop task runtime toward a **Mission OS**:
+a durable, policy-bounded runtime for long-running missions that can be executed,
+verified, recovered, reviewed, evaluated, and improved through approval-gated
+promotion.
 
-The intended self-improvement loop is evidence-first and approval-gated:
+The core loop is:
 
 ```text
-Task or mission contract
-  -> execute
-  -> capture trajectory
-  -> evaluate outcome
-  -> verifier verdict
-      -> pass: persist evidence
-      -> fail or uncertain: classify failure
-  -> generate repair candidate
-  -> run canary benchmark
-  -> operator approval
-      -> approved: promote memory, skill, capability, or policy
-      -> denied: record rejected proposal
-  -> reuse approved artifacts in future missions
+MissionContract
+  -> control_supervisor task
+  -> durable_execution
+  -> execute / verify / recover
+  -> mission_review
+  -> mission_eval_result
+  -> benchmark-gated promotion package
+  -> approved memory / skill / capability / policy
+  -> future mission reuse
 ```
 
-The current tree already ships a first slice of all of these layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state. The next step is to connect them into one measurable promotion loop: `trajectory -> eval -> repair -> canary -> benchmark -> approval -> promotion -> reuse`.
-The minimum first slice for that loop is a current-tab Google Sheets eval that emits a normalized `failure_type`, produces a replay-linked report, and proves reuse through `approved_improvement_memory`.
-That slice should be read as a **bounded long-running slice** on top of boiled-claw's existing durable-execution substrate: task objects, replay/resume artifacts, approval queues, and scheduler-driven orchestration are the base layer, while PR #83 tightens the self-improvement spine that consumes those artifacts.
-The next substrate slice for #84, #85, and #87 is now explicit too: each eval run can be represented as a durable `task_graph`, each bounded job can emit a `checkpoint` with resume state, and each completed job attaches a durable verifier verdict of `pass`, `fail`, or `uncertain`.
-In Phase 0 these are **eval-derived substrate artifacts**, not live scheduler-backed runtime state yet. They make the contract explicit now, so later scheduler / recovery work can consume the same shapes without inventing a new surface.
-The next follow-on slice for #86, #88, #89, and #90 stays inside that same Phase 0 contract: eval runs now also emit **eval-derived orchestration artifacts** for scheduler queues, recovery policy/decision, guardrail budget state, and durable human escalation records.
-These are still not a live worker loop. They are the durable report shapes that a future scheduler / recovery engine can consume without changing the external artifact contract.
-The long-running `ControlLoopSupervisor` now consumes the same recovery and
-budget policy at runtime. It still uses a supervisor-owned loop instead of a
-standalone scheduler service, but it distinguishes `blocked` from generic
-`failed` when guardrails exhaust or recovery cannot proceed.
+What exists today:
 
-The live scheduler supervisor runtime is active for `control_supervisor` tasks:
-it accepts a first-class `mission_contract`, persists it beside the task and
-`durable_execution`, projects the contract into task graph node criteria plus
-scheduler queue metadata, executes due scheduler queue entries through a live
-worker tick, resumes running missions from `durable_execution.resume_state`
-after Gateway restart, enforces typed contract abort conditions, and links
-current-tab evidence into first-class verifier evidence refs.
+- Browser-first recovery with trajectory capture and replay.
+- Live `control_supervisor` missions with Mission Contract, task graph,
+  scheduler queue, heartbeat, checkpoint, resume, and typed recovery decisions.
+- Mission scorecards, post-mission review, approval-gated memory candidates,
+  mission templates, and deterministic mission eval suites.
+- Current-tab Google Sheets vertical slice with destination-bound evidence and
+  Control UI visibility.
+- Simulation-first physical runtime artifacts for validation, telemetry,
+  action envelopes, governor decisions, and offline replay plans.
 
-Startup resume paginates running supervisor tasks and records duplicate,
-stale-handle, explicit-stop, heartbeat, and watchdog events. Queue selection is
-deterministic (`ready > due retry_later > due periodic_check`, then earliest
-future `available_at`), stale or expired entries are skipped with task events,
-and explicit multi-node Mission Contract graphs can run with dependency-gated
-nodes. This is still not a distributed scheduler or dynamic planner.
-The next Google Sheets vertical slice for #92 and #93 now uses that same contract directly: `evals/current_tab_google_sheets.yaml` is a `long_running_vertical_slice`, and the Control UI task detail renders long-running state, scheduler queues, checkpoints, approval waits, and budget exhaustion from the persisted eval report.
-The next physical design slice for #94, #95, #96, and #97 applies the same contract-first rule to simulation-first adapters: each validation run now persists a `mission_contract`, `verifier_result`, `telemetry_health`, `action_envelope`, `governor_decision`, and offline `replay_plan`.
-These are still policy-bounded physical runtime artifacts, not a claim that boiled-claw now owns a live motor-controller stack.
+Near-term work is focused on the promotion loop:
 
-## Roadmap Progress (#83-#97)
+- Connect improvement candidates to canary benchmark promotion.
+- Separate approved memory, skill, capability, and policy promotion paths.
+- Add mission reuse planning with visible provenance.
+- Keep physical work simulation-first until replay and eval gates are mature.
 
-The recent work through `PR #83` and issues `#84-#97` is now in the tree as one connected spine:
+See [architecture/README.md](architecture/README.md) for the short system
+overview and
+[architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md)
+for the deeper design.
 
-- `PR #83` established the trajectory-native eval / failure-classification / promotion / reuse loop
-- `#84`, `#85`, and `#87` added durable `task_graph`, `checkpoint`, `job_run`, and `verifier_verdict` artifacts
-- `#86`, `#88`, `#89`, and `#90` added eval-derived scheduler, recovery, budget, and escalation artifacts
-- `#92` and `#93` turned the current-tab Google Sheets flow into a bounded long-running vertical slice with Control UI visibility
-- `#91` connected `approved_improvement_memory` reuse to normalized failure types and persisted `reuse_trace`
-- `#94`, `#95`, `#96`, and `#97` added simulation-first physical runtime contracts: `mission_contract`, `verifier_result`, `telemetry_health`, `action_envelope`, `governor_decision`, and offline `replay_plan`
+## Completed Foundation (#83-#97)
 
-Taken together, that means boiled-claw now has a real contract from:
+The `#83-#97` roadmap slice is complete. It established the trajectory-native
+foundation that the Mission OS work now builds on:
+
+- `PR #83`: trajectory-native eval, failure classification, promotion, and reuse loop.
+- `#84`, `#85`, `#87`: durable `task_graph`, `checkpoint`, `job_run`, and verifier verdict artifacts.
+- `#86`, `#88`, `#89`, `#90`: scheduler, recovery, budget, and escalation artifact contracts.
+- `#91`: approved improvement memory reuse from normalized failure types.
+- `#92`, `#93`: current-tab Google Sheets as a bounded long-running vertical slice.
+- `#94`, `#95`, `#96`, `#97`: simulation-first physical runtime contracts.
+
+In short:
 
 ```text
 trajectory
@@ -210,49 +199,6 @@ trajectory
   -> recovery / approval / reuse
   -> simulation-first physical replay contracts
 ```
-
-The Phase 0 CLI is now present in the repo:
-
-```bash
-boiled-claw eval run evals/current_tab_google_sheets.yaml
-boiled-claw eval report --eval-id current_tab_google_sheets_phase0
-boiled-claw eval report --task-id <current> --compare-to-task-id <baseline>
-boiled-claw eval classify --trajectory-id 42 --failure-type focus_mismatch
-```
-
-Phase 0 eval reports now surface:
-
-- top-level `durable_execution.mission_contract` for contract-backed live supervisor tasks
-- top-level `durable_execution.task_graph`
-- top-level `durable_execution.resume_state`
-- one `run_jobs[]` record per matched trajectory
-
-Each `run_jobs[]` entry is expected to expose:
-
-- `trajectory_id`
-- `verifier_result`
-- `verifier_verdict`
-- `failure_type`
-- `recommended_repair_targets`
-- `candidate_promotion_artifacts`
-- `replay_reference`
-- `recovery_policy`
-- `recovery_decision`
-- `budget_state`
-- `scheduler_queue_entry`
-- `escalation_record`
-- `checkpoint`
-- `job_run`
-- `reuse_suggestions`
-
-Top-level `durable_execution` is expected to expose:
-
-- `mission_contract`
-- `task_graph`
-- `resume_state`
-- `scheduler_state`
-- `recovery_policies`
-- `escalations`
 
 ## The Bet
 
