@@ -46,12 +46,20 @@ and physical AI look different at the actuator layer, but they share the same
 control vocabulary: mission contract, evidence, verifier verdict, recovery
 decision, replay, benchmark gate, and operator approval.
 
+That shared vocabulary is practical: browser trajectories can become replayable
+evidence, recovery policies, and benchmark cases before the same contracts are
+exercised in simulation-first validation.
+
 ## Demo
 
 Example flow: the operator asks boiled-claw, in Japanese, to research notable
 `新々刀` swordsmiths and summarize the findings into Google Sheets. The animation
 is a README-friendly conversion of a real execution recording, followed by the
 captured result state from the Control UI.
+
+It exercises the full closed loop: current-tab navigation, web research,
+structured extraction, sheet write, destination-bound verification, and
+operator-visible evidence in the Control UI.
 
 ![Current-browser Google Sheets execution demo](assets/current-browser-sheets-demo-20260421.gif)
 
@@ -63,9 +71,8 @@ captured result state from the Control UI.
   desktop fallback, and simulation-first adapters.
 - A trajectory-native closed-loop runtime where evidence, replay, recovery, and
   review are first-class artifacts.
-- A maintainer-led reference system for approval-gated self-improvement:
-  candidates are measured in canaries before memory, skill, capability, policy,
-  or code promotion.
+- An approval-gated self-improvement runtime that measures candidates in
+  canaries before promotion.
 
 ## What boiled-claw Is Not
 
@@ -223,7 +230,7 @@ for the deeper design.
   skills, SQLite-backed task/memory state, and an ADK-backed model layer with
   Gemini currently used as the default backend.
 
-## Architecture
+## Layer Map
 
 Inspired by OpenClaw's control plane / execution plane separation, boiled-claw
 is composed of the following layers:
@@ -996,12 +1003,20 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 
 ## References
 
-- [OpenClaw](https://github.com/openclaw/openclaw) - Inspiration source (large-scale TypeScript project with 1,500-2,000 files)
-- [Google ADK](https://google.github.io/adk-docs/) - Agent framework
-- [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) - Tool connection protocol
-- [Anthropic Computer Use](https://docs.anthropic.com/en/docs/build-with-claude/computer-use) - Contemporary computer-use reference surface
-- [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim) - Simulation-first robotics validation context
-- [ROS 2 Documentation](https://docs.ros.org/) - Robotics middleware and ecosystem context
+- [OpenClaw](https://github.com/openclaw/openclaw) - Local-first inspiration
+  for a hackable control / execution split.
+- [Google ADK](https://google.github.io/adk-docs/) - Agent runtime substrate
+  used by the reference implementation.
+- [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) -
+  Tool/server connection protocol for external capability surfaces.
+- [Anthropic Computer Use](https://docs.anthropic.com/en/docs/build-with-claude/computer-use) -
+  Contemporary computer-use reference surface; boiled-claw deliberately adds
+  structured current-tab and verifier artifacts instead of relying only on
+  pixels.
+- [NVIDIA Isaac Sim](https://developer.nvidia.com/isaac-sim) -
+  Simulation-first validation context for physical-adjacent mission replay.
+- [ROS 2 Documentation](https://docs.ros.org/) - Robotics middleware context
+  for typed, safety-governed action envelopes.
 
 ## License
 
