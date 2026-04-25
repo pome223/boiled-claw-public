@@ -65,6 +65,7 @@ from src.runtime.mission_runtime import (
     build_mission_memory_links,
     build_mission_review,
     build_mission_scorecard,
+    build_post_mission_review_artifacts,
 )
 from src.runtime.policy_schema import (
     ApprovalMode,
@@ -139,6 +140,7 @@ __all__ = [
     "build_mission_memory_links",
     "build_mission_review",
     "build_mission_scorecard",
+    "build_post_mission_review_artifacts",
     # policy
     "ApprovalMode",
     "ApprovalDecisionStatus",

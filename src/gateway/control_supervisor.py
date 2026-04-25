@@ -56,9 +56,8 @@ from src.runtime.orchestration_policy import (
     select_recovery_ladder_step,
 )
 from src.runtime.mission_runtime import (
-    build_mission_memory_links,
-    build_mission_review,
     build_mission_scorecard,
+    build_post_mission_review_artifacts,
 )
 from src.tools.tasks import (
     append_task_event_record,
@@ -1455,19 +1454,15 @@ class ControlLoopSupervisor:
         task_id: str,
         durable_execution: dict[str, Any],
         final_status: str,
+        child_task_ids: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
-        review = build_mission_review(
+        return build_post_mission_review_artifacts(
             durable_execution,
             final_status=final_status,
             source_task_id=task_id,
+            child_task_ids=child_task_ids,
             created_at=_utc_datetime(self._now()),
         )
-        return {
-            "durable_execution": durable_execution,
-            "mission_scorecard": review.scorecard_snapshot,
-            "mission_review": review.model_dump(mode="json"),
-            "mission_memory_links": build_mission_memory_links(review),
-        }
 
     def _append_post_mission_review_event(
         self,
@@ -2589,6 +2584,7 @@ class ControlLoopSupervisor:
                     task_id=task_id,
                     durable_execution=final_durable_execution,
                     final_status="completed",
+                    child_task_ids=child_task_ids,
                 )
                 self._update_task_record(
                     task_id,
@@ -2686,6 +2682,13 @@ class ControlLoopSupervisor:
         runtime_report: dict[str, Any],
     ) -> None:
         approval_request = result.metadata.get("approval_request")
+        review_artifacts = build_post_mission_review_artifacts(
+            runtime_report["durable_execution"],
+            final_status="paused",
+            source_task_id=task_id,
+            child_task_ids=child_task_ids,
+            created_at=_utc_datetime(self._now()),
+        )
         self._update_task_record(
             task_id,
             status="pending",
@@ -2704,8 +2707,7 @@ class ControlLoopSupervisor:
                     "failure_type": runtime_report.get("failure_type"),
                     "scheduler_queue": runtime_report.get("scheduler_queue"),
                 },
-                "durable_execution": runtime_report["durable_execution"],
-                "mission_scorecard": runtime_report.get("mission_scorecard") or {},
+                **review_artifacts,
             },
             metadata={
                 "needs_human": True,
@@ -2729,6 +2731,11 @@ class ControlLoopSupervisor:
                     "escalation_record": runtime_report["escalation_record"],
                 },
             },
+        )
+        self._append_post_mission_review_event(
+            task_id,
+            final_status="paused",
+            artifacts=review_artifacts,
         )
         await self._emit_session_event(
             owner_session_id,
@@ -2758,6 +2765,7 @@ class ControlLoopSupervisor:
             task_id=task_id,
             durable_execution=runtime_report["durable_execution"],
             final_status="blocked",
+            child_task_ids=child_task_ids,
         )
         self._update_task_record(
             task_id,
@@ -2836,6 +2844,7 @@ class ControlLoopSupervisor:
             task_id=task_id,
             durable_execution=runtime_report["durable_execution"],
             final_status="failed",
+            child_task_ids=child_task_ids,
         )
         self._update_task_record(
             task_id,
