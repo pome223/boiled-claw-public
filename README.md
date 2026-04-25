@@ -490,6 +490,15 @@ This extension requires `<all_urls>` host permission because it uses `chrome.scr
 
 Current-browser spreadsheet plans normalize navigation through `current_tab.navigate` instead of relying on a Desktop `Cmd/Ctrl+T` hotkey. When the active tab is the boiled-claw Control UI chat, the runtime preserves that chat tab by opening a separate task tab before navigating. Spreadsheet entry steps also now locate and click a real grid cell such as `A1` before typing so writes land in the sheet instead of the browser chrome or Sheets toolbar.
 
+Example flow: the operator asks boiled-claw, in Japanese, to research notable
+`新々刀` swordsmiths and summarize the findings into Google Sheets. The animation
+below is a README-friendly conversion of a real execution recording, followed by
+the captured result state from the Control UI.
+
+![Current-browser Google Sheets execution demo](assets/current-browser-sheets-demo-20260421.gif)
+
+![Current-browser Google Sheets result screenshot](assets/current-browser-sheets-result-20260421.jpg)
+
 The extension continuously reconnects to the relay, so it is easiest to start Host Bridge first. The current vertical slice supports the following operations:
 
 - Get active tab info
