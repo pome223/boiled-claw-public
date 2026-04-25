@@ -70,15 +70,20 @@ The Web UI is the easiest way to understand the system. The CLI hits the same Ga
 
 Use the startup path that matches what you are trying to do:
 
-| What you want | Command | Notes |
-| --- | --- | --- |
-| Prove a first local runtime works | `make quickstart` | Starts the Gateway, waits for health/protocol, creates a no-model task, and verifies its timeline through HTTP. |
-| Try chat / search / task UI only | `docker compose up -d --build boiled-claw-gateway` | Starts the Gateway only. Use this after quickstart when you already have local config. |
-| Use desktop or host-side computer control too | `bash scripts/bridge_runtime.sh start` | Starts the host-side Host Bridge and Desktop Bridge processes outside Docker. This is the supported wrapper around commands such as `python -m src.main bridge desktop`. |
-| Reflect Python source changes quickly | `bash scripts/deploy_runtime.sh sync` | Starts bridges if needed, copies `src/` into the running container, and restarts the Gateway without a full rebuild. |
-| Rebuild the runtime image and restart | `bash scripts/deploy_runtime.sh build` | Starts bridges if needed, rebuilds the Gateway image, and recreates the container. |
-| Let the script choose rebuild or hot-sync | `bash scripts/deploy_runtime.sh deploy` | Normal deploy path. It prefers a Docker rebuild and falls back to `sync` when rebuild is not possible. |
-| Check what is already running | `bash scripts/deploy_runtime.sh status` | Prints bridge and Gateway status. |
+- **Prove a first local runtime works:** `make quickstart`
+  - Starts the Gateway, waits for health/protocol, creates a no-model task, and verifies its timeline through HTTP.
+- **Try chat / search / task UI only:** `docker compose up -d --build boiled-claw-gateway`
+  - Starts the Gateway only. Use this after quickstart when you already have local config.
+- **Use desktop or host-side computer control too:** `bash scripts/bridge_runtime.sh start`
+  - Starts the host-side Host Bridge and Desktop Bridge processes outside Docker.
+- **Reflect Python source changes quickly:** `bash scripts/deploy_runtime.sh sync`
+  - Starts bridges if needed, copies `src/` into the running container, and restarts the Gateway without a full rebuild.
+- **Rebuild the runtime image and restart:** `bash scripts/deploy_runtime.sh build`
+  - Starts bridges if needed, rebuilds the Gateway image, and recreates the container.
+- **Let the script choose rebuild or hot-sync:** `bash scripts/deploy_runtime.sh deploy`
+  - Normal deploy path. It prefers a Docker rebuild and falls back to `sync` when rebuild is not possible.
+- **Check what is already running:** `bash scripts/deploy_runtime.sh status`
+  - Prints bridge and Gateway status.
 
 If you want browser / desktop automation, do not stop at the Quickstart alone: those capabilities require the host-side bridges in addition to the Dockerized Gateway.
 
@@ -139,21 +144,20 @@ Most open agents stop at browser automation. Most physical AI stacks stop at sim
 
 The intended self-improvement loop is evidence-first and approval-gated:
 
-```mermaid
-flowchart LR
-    A["Task or mission contract"] --> B["Execute"]
-    B --> C["Capture trajectory"]
-    C --> D["Evaluate outcome"]
-    D --> E{"Verifier verdict"}
-    E -- pass --> F["Persist evidence"]
-    E -- fail or uncertain --> G["Classify failure"]
-    G --> H["Generate repair candidate"]
-    H --> I["Run canary benchmark"]
-    I --> J{"Operator approval"}
-    J -- approved --> K["Promote memory, skill, capability, or policy"]
-    J -- denied --> L["Record rejected proposal"]
-    K --> M["Reuse in future missions"]
-    M --> A
+```text
+Task or mission contract
+  -> execute
+  -> capture trajectory
+  -> evaluate outcome
+  -> verifier verdict
+      -> pass: persist evidence
+      -> fail or uncertain: classify failure
+  -> generate repair candidate
+  -> run canary benchmark
+  -> operator approval
+      -> approved: promote memory, skill, capability, or policy
+      -> denied: record rejected proposal
+  -> reuse approved artifacts in future missions
 ```
 
 The current tree already ships a first slice of all of these layers: browser-first recovery with trajectory capture, offline canary workflows with benchmark caching and cleanup, and simulation-first physical AI adapters backed by persisted validation state. The next step is to connect them into one measurable promotion loop: `trajectory -> eval -> repair -> canary -> benchmark -> approval -> promotion -> reuse`.
@@ -163,7 +167,25 @@ The next substrate slice for #84, #85, and #87 is now explicit too: each eval ru
 In Phase 0 these are **eval-derived substrate artifacts**, not live scheduler-backed runtime state yet. They make the contract explicit now, so later scheduler / recovery work can consume the same shapes without inventing a new surface.
 The next follow-on slice for #86, #88, #89, and #90 stays inside that same Phase 0 contract: eval runs now also emit **eval-derived orchestration artifacts** for scheduler queues, recovery policy/decision, guardrail budget state, and durable human escalation records.
 These are still not a live worker loop. They are the durable report shapes that a future scheduler / recovery engine can consume without changing the external artifact contract.
-The next private follow-up after that teaches the long-running `ControlLoopSupervisor` to consume the same recovery and budget policy at runtime. That path still uses a supervisor-owned loop instead of a standalone scheduler service, but it now distinguishes `blocked` from generic `failed` when guardrails exhaust or recovery cannot proceed, so operators and UI consumers should treat `blocked` as a first-class terminal state. The live scheduler supervisor runtime is now active for `control_supervisor` tasks: it accepts a first-class `mission_contract`, persists it beside the task and `durable_execution`, projects the contract into task graph node criteria plus scheduler queue metadata, executes due scheduler queue entries through a live worker tick, resumes running missions from `durable_execution.resume_state` after Gateway restart, enforces typed contract abort conditions, and links current-tab evidence into first-class verifier evidence refs. Startup resume now paginates all running supervisor tasks and records duplicate, stale-handle, and explicit-stop skip events. The supervisor-owned scheduler now selects queue entries deterministically (`ready > due retry_later > due periodic_check`, then earliest future `available_at`), skips stale or expired entries with task events, records live heartbeat/watchdog state, and can execute explicit multi-node Mission Contract graphs with dependency-gated nodes. This is still not a distributed scheduler or dynamic planner.
+The long-running `ControlLoopSupervisor` now consumes the same recovery and
+budget policy at runtime. It still uses a supervisor-owned loop instead of a
+standalone scheduler service, but it distinguishes `blocked` from generic
+`failed` when guardrails exhaust or recovery cannot proceed.
+
+The live scheduler supervisor runtime is active for `control_supervisor` tasks:
+it accepts a first-class `mission_contract`, persists it beside the task and
+`durable_execution`, projects the contract into task graph node criteria plus
+scheduler queue metadata, executes due scheduler queue entries through a live
+worker tick, resumes running missions from `durable_execution.resume_state`
+after Gateway restart, enforces typed contract abort conditions, and links
+current-tab evidence into first-class verifier evidence refs.
+
+Startup resume paginates running supervisor tasks and records duplicate,
+stale-handle, explicit-stop, heartbeat, and watchdog events. Queue selection is
+deterministic (`ready > due retry_later > due periodic_check`, then earliest
+future `available_at`), stale or expired entries are skipped with task events,
+and explicit multi-node Mission Contract graphs can run with dependency-gated
+nodes. This is still not a distributed scheduler or dynamic planner.
 The next Google Sheets vertical slice for #92 and #93 now uses that same contract directly: `evals/current_tab_google_sheets.yaml` is a `long_running_vertical_slice`, and the Control UI task detail renders long-running state, scheduler queues, checkpoints, approval waits, and budget exhaustion from the persisted eval report.
 The next physical design slice for #94, #95, #96, and #97 applies the same contract-first rule to simulation-first adapters: each validation run now persists a `mission_contract`, `verifier_result`, `telemetry_health`, `action_envelope`, `governor_decision`, and offline `replay_plan`.
 These are still policy-bounded physical runtime artifacts, not a claim that boiled-claw now owns a live motor-controller stack.
@@ -278,45 +300,22 @@ The desktop core lives in `src/desktop/`, with bridges hanging off it as adapter
 Common capability / ping schemas are placed in `src/bridges/common_schema.py` to ensure the desktop runtime does not depend on the host bridge schema.
 The runtime substrate then lifts those scattered tools into `resource_list`, `resource_read`, `capability_list`, and `capability_invoke`, so Gateway HTTP routes and the root agent can inspect skills and bridge-backed surfaces through one canonical layer.
 
-```mermaid
-flowchart LR
-    User["User"]
-    Clients["Web UI / CLI / API"]
-
-    subgraph Gateway["Gateway (Docker / control plane)"]
-        Protocol["Typed WS / HTTP protocol"]
-        Routing["Routing agent / root agent"]
-        ControlLoop["Planner -> PolicyJudge -> Executor -> Verifier -> Repair"]
-        Transcript["Transcript / approvals / cron"]
-        Memory["Curated memory lifecycle"]
-    end
-
-    subgraph Host["Host Bridge (host OS / execution plane)"]
-        HostTools["shell / file / browser"]
-        CurrentTab["Current Tab relay"]
-    end
-
-    subgraph Desktop["Desktop Bridge (host OS / desktop capability plane)"]
-        DesktopRuntime["runtime / view / control"]
-    end
-
-    RuntimeRegistry["Runtime substrate<br/>resource_* / capability_*"]
-    MCP["MCP servers"]
-    Skills["Skills / plugins"]
-
-    User --> Clients --> Protocol
-    Protocol --> Routing --> ControlLoop
-    Protocol --> Transcript
-    ControlLoop --> Memory
-    ControlLoop --> MCP
-    ControlLoop --> Skills
-    ControlLoop --> RuntimeRegistry
-    RuntimeRegistry --> Skills
-    RuntimeRegistry --> HostTools
-    RuntimeRegistry --> DesktopRuntime
-    ControlLoop --> HostTools
-    ControlLoop --> DesktopRuntime
-    HostTools --> CurrentTab
+```text
+User
+  -> Web UI / CLI / API
+  -> Gateway
+       - typed WebSocket / HTTP protocol
+       - routing agent / root agent
+       - Planner -> PolicyJudge -> Executor -> Verifier -> Repair
+       - transcript / approvals / cron
+       - curated memory lifecycle
+       - runtime substrate: resource_* / capability_*
+  -> Host Bridge
+       - shell / file / browser
+       - Current Tab relay
+  -> Desktop Bridge
+       - runtime / view / control
+  -> MCP servers and skills
 ```
 
 ## Setup
