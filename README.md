@@ -178,28 +178,6 @@ overview and
 [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md)
 for the deeper design.
 
-## Completed Foundation (#83-#97)
-
-The `#83-#97` roadmap slice is complete. It established the trajectory-native
-foundation that the Mission OS work now builds on:
-
-- `PR #83`: trajectory-native eval, failure classification, promotion, and reuse loop.
-- `#84`, `#85`, `#87`: durable `task_graph`, `checkpoint`, `job_run`, and verifier verdict artifacts.
-- `#86`, `#88`, `#89`, `#90`: scheduler, recovery, budget, and escalation artifact contracts.
-- `#91`: approved improvement memory reuse from normalized failure types.
-- `#92`, `#93`: current-tab Google Sheets as a bounded long-running vertical slice.
-- `#94`, `#95`, `#96`, `#97`: simulation-first physical runtime contracts.
-
-In short:
-
-```text
-trajectory
-  -> eval report
-  -> durable execution artifacts
-  -> recovery / approval / reuse
-  -> simulation-first physical replay contracts
-```
-
 ## The Bet
 
 The next important open agent framework will not be the biggest model wrapper. It will be the most editable closed-loop system that can move from browser tasks toward real-world operations without changing its core philosophy.
