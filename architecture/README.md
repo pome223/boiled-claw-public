@@ -174,9 +174,29 @@ A `paused` review is intentionally interim: it captures the approval-wait
 boundary for operators, and a later terminal `completed`, `blocked`, or `failed`
 review may replace it after the mission resumes.
 
+Memory promotion candidates are formal approval-gated artifacts, not promoted
+memory. `mission_review.memory_promotion_candidates` remains candidate-only
+review output for backward compatibility, while
+`artifacts.memory_promotion_candidates` contains normalized records with:
+
+- `approval_status`: `pending`, `approved`, `rejected`, `expired`, or
+  `candidate_only`
+- `source_task_id`, `source_artifact_ref`, and `source_refs`
+- `last_verified_at`, `expires_at`, and `invalidation_rule`
+- `approved_by`, `approved_at`, and `rejected_reason`
+
+Pending and approved candidates are not used by planning, recovery, or mission
+reuse in this layer. They only make the review-and-approval boundary durable for
+future reuse-planner work.
+
+The Control UI task detail reads the same task artifacts directly. For
+`control_supervisor` missions it exposes the current mission status, active node,
+task graph, scheduler queues, recovery decisions, verifier evidence refs,
+approval waits, budget exhaustion, mission scorecard, post-mission review, and
+approval-gated memory candidate state without adding a separate mission API.
+
 Non-goals for this layer: no memory promotion, no approved improvements, no
-canary benchmark execution, no UI change, no `/missions` API, and no `missions`
-table.
+canary benchmark execution, no `/missions` API, and no `missions` table.
 
 ## Current Maturity
 

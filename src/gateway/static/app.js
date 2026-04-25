@@ -194,7 +194,9 @@ const KNOWN_STATUS_TAGS = new Set([
   "accepted",
   "approved",
   "approving",
+  "blocked",
   "cancelled",
+  "candidate_only",
   "completed",
   "denied",
   "denying",
@@ -202,9 +204,12 @@ const KNOWN_STATUS_TAGS = new Set([
   "failed",
   "idle",
   "pending",
+  "paused",
   "propagated",
+  "rejected",
   "resolved",
-  "running"
+  "running",
+  "waiting_for_approval"
 ]);
 
 // -----------------------------------------------------------------------
@@ -1564,24 +1569,39 @@ function renderLongRunningTaskState(task) {
     return "";
   }
   const { report, durable, runJobs } = state;
+  const artifacts = task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
   const slice = report.slice && typeof report.slice === "object" ? report.slice : {};
+  const taskGraph = durable.task_graph && typeof durable.task_graph === "object"
+    ? durable.task_graph
+    : {};
+  const taskNodes = Array.isArray(taskGraph.nodes) ? taskGraph.nodes : [];
   const schedulerState = durable.scheduler_state && typeof durable.scheduler_state === "object"
     ? durable.scheduler_state
     : {};
   const missionContract = durable.mission_contract && typeof durable.mission_contract === "object"
     ? durable.mission_contract
-    : (task.artifacts?.mission_contract && typeof task.artifacts.mission_contract === "object" ? task.artifacts.mission_contract : {});
+    : (artifacts.mission_contract && typeof artifacts.mission_contract === "object" ? artifacts.mission_contract : {});
   const missionScorecard = durable.mission_scorecard && typeof durable.mission_scorecard === "object"
     ? durable.mission_scorecard
-    : (task.artifacts?.mission_scorecard && typeof task.artifacts.mission_scorecard === "object" ? task.artifacts.mission_scorecard : {});
-  const missionReview = task.artifacts?.mission_review && typeof task.artifacts.mission_review === "object"
-    ? task.artifacts.mission_review
+    : (artifacts.mission_scorecard && typeof artifacts.mission_scorecard === "object" ? artifacts.mission_scorecard : {});
+  const missionReview = artifacts.mission_review && typeof artifacts.mission_review === "object"
+    ? artifacts.mission_review
     : (durable.mission_review && typeof durable.mission_review === "object" ? durable.mission_review : {});
+  const memoryPromotionCandidates = Array.isArray(artifacts.memory_promotion_candidates)
+    ? artifacts.memory_promotion_candidates
+    : (Array.isArray(durable.memory_promotion_candidates) ? durable.memory_promotion_candidates : []);
   const resumeState = durable.resume_state && typeof durable.resume_state === "object"
     ? durable.resume_state
     : {};
+  const supervisorHealth = durable.supervisor_health && typeof durable.supervisor_health === "object"
+    ? durable.supervisor_health
+    : {};
   const checkpoints = Array.isArray(durable.checkpoints) ? durable.checkpoints : [];
   const escalations = Array.isArray(durable.escalations) ? durable.escalations : [];
+  const recoveryDecisions = Array.isArray(durable.recovery_decisions) ? durable.recovery_decisions : [];
+  const verifierVerdicts = Array.isArray(durable.verifier_verdicts)
+    ? durable.verifier_verdicts
+    : runJobs.map((job) => job.verifier_verdict).concat(taskNodes.map((node) => node.verifier_verdict)).filter((item) => item && typeof item === "object");
   const activeRunJobs = runJobs.filter((item) => {
     const queue = String(item.scheduler_queue || "").trim();
     return queue && queue !== "completed";
@@ -1598,6 +1618,58 @@ function renderLongRunningTaskState(task) {
     ["completed", Array.isArray(schedulerState.completed_queue) ? schedulerState.completed_queue : []],
   ];
   const latestCheckpoints = checkpoints.slice(-3).reverse();
+  const currentNodeId = supervisorHealth.active_node_id
+    || resumeState.next_actionable_task_node_id
+    || taskNodes.find((node) => ["running", "blocked", "failed"].includes(String(node.status || "").toLowerCase()))?.node_id
+    || "-";
+  const missionStatus = missionReview.final_status || task.status || missionScorecard.objective_progress || "unknown";
+  const approvalIds = Array.isArray(resumeState.pending_approval_ids) ? resumeState.pending_approval_ids : [];
+  const contractPolicyBits = [
+    Array.isArray(missionContract.success_metrics) && missionContract.success_metrics.length ? `metrics=${missionContract.success_metrics.length}` : "",
+    Array.isArray(missionContract.completion_criteria) && missionContract.completion_criteria.length ? `criteria=${missionContract.completion_criteria.length}` : "",
+    Array.isArray(missionContract.evidence_requirements) && missionContract.evidence_requirements.length ? `evidence=${missionContract.evidence_requirements.length}` : "",
+  ].filter(Boolean);
+
+  const renderRefs = (refs, prefix = "refs") => {
+    const values = Array.isArray(refs) ? refs.filter(Boolean).map(String) : [];
+    return values.length
+      ? `<div class="item-meta mono">${escapeHtml(`${prefix}=${values.join(", ")}`)}</div>`
+      : "";
+  };
+
+  const renderMissionRuntimeSummary = () => [
+    `<div class="detail-section">`,
+    `<div class="k">Mission Runtime</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Status</div><div>${statusTag(missionStatus)}</div><div class="item-meta mono">${escapeHtml(`task=${task.status || "-"}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Current Node</div><div class="mono">${escapeHtml(currentNodeId)}</div><div class="item-meta">${escapeHtml(humanizeLongRunningToken(supervisorHealth.reason || resumeState.reason || "-"))}</div></div>`,
+    `<div class="detail-card"><div class="k">Objective</div><div class="item-detail">${escapeHtml(compactText(missionContract.objective || task.title || "-", 220))}</div><div class="item-meta mono">${escapeHtml(missionContract.contract_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Policy Surface</div><div class="item-detail">${escapeHtml((missionContract.allowed_actions || []).join(", ") || "-")}</div><div class="item-meta mono">${escapeHtml(contractPolicyBits.join(" · ") || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Approval Wait</div><div>${escapeHtml(String(escalations.length || approvalIds.length || 0))}</div><div class="item-meta mono">${escapeHtml(approvalIds.join(", ") || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Memory Candidates</div><div>${escapeHtml(String(memoryPromotionCandidates.length))}</div><div class="item-meta mono">${escapeHtml(memoryPromotionCandidates.map((item) => item.approval_status || "unknown").join(" · ") || "-")}</div></div>`,
+    `</div>`,
+    `</div>`,
+  ].join("");
+
+  const renderTaskNode = (node) => {
+    const verdict = node.verifier_verdict && typeof node.verifier_verdict === "object" ? node.verifier_verdict : {};
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(node.title || node.node_id || "node")}</div><div class="item-meta mono">${escapeHtml(node.node_id || "-")}</div></div>`,
+      statusTag(node.scheduler_queue || node.status || "unknown"),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(compactText(node.description || "-", 180))}</div>`,
+      `<div class="item-meta mono">${escapeHtml([
+        `status=${node.status || "-"}`,
+        `retry=${node.retry_count ?? 0}`,
+        verdict.verdict ? `verdict=${verdict.verdict}` : "",
+        verdict.failure_type ? `failure=${verdict.failure_type}` : "",
+      ].filter(Boolean).join(" · "))}</div>`,
+      renderRefs(verdict.evidence_refs, "evidence"),
+      `</div>`,
+    ].join("");
+  };
 
   const renderQueueEntry = (queueName, entry) => {
     const metaBits = [
@@ -1687,6 +1759,60 @@ function renderLongRunningTaskState(task) {
     `</div>`,
   ].join("");
 
+  const renderRecoveryDecision = (decision) => {
+    const budgetAfter = decision.budget_after && typeof decision.budget_after === "object" ? decision.budget_after : {};
+    const budgetReasons = Array.isArray(budgetAfter.budget_exhausted_reasons)
+      ? budgetAfter.budget_exhausted_reasons
+      : [];
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(decision.selected_step || decision.recovery_ladder_step || "recovery")}</div><div class="item-meta mono">${escapeHtml(decision.node_id || "-")}</div></div>`,
+      statusTag(decision.outcome || (budgetAfter.budget_exhausted ? "blocked" : "unknown")),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(decision.reason || decision.failure_type || "-")}</div>`,
+      `<div class="item-meta mono">${escapeHtml([
+        decision.failure_type ? `failure=${decision.failure_type}` : "",
+        decision.attempt_index !== undefined ? `attempt=${decision.attempt_index}` : "",
+        budgetAfter.budget_exhausted ? `budget=${budgetReasons.join(", ") || "exhausted"}` : "",
+      ].filter(Boolean).join(" · ") || "-")}</div>`,
+      renderRefs(decision.source_refs, "source"),
+      `</div>`,
+    ].join("");
+  };
+
+  const renderVerifierVerdict = (verdict) => [
+    `<div class="detail-card">`,
+    `<div class="detail-heading">`,
+    `<div><div class="k">${escapeHtml(verdict.verdict || "verdict")}</div><div class="item-meta mono">${escapeHtml(verdict.task_node_id || verdict.node_id || verdict.run_id || "-")}</div></div>`,
+    statusTag(verdict.verdict || "unknown"),
+    `</div>`,
+    `<div class="item-detail">${escapeHtml(verdict.summary || verdict.failure_type || "-")}</div>`,
+    `<div class="item-meta mono">${escapeHtml([
+      verdict.failure_type ? `failure=${verdict.failure_type}` : "",
+      verdict.confidence !== undefined ? `confidence=${verdict.confidence}` : "",
+    ].filter(Boolean).join(" · ") || "-")}</div>`,
+    renderRefs(verdict.evidence_refs, "evidence"),
+    `</div>`,
+  ].join("");
+
+  const renderMemoryPromotionCandidate = (candidate) => [
+    `<div class="detail-card">`,
+    `<div class="detail-heading">`,
+    `<div><div class="k">${escapeHtml(candidate.type || "memory candidate")}</div><div class="item-meta mono">${escapeHtml(candidate.candidate_id || "-")}</div></div>`,
+    statusTag(candidate.approval_status || "candidate_only"),
+    `</div>`,
+    `<div class="item-detail">${escapeHtml(compactText(candidate.content || "-", 220))}</div>`,
+    `<div class="item-meta mono">${escapeHtml([
+      candidate.confidence !== undefined ? `confidence=${candidate.confidence}` : "",
+      candidate.expires_at ? `expires=${formatTimestamp(candidate.expires_at)}` : "expires=-",
+      candidate.approved_by ? `approved_by=${candidate.approved_by}` : "",
+      candidate.rejected_reason ? `rejected=${candidate.rejected_reason}` : "",
+    ].filter(Boolean).join(" · "))}</div>`,
+    renderRefs(candidate.source_refs || [candidate.source_artifact_ref].filter(Boolean), "source"),
+    `</div>`,
+  ].join("");
+
   const renderMissionScorecard = () => {
     if (!missionScorecard || !Object.keys(missionScorecard).length) return "";
     const metadata = missionScorecard.metadata && typeof missionScorecard.metadata === "object" ? missionScorecard.metadata : {};
@@ -1743,6 +1869,13 @@ function renderLongRunningTaskState(task) {
     ].join(" · "))}</div><div class="item-meta mono">${escapeHtml(`pending=${(resumeState.pending_approval_ids || []).join(", ") || "-"}`)}</div></div>`,
     `</div>`,
     `</div>`,
+    renderMissionRuntimeSummary(),
+    `<div class="detail-section">`,
+    `<div class="k">Mission Task Graph</div>`,
+    taskNodes.length
+      ? `<div class="detail-grid">${taskNodes.map(renderTaskNode).join("")}</div>`
+      : `<div class="muted">No mission task graph nodes recorded.</div>`,
+    `</div>`,
     `<div class="detail-section">`,
     `<div class="k">Scheduler Queues</div>`,
     queueGroups.some(([, items]) => items.length)
@@ -1764,6 +1897,18 @@ function renderLongRunningTaskState(task) {
       : `<div class="muted">No checkpoints recorded.</div>`,
     `</div>`,
     `<div class="detail-section">`,
+    `<div class="k">Recovery Decisions</div>`,
+    recoveryDecisions.length
+      ? `<div class="detail-grid">${recoveryDecisions.map(renderRecoveryDecision).join("")}</div>`
+      : `<div class="muted">No recovery decisions recorded.</div>`,
+    `</div>`,
+    `<div class="detail-section">`,
+    `<div class="k">Verifier Evidence</div>`,
+    verifierVerdicts.length
+      ? `<div class="detail-grid">${verifierVerdicts.map(renderVerifierVerdict).join("")}</div>`
+      : `<div class="muted">No verifier evidence recorded.</div>`,
+    `</div>`,
+    `<div class="detail-section">`,
     `<div class="k">Approval Waits</div>`,
     escalations.length
       ? `<div class="detail-grid">${escalations.map(renderEscalation).join("")}</div>`
@@ -1777,6 +1922,12 @@ function renderLongRunningTaskState(task) {
     `</div>`,
     renderMissionScorecard(),
     renderMissionReview(),
+    `<div class="detail-section">`,
+    `<div class="k">Memory Candidate State</div>`,
+    memoryPromotionCandidates.length
+      ? `<div class="detail-grid">${memoryPromotionCandidates.map(renderMemoryPromotionCandidate).join("")}</div>`
+      : `<div class="muted">No approval-gated memory candidates recorded.</div>`,
+    `</div>`,
   ].join("");
 }
 
