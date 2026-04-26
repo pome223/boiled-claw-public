@@ -249,11 +249,13 @@ visible plan entries; they are not automatically registered or applied.
 When approved promotion artifacts are supplied at `control_supervisor` mission
 start, the Gateway records the generated `reuse_plan.v1` on task artifacts and
 `durable_execution` and emits a `mission_reuse_plan_recorded` timeline event.
-This remains a visibility path, not runtime reuse.
+The Control UI task detail renders the selected memories, skills, policy
+patches, capability patches, excluded candidates, expiry checks, policy checks,
+and reuse-plan history. This remains a visibility path, not runtime reuse.
 
 Non-goals for this layer: no automatic promotion, no hidden runtime reuse, no
-canary benchmark execution, no UI changes, no `/missions` API, and no `missions`
-table.
+canary benchmark execution, no runtime application from the UI, no `/missions`
+API, and no `missions` table.
 
 ## Current Maturity
 
