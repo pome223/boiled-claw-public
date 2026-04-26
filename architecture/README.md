@@ -250,6 +250,17 @@ goal reached, blocked action, or step budget exhaustion, and records a
 operator approval required; it does not dispatch ROS, touch hardware, add UI
 controls, or integrate with runtime mission execution.
 
+Toy grid-world autonomy reviews score those simulator-only episodes before any
+stronger autonomy layer is allowed. An `autonomy_scorecard.v1` records goal
+completion, safety violations, blocked steps, recovery/replan counts, dry-run
+compliance, telemetry freshness, live/physical execution flags, and path
+efficiency. An `autonomy_episode_review.v1` snapshots that scorecard, buckets
+failures such as `unsafe_plan`, `blocked_by_governor`, `low_battery`,
+`stale_telemetry`, `mismatch_telemetry`, and `replay_not_deterministic`, and can
+emit improvement proposals only as `candidate_only`. This layer does not
+promote artifacts, register skills/capabilities/policies, reuse runtime memory,
+add UI controls, or permit live physical execution.
+
 Promotion packages are the artifact-only bridge from post-mission review to a
 future promotion pipeline. `mission_review.improvement_candidates` can be
 normalized into typed promotion candidates, mapped to required eval suites, and

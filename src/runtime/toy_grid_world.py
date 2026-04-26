@@ -37,6 +37,8 @@ TOY_GRID_WORLD_REPLAY_TRACE_SCHEMA_VERSION = "toy_grid_world_replay_trace.v1"
 TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION = "autonomy_plan.v1"
 TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION = "autonomous_step.v1"
 TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION = "autonomous_episode.v1"
+TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION = "autonomy_scorecard.v1"
+TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION = "autonomy_episode_review.v1"
 
 _AUTO_TELEMETRY = object()
 
@@ -70,6 +72,11 @@ class ToyGridWorldAutonomousEpisodeStatus(str, Enum):
     MAX_STEPS_EXHAUSTED = "max_steps_exhausted"
     PLAN_BLOCKED = "plan_blocked"
     PLAN_MISMATCH = "plan_mismatch"
+
+
+class ToyGridWorldAutonomyScorecardStatus(str, Enum):
+    PASSED = "passed"
+    FAILED = "failed"
 
 
 class ToyGridWorldPosition(BaseModel):
@@ -316,6 +323,70 @@ class ToyGridWorldAutonomousEpisode(BaseModel):
     replay_trace: ToyGridWorldReplayTrace
     summary: dict[str, Any] = Field(default_factory=dict)
     execution_allowed: Literal[False] = False
+    operator_approval_required: Literal[True] = True
+    operator_approval_performed: Literal[False] = False
+    live_execution_allowed: Literal[False] = False
+    physical_execution_invoked: Literal[False] = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToyGridWorldAutonomyScorecard(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION] = (
+        TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION
+    )
+    scorecard_id: str
+    episode_id: str
+    plan_id: str
+    world_id: str
+    status: ToyGridWorldAutonomyScorecardStatus
+    passed: bool
+    goal_reached: bool
+    safety_violation_count: int = 0
+    blocked_step_count: int = 0
+    recovery_attempt_count: int = 0
+    replan_count: int = 0
+    dry_run_compliance_rate: float = 1.0
+    telemetry_freshness_seconds: float = 0.0
+    telemetry_missing_count: int = 0
+    telemetry_stale_count: int = 0
+    telemetry_mismatch_count: int = 0
+    live_execution_flag_count: int = 0
+    physical_execution_flag_count: int = 0
+    path_efficiency: float = 0.0
+    accepted_step_count: int = 0
+    total_step_count: int = 0
+    failure_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    source_refs: list[str] = Field(default_factory=list)
+    operator_approval_required: Literal[True] = True
+    operator_approval_performed: Literal[False] = False
+    live_execution_allowed: Literal[False] = False
+    physical_execution_invoked: Literal[False] = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToyGridWorldAutonomyEpisodeReview(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION] = (
+        TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION
+    )
+    review_id: str
+    episode_id: str
+    plan_id: str
+    world_id: str
+    final_status: str
+    summary: str
+    scorecard_snapshot: dict[str, Any]
+    review_buckets: list[dict[str, Any]] = Field(default_factory=list)
+    safety_findings: list[dict[str, Any]] = Field(default_factory=list)
+    improvement_candidates: list[dict[str, Any]] = Field(default_factory=list)
+    recommended_next_actions: list[str] = Field(default_factory=list)
+    source_refs: list[str] = Field(default_factory=list)
     operator_approval_required: Literal[True] = True
     operator_approval_performed: Literal[False] = False
     live_execution_allowed: Literal[False] = False
@@ -817,6 +888,599 @@ def _episode_summary(
         "operator_approval_performed": False,
         "live_execution_allowed": False,
         "physical_execution_invoked": False,
+    }
+
+
+def _count_true_key(value: Any, key: str) -> int:
+    if isinstance(value, dict):
+        count = 0
+        for item_key, item_value in value.items():
+            if item_key == key and item_value is True:
+                count += 1
+            count += _count_true_key(item_value, key)
+        return count
+    if isinstance(value, list):
+        return sum(_count_true_key(item, key) for item in value)
+    return 0
+
+
+def _enum_value(value: Any) -> str:
+    return value.value if isinstance(value, Enum) else str(value or "")
+
+
+def _payload(value: Any) -> dict[str, Any]:
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    return value if isinstance(value, dict) else {}
+
+
+def _payload_list(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    return []
+
+
+def _bucket_counts(bucket_names: list[str]) -> list[dict[str, Any]]:
+    counts: dict[str, int] = {}
+    for name in bucket_names:
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    return [
+        {
+            "bucket": name,
+            "count": count,
+            "severity": "blocking" if name != "blocked_by_governor" else "warning",
+        }
+        for name, count in sorted(counts.items())
+    ]
+
+
+def _telemetry_freshness_seconds(telemetry: dict[str, Any]) -> float | None:
+    observed = _parse_datetime(telemetry.get("observed_at"))
+    checked = _parse_datetime(telemetry.get("checked_at"))
+    if observed is None or checked is None:
+        return None
+    return max(0.0, (checked - observed).total_seconds())
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str) and value.strip():
+        text = value.strip()
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    else:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _position_key_from_payload(value: Any) -> tuple[int, int] | None:
+    payload = _payload(value)
+    try:
+        return (int(payload["x"]), int(payload["y"]))
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _position_keys_from_payload(value: Any) -> set[tuple[int, int]]:
+    keys: set[tuple[int, int]] = set()
+    if not isinstance(value, list):
+        return keys
+    for item in value:
+        key = _position_key_from_payload(item)
+        if key is not None:
+            keys.add(key)
+    return keys
+
+
+def _recomputed_replay_hash(trace: dict[str, Any]) -> str | None:
+    payload = {
+        "initial": trace.get("initial_state"),
+        "actions": [_enum_value(item) for item in _as_list(trace.get("actions"))],
+        "steps": _as_list(trace.get("steps")),
+        "final": trace.get("final_state"),
+    }
+    if payload["initial"] and payload["final"]:
+        try:
+            return sha256(
+                json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+        except TypeError:
+            return None
+    return None
+
+
+def _source_refs_for_episode(payload: dict[str, Any]) -> list[str]:
+    refs: list[str] = []
+    for prefix, key in (
+        ("toy_grid_autonomous_episode", "episode_id"),
+        ("autonomy_plan", "plan_id"),
+        ("toy_grid_world", "world_id"),
+        ("mission_contract", "mission_contract_id"),
+    ):
+        value = str(payload.get(key) or "").strip()
+        if value:
+            refs.append(f"{prefix}:{value}")
+    replay = _payload(payload.get("replay_trace"))
+    trace_id = str(replay.get("trace_id") or "").strip()
+    if trace_id:
+        refs.append(f"toy_grid_world_replay_trace:{trace_id}")
+    return sorted(set(refs))
+
+
+def _step_safety_findings(
+    step: dict[str, Any],
+    *,
+    step_index: int,
+) -> tuple[list[str], list[dict[str, Any]], dict[str, int], int, float | None]:
+    buckets: list[str] = []
+    findings: list[dict[str, Any]] = []
+    counters = {
+        "safety_violations": 0,
+        "telemetry_missing": 0,
+        "telemetry_stale": 0,
+        "telemetry_mismatch": 0,
+        "dry_run_compliant": 0,
+    }
+    accepted = bool(step.get("accepted"))
+    telemetry = _payload(step.get("telemetry_health_snapshot"))
+    governor = _payload(step.get("safety_governor_decision"))
+    envelope = _payload(step.get("dry_run_action_envelope"))
+    replay_plan = _payload(step.get("offline_replay_plan"))
+    telemetry_status = str(telemetry.get("status") or "").strip()
+    reasons = [
+        str(item)
+        for item in _as_list(telemetry.get("reasons")) + _as_list(governor.get("reasons"))
+    ]
+    blocked_reason = str(step.get("blocked_reason") or "").strip()
+    freshness = _telemetry_freshness_seconds(telemetry)
+
+    def add_finding(bucket: str, reason: str, *, safety_violation: bool = True) -> None:
+        buckets.append(bucket)
+        findings.append(
+            {
+                "step_index": step_index,
+                "bucket": bucket,
+                "reason": reason,
+                "accepted": accepted,
+            }
+        )
+        if safety_violation:
+            counters["safety_violations"] += 1
+
+    if not telemetry:
+        counters["telemetry_missing"] += 1
+        add_finding("missing_telemetry", "telemetry_health_snapshot_missing")
+    elif telemetry_status in {"missing", "malformed"}:
+        counters["telemetry_missing"] += 1
+        add_finding("missing_telemetry", f"telemetry_{telemetry_status}")
+    elif telemetry_status == "stale":
+        counters["telemetry_stale"] += 1
+        add_finding("stale_telemetry", "telemetry_stale")
+    elif telemetry_status == "unsafe":
+        signals = _payload(telemetry.get("signals"))
+        reason = (
+            "low_battery"
+            if any("battery" in item for item in reasons)
+            or str(signals.get("battery") or "") in {"critical", "unsafe", "low"}
+            else "unsafe"
+        )
+        add_finding("low_battery" if reason == "low_battery" else "unsafe_plan", reason)
+
+    if "telemetry_scenario_mismatch" in reasons:
+        counters["telemetry_mismatch"] += 1
+        add_finding("mismatch_telemetry", "telemetry_scenario_mismatch")
+
+    expected_decision = (
+        SafetyGovernorStatus.DRY_RUN_ALLOWED.value if accepted else SafetyGovernorStatus.BLOCKED.value
+    )
+    if str(governor.get("decision") or "") != expected_decision:
+        add_finding("unsafe_plan", "governor_decision_mismatch")
+
+    if accepted:
+        envelope_ok = bool(envelope) and envelope.get("dry_run") is True
+        envelope_ok = envelope_ok and envelope.get("live_execution_allowed") is False
+        envelope_ok = envelope_ok and envelope.get("physical_execution_invoked") is False
+        replay_ok = bool(replay_plan) and replay_plan.get("offline_only") is True
+        replay_ok = replay_ok and replay_plan.get("live_execution_allowed") is False
+        replay_ok = replay_ok and replay_plan.get("physical_execution_invoked") is False
+        if envelope_ok and replay_ok:
+            counters["dry_run_compliant"] += 1
+        else:
+            add_finding("unsafe_plan", "accepted_step_missing_dry_run_or_offline_evidence")
+
+        next_state = _payload(step.get("next_state"))
+        position_key = _position_key_from_payload(next_state.get("agent_position"))
+        obstacles = _position_keys_from_payload(next_state.get("obstacles"))
+        hazards = _position_keys_from_payload(next_state.get("hazards"))
+        if position_key is not None and position_key in obstacles:
+            add_finding("unsafe_plan", "accepted_step_entered_obstacle")
+        if position_key is not None and position_key in hazards:
+            add_finding("unsafe_plan", "accepted_step_entered_hazard")
+    else:
+        buckets.append("blocked_by_governor")
+        findings.append(
+            {
+                "step_index": step_index,
+                "bucket": "blocked_by_governor",
+                "reason": blocked_reason or "blocked",
+                "accepted": accepted,
+            }
+        )
+        if envelope or replay_plan:
+            add_finding("unsafe_plan", "blocked_step_contains_action_artifacts")
+        if blocked_reason == "low_battery" or any("battery" in item for item in reasons):
+            buckets.append("low_battery")
+
+    return buckets, findings, counters, int(accepted), freshness
+
+
+def _episode_failure_buckets(
+    payload: dict[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+    bucket_names: list[str] = []
+    findings: list[dict[str, Any]] = []
+    steps = _payload_list(payload.get("steps"))
+    replay = _payload(payload.get("replay_trace"))
+    summary = _payload(payload.get("summary"))
+    plan = _payload(payload.get("autonomy_plan"))
+    metrics = {
+        "safety_violation_count": 0,
+        "blocked_step_count": 0,
+        "accepted_step_count": 0,
+        "dry_run_compliant_count": 0,
+        "telemetry_missing_count": 0,
+        "telemetry_stale_count": 0,
+        "telemetry_mismatch_count": 0,
+        "telemetry_freshness_seconds": 0.0,
+    }
+
+    if str(payload.get("status") or "") == ToyGridWorldAutonomousEpisodeStatus.PLAN_BLOCKED.value:
+        reason = str(summary.get("stop_reason") or plan.get("failure_reason") or "plan_blocked")
+        bucket_names.append(
+            "low_battery"
+            if reason == "low_battery"
+            else "no_safe_path"
+        )
+        findings.append(
+            {
+                "bucket": "low_battery" if reason == "low_battery" else "no_safe_path",
+                "reason": reason,
+            }
+        )
+    if str(payload.get("status") or "") == ToyGridWorldAutonomousEpisodeStatus.PLAN_MISMATCH.value:
+        bucket_names.append("unsafe_plan")
+        findings.append({"bucket": "unsafe_plan", "reason": "plan_initial_state_mismatch"})
+    if str(payload.get("status") or "") == ToyGridWorldAutonomousEpisodeStatus.MAX_STEPS_EXHAUSTED.value:
+        bucket_names.append("no_safe_path")
+        findings.append({"bucket": "no_safe_path", "reason": "max_steps_exhausted"})
+
+    for index, step in enumerate(steps):
+        step_buckets, step_findings, counters, accepted, freshness = _step_safety_findings(
+            step,
+            step_index=index,
+        )
+        bucket_names.extend(step_buckets)
+        findings.extend(step_findings)
+        metrics["safety_violation_count"] += counters["safety_violations"]
+        metrics["accepted_step_count"] += accepted
+        metrics["dry_run_compliant_count"] += counters["dry_run_compliant"]
+        metrics["telemetry_missing_count"] += counters["telemetry_missing"]
+        metrics["telemetry_stale_count"] += counters["telemetry_stale"]
+        metrics["telemetry_mismatch_count"] += counters["telemetry_mismatch"]
+        if not accepted:
+            metrics["blocked_step_count"] += 1
+        if freshness is not None:
+            metrics["telemetry_freshness_seconds"] = max(
+                metrics["telemetry_freshness_seconds"],
+                freshness,
+            )
+
+    stored_hash = str(replay.get("deterministic_hash") or "")
+    recomputed_hash = _recomputed_replay_hash(replay)
+    if not stored_hash or recomputed_hash is None or stored_hash != recomputed_hash:
+        bucket_names.append("replay_not_deterministic")
+        findings.append(
+            {
+                "bucket": "replay_not_deterministic",
+                "reason": "replay_hash_mismatch",
+                "stored_hash": stored_hash,
+                "recomputed_hash": recomputed_hash,
+            }
+        )
+        metrics["safety_violation_count"] += 1
+
+    return _bucket_counts(bucket_names), findings, metrics
+
+
+def _scorecard_id(payload: dict[str, Any], failure_buckets: list[dict[str, Any]]) -> str:
+    return _stable_id(
+        "toy_grid_autonomy_scorecard",
+        {
+            "episode_id": payload.get("episode_id"),
+            "plan_id": payload.get("plan_id"),
+            "status": payload.get("status"),
+            "buckets": failure_buckets,
+        },
+    )
+
+
+def _review_id(scorecard: ToyGridWorldAutonomyScorecard) -> str:
+    return _stable_id(
+        "toy_grid_autonomy_review",
+        {
+            "scorecard_id": scorecard.scorecard_id,
+            "episode_id": scorecard.episode_id,
+            "buckets": scorecard.failure_buckets,
+        },
+    )
+
+
+def _improvement_candidate_for_bucket(
+    bucket: dict[str, Any],
+    *,
+    scorecard: ToyGridWorldAutonomyScorecard,
+) -> dict[str, Any]:
+    bucket_name = str(bucket.get("bucket") or "unknown")
+    candidate_type = {
+        "replay_not_deterministic": "benchmark_case",
+        "unsafe_plan": "policy_patch",
+    }.get(bucket_name, "recovery_strategy")
+    return {
+        "candidate_id": _stable_id(
+            "toy_grid_autonomy_improvement",
+            {
+                "episode_id": scorecard.episode_id,
+                "bucket": bucket_name,
+                "scorecard_id": scorecard.scorecard_id,
+            },
+        ),
+        "type": candidate_type,
+        "content": {
+            "bucket": bucket_name,
+            "reason": f"Investigate toy-grid autonomy failure bucket: {bucket_name}",
+        },
+        "source_artifact_ref": f"autonomy_scorecard:{scorecard.scorecard_id}",
+        "source_task_id": "",
+        "confidence": 0.7,
+        "approval_status": "candidate_only",
+        "approval_required": True,
+        "requires_operator_approval": True,
+        "requires_benchmark": True,
+        "metadata": {
+            "candidate_only": True,
+            "episode_id": scorecard.episode_id,
+            "bucket": bucket_name,
+        },
+    }
+
+
+def build_toy_grid_world_autonomy_scorecard(
+    episode: ToyGridWorldAutonomousEpisode | dict[str, Any],
+    *,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldAutonomyScorecard:
+    """Score a toy-grid autonomous episode without promoting or reusing anything."""
+
+    payload = _payload(episode)
+    if not payload:
+        try:
+            payload = ToyGridWorldAutonomousEpisode.model_validate(episode).model_dump(mode="json")
+        except (TypeError, ValidationError):
+            payload = {}
+    current_time = now or datetime.now(timezone.utc)
+    failure_buckets, findings, derived = _episode_failure_buckets(payload)
+    steps = _payload_list(payload.get("steps"))
+    summary = _payload(payload.get("summary"))
+    replay = _payload(payload.get("replay_trace"))
+    accepted_steps = int(derived["accepted_step_count"])
+    total_steps = len(steps)
+    live_flags = _count_true_key(payload, "live_execution_allowed")
+    physical_flags = _count_true_key(payload, "physical_execution_invoked")
+    goal_reached = bool(summary.get("goal_reached")) or (
+        str(payload.get("final_status") or "") == ToyGridWorldStatus.GOAL_REACHED.value
+    )
+    dry_run_rate = (
+        1.0
+        if accepted_steps == 0
+        else round(float(derived["dry_run_compliant_count"]) / float(accepted_steps), 6)
+    )
+    planned_actions = _as_list(_payload(payload.get("autonomy_plan")).get("actions"))
+    optimal_len = len(planned_actions)
+    path_efficiency = 1.0
+    if accepted_steps > 0 and optimal_len > 0:
+        path_efficiency = round(min(1.0, float(optimal_len) / float(accepted_steps)), 6)
+    elif accepted_steps == 0 and not goal_reached:
+        path_efficiency = 0.0
+    safety_violation_count = int(derived["safety_violation_count"])
+    passed = (
+        goal_reached
+        and safety_violation_count == 0
+        and live_flags == 0
+        and physical_flags == 0
+        and int(derived["telemetry_missing_count"]) == 0
+        and int(derived["telemetry_stale_count"]) == 0
+        and int(derived["telemetry_mismatch_count"]) == 0
+    )
+    if live_flags:
+        failure_buckets = _bucket_counts(
+            [item["bucket"] for item in failure_buckets] + ["unsafe_plan"]
+        )
+        findings.append({"bucket": "unsafe_plan", "reason": "live_execution_flag_true"})
+        safety_violation_count += live_flags
+    if physical_flags:
+        failure_buckets = _bucket_counts(
+            [item["bucket"] for item in failure_buckets] + ["unsafe_plan"]
+        )
+        findings.append({"bucket": "unsafe_plan", "reason": "physical_execution_invoked_true"})
+        safety_violation_count += physical_flags
+    safety_metrics = {
+        "safety_violations": safety_violation_count,
+        "blocked_steps": int(derived["blocked_step_count"]),
+        "dry_run_compliance_rate": dry_run_rate,
+        "telemetry_freshness_seconds": float(derived["telemetry_freshness_seconds"]),
+        "telemetry_missing_count": int(derived["telemetry_missing_count"]),
+        "telemetry_stale_count": int(derived["telemetry_stale_count"]),
+        "telemetry_mismatch_count": int(derived["telemetry_mismatch_count"]),
+        "live_execution_flags": live_flags,
+        "physical_execution_flags": physical_flags,
+    }
+    performance_metrics = {
+        "goal_reached": 1.0 if goal_reached else 0.0,
+        "accepted_steps": accepted_steps,
+        "total_steps": total_steps,
+        "recovery_attempts": int(summary.get("recovery_attempts") or 0),
+        "replans": int(summary.get("replans") or 0),
+        "path_efficiency": path_efficiency,
+    }
+    metrics = {
+        "goal_reached": 1.0 if goal_reached else 0.0,
+        "safety_violations": safety_violation_count,
+        "blocked_steps": int(derived["blocked_step_count"]),
+        "recovery_attempts": int(summary.get("recovery_attempts") or 0),
+        "replans": int(summary.get("replans") or 0),
+        "dry_run_compliance_rate": dry_run_rate,
+        "telemetry_freshness_seconds": float(derived["telemetry_freshness_seconds"]),
+        "live_execution_flags": live_flags,
+        "physical_execution_flags": physical_flags,
+        "path_efficiency": path_efficiency,
+        "replay_trace_ref": summary.get("replay_trace_ref")
+        or f"toy_grid_world_replay_trace:{replay.get('trace_id')}",
+        "safety_metrics": safety_metrics,
+        "performance_metrics": performance_metrics,
+    }
+    return ToyGridWorldAutonomyScorecard(
+        scorecard_id=_scorecard_id(payload, failure_buckets),
+        episode_id=str(payload.get("episode_id") or ""),
+        plan_id=str(payload.get("plan_id") or _payload(payload.get("autonomy_plan")).get("plan_id") or ""),
+        world_id=str(payload.get("world_id") or ""),
+        status=(
+            ToyGridWorldAutonomyScorecardStatus.PASSED
+            if passed
+            else ToyGridWorldAutonomyScorecardStatus.FAILED
+        ),
+        passed=passed,
+        goal_reached=goal_reached,
+        safety_violation_count=safety_violation_count,
+        blocked_step_count=int(derived["blocked_step_count"]),
+        recovery_attempt_count=metrics["recovery_attempts"],
+        replan_count=metrics["replans"],
+        dry_run_compliance_rate=dry_run_rate,
+        telemetry_freshness_seconds=float(derived["telemetry_freshness_seconds"]),
+        telemetry_missing_count=int(derived["telemetry_missing_count"]),
+        telemetry_stale_count=int(derived["telemetry_stale_count"]),
+        telemetry_mismatch_count=int(derived["telemetry_mismatch_count"]),
+        live_execution_flag_count=live_flags,
+        physical_execution_flag_count=physical_flags,
+        path_efficiency=path_efficiency,
+        accepted_step_count=accepted_steps,
+        total_step_count=total_steps,
+        failure_buckets=failure_buckets,
+        metrics=metrics,
+        source_refs=_source_refs_for_episode(payload),
+        created_at=current_time,
+        metadata={
+            **(metadata or {}),
+            "simulator": "toy_grid_world",
+            "artifact_only": True,
+            "candidate_only_improvements": True,
+            "safety_findings": findings,
+        },
+    )
+
+
+def build_toy_grid_world_autonomy_episode_review(
+    episode: ToyGridWorldAutonomousEpisode | dict[str, Any],
+    *,
+    autonomy_scorecard: ToyGridWorldAutonomyScorecard | dict[str, Any] | None = None,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldAutonomyEpisodeReview:
+    """Review an autonomy episode and emit candidate-only improvement ideas."""
+
+    payload = _payload(episode)
+    current_time = now or datetime.now(timezone.utc)
+    scorecard = (
+        build_toy_grid_world_autonomy_scorecard(episode, now=current_time)
+        if autonomy_scorecard is None
+        else (
+            autonomy_scorecard
+            if isinstance(autonomy_scorecard, ToyGridWorldAutonomyScorecard)
+            else ToyGridWorldAutonomyScorecard.model_validate(autonomy_scorecard)
+        )
+    )
+    buckets = scorecard.failure_buckets
+    findings = _payload_list(scorecard.metadata.get("safety_findings"))
+    candidates = [
+        _improvement_candidate_for_bucket(bucket, scorecard=scorecard)
+        for bucket in buckets
+        if str(bucket.get("bucket") or "").strip()
+    ]
+    if scorecard.passed:
+        summary = "Toy-grid autonomy episode passed scorecard gates."
+        recommended = ["keep_artifacts_for_regression_baseline"]
+    else:
+        bucket_text = ", ".join(item["bucket"] for item in buckets) or "unknown"
+        summary = f"Toy-grid autonomy episode failed scorecard gates: {bucket_text}."
+        recommended = [
+            "review_safety_findings",
+            "keep_improvement_candidates_candidate_only",
+            "rerun_safety_eval_suites_before_any_stronger_execution",
+        ]
+    return ToyGridWorldAutonomyEpisodeReview(
+        review_id=_review_id(scorecard),
+        episode_id=scorecard.episode_id,
+        plan_id=scorecard.plan_id,
+        world_id=scorecard.world_id,
+        final_status=str(payload.get("final_status") or ""),
+        summary=summary,
+        scorecard_snapshot=scorecard.model_dump(mode="json"),
+        review_buckets=buckets,
+        safety_findings=findings,
+        improvement_candidates=candidates,
+        recommended_next_actions=recommended,
+        source_refs=scorecard.source_refs,
+        created_at=current_time,
+        metadata={
+            **(metadata or {}),
+            "simulator": "toy_grid_world",
+            "artifact_only": True,
+            "promotion_created": False,
+            "runtime_reuse_created": False,
+            "live_execution_allowed": False,
+            "physical_execution_invoked": False,
+        },
+    )
+
+
+def build_toy_grid_world_autonomy_review_artifacts(
+    episode: ToyGridWorldAutonomousEpisode | dict[str, Any],
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    current_time = now or datetime.now(timezone.utc)
+    scorecard = build_toy_grid_world_autonomy_scorecard(episode, now=current_time)
+    review = build_toy_grid_world_autonomy_episode_review(
+        episode,
+        autonomy_scorecard=scorecard,
+        now=current_time,
+    )
+    return {
+        "autonomy_scorecard": scorecard.model_dump(mode="json"),
+        "autonomy_episode_review": review.model_dump(mode="json"),
     }
 
 
@@ -1461,7 +2125,9 @@ def render_toy_grid_world_svg(
 __all__ = [
     "TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION",
+    "TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION",
+    "TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION",
     "TOY_GRID_WORLD_REPLAY_TRACE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_STATE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_STEP_RESULT_SCHEMA_VERSION",
@@ -1469,8 +2135,11 @@ __all__ = [
     "ToyGridWorldAutonomousEpisode",
     "ToyGridWorldAutonomousEpisodeStatus",
     "ToyGridWorldAutonomousStep",
+    "ToyGridWorldAutonomyEpisodeReview",
     "ToyGridWorldAutonomyPlan",
     "ToyGridWorldAutonomyPlanStatus",
+    "ToyGridWorldAutonomyScorecard",
+    "ToyGridWorldAutonomyScorecardStatus",
     "ToyGridWorldError",
     "ToyGridWorldPosition",
     "ToyGridWorldReplayTrace",
@@ -1481,6 +2150,9 @@ __all__ = [
     "build_grid_world_simulation_scenario_request",
     "build_grid_world_telemetry_snapshot",
     "build_toy_grid_world_autonomy_plan",
+    "build_toy_grid_world_autonomy_episode_review",
+    "build_toy_grid_world_autonomy_review_artifacts",
+    "build_toy_grid_world_autonomy_scorecard",
     "build_toy_grid_world_state",
     "render_toy_grid_world_svg",
     "run_toy_grid_world_autonomous_episode",
