@@ -189,7 +189,7 @@ What exists today:
   scheduler queue, heartbeat, checkpoint, resume, and typed recovery decisions.
 - Mission scorecards, post-mission review, approval-gated memory candidates,
   mission templates, deterministic mission eval suites, promotion packages, and
-  artifact-only approved promotion paths.
+  artifact-only approved promotion paths and reuse plans.
 - Current-tab Google Sheets vertical slice with destination-bound evidence and
   Control UI visibility.
 - Simulation-first physical runtime artifacts for validation, telemetry,
@@ -198,7 +198,8 @@ What exists today:
 Near-term work is focused on the promotion loop:
 
 - Aggregate promotion packages across canary benchmark suites.
-- Add mission reuse planning with visible provenance.
+- Connect reuse plans to live mission start only after provenance and policy
+  checks are mature.
 - Keep physical work simulation-first until replay and eval gates are mature.
 
 See [architecture/README.md](architecture/README.md) for the short system
@@ -983,7 +984,7 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - Mission Contract substrate: task graph, scheduler queue, checkpoints, resume
   state, recovery decisions, scorecard, post-mission review, templates, eval
   suites, memory candidates, promotion packages, and typed approved promotion
-  artifacts.
+  artifacts with reuse plans.
 - Simulation-first physical AI artifacts: validation state, telemetry-aware
   verifier results, safety-governed action envelopes, and offline replay plans.
 
@@ -991,7 +992,8 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 
 - Aggregate benchmark gates over promotion packages from mission improvement
   candidates.
-- Mission reuse planning with visible provenance and expiry/invalidation checks.
+- Live mission-start integration for reuse plans after policy checks and
+  provenance are mature.
 
 ### Planned
 

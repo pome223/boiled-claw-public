@@ -106,6 +106,14 @@ from src.runtime.approved_promotions import (
     normalize_approved_promotion_artifact,
     reject_approved_promotion_artifact,
 )
+from src.runtime.mission_reuse import (
+    MISSION_REUSE_PLAN_SCHEMA_VERSION,
+    MissionReuseCheck,
+    MissionReuseExcludedCandidate,
+    MissionReusePlan,
+    MissionReuseSelection,
+    build_mission_reuse_plan,
+)
 from src.runtime.mission_runtime import (
     MemoryPromotionApprovalStatus,
     MissionImprovementCandidate,
@@ -233,6 +241,12 @@ __all__ = [
     "list_approved_promotion_artifacts",
     "normalize_approved_promotion_artifact",
     "reject_approved_promotion_artifact",
+    "MISSION_REUSE_PLAN_SCHEMA_VERSION",
+    "MissionReuseCheck",
+    "MissionReuseExcludedCandidate",
+    "MissionReusePlan",
+    "MissionReuseSelection",
+    "build_mission_reuse_plan",
     "MissionImprovementCandidate",
     "MemoryPromotionApprovalStatus",
     "MissionMemoryPromotionCandidate",
