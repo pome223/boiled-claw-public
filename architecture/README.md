@@ -219,6 +219,17 @@ metric regression, while still representing operator approval as required. This
 is groundwork for future benchmark-gated promotion; it does not promote memory,
 run canaries, reuse approved artifacts, add UI, or introduce mission storage.
 
+Physical replay safety eval suites extend that measurement layer to the toy
+grid-world simulator before any autonomy runner exists. They inspect existing
+`toy_grid_world_replay_trace.v1` artifacts and block regressions such as live
+execution flags, physical execution invocation, accepted obstacle/hazard moves,
+missing or stale telemetry, scenario-mismatched telemetry, non-dry-run action
+envelopes, online replay plans, governor/step result mismatches, or
+non-deterministic replay hashes. They also expose telemetry freshness as an
+explicit metric for regression gates. These suites are artifact checks only;
+they do not add simulator execution endpoints, UI controls, ROS dispatch,
+actuator execution, `/missions`, or a `missions` table.
+
 Promotion packages are the artifact-only bridge from post-mission review to a
 future promotion pipeline. `mission_review.improvement_candidates` can be
 normalized into typed promotion candidates, mapped to required eval suites, and

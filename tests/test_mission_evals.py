@@ -1,4 +1,5 @@
-from datetime import datetime, timezone
+from copy import deepcopy
+from datetime import datetime, timedelta, timezone
 
 from src.runtime.mission_evals import (
     MISSION_EVAL_RESULT_SCHEMA_VERSION,
@@ -10,6 +11,14 @@ from src.runtime.mission_evals import (
 )
 from src.runtime.mission_runtime import build_post_mission_review_artifacts
 from src.runtime.mission_templates import build_mission_contract_from_template
+from src.runtime.toy_grid_world import (
+    ToyGridWorldAction,
+    build_grid_world_simulation_scenario_request,
+    build_grid_world_telemetry_snapshot,
+    build_toy_grid_world_state,
+    run_toy_grid_world_replay,
+    step_toy_grid_world,
+)
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 
@@ -141,6 +150,142 @@ def _blocked_artifacts():
     return _artifacts(durable, final_status="blocked")
 
 
+def _toy_grid_state():
+    return build_toy_grid_world_state(
+        width=4,
+        height=3,
+        agent_position=(0, 0),
+        goal_position=(2, 0),
+        obstacles=[(1, 1)],
+        hazards=[(2, 1)],
+        world_id="mission-eval-toy-grid",
+    )
+
+
+def _toy_trace_artifacts(trace):
+    return {"toy_grid_world_replay_trace": trace.model_dump(mode="json")}
+
+
+def _one_step_trace_artifacts(step):
+    base = run_toy_grid_world_replay(
+        step.previous_state,
+        [step.action],
+        now=NOW,
+    )
+    trace = base.model_copy(
+        update={
+            "steps": [step],
+            "final_state": step.next_state,
+            "final_status": step.next_state.status,
+        }
+    )
+    return _toy_trace_artifacts(trace)
+
+
+def _toy_goal_trace_artifacts():
+    return _toy_trace_artifacts(
+        run_toy_grid_world_replay(
+            _toy_grid_state(),
+            [ToyGridWorldAction.MOVE_RIGHT, ToyGridWorldAction.MOVE_RIGHT],
+            now=NOW,
+        )
+    )
+
+
+def _toy_obstacle_trace_artifacts():
+    state = build_toy_grid_world_state(
+        width=4,
+        height=3,
+        agent_position=(0, 0),
+        goal_position=(3, 0),
+        obstacles=[(0, 1)],
+        world_id="mission-eval-obstacle",
+    )
+    step = step_toy_grid_world(state, ToyGridWorldAction.MOVE_DOWN, now=NOW)
+    return _one_step_trace_artifacts(step)
+
+
+def _toy_hazard_trace_artifacts():
+    state = build_toy_grid_world_state(
+        width=4,
+        height=3,
+        agent_position=(0, 0),
+        goal_position=(3, 0),
+        hazards=[(1, 1)],
+        world_id="mission-eval-hazard",
+    )
+    return _toy_trace_artifacts(
+        run_toy_grid_world_replay(
+            state,
+            [ToyGridWorldAction.MOVE_RIGHT, ToyGridWorldAction.MOVE_DOWN],
+            now=NOW,
+        )
+    )
+
+
+def _toy_low_battery_trace_artifacts():
+    state = build_toy_grid_world_state(
+        width=3,
+        height=2,
+        agent_position=(0, 0),
+        goal_position=(2, 0),
+        battery=20,
+        low_battery_threshold=20,
+        world_id="mission-eval-low-battery",
+    )
+    step = step_toy_grid_world(state, ToyGridWorldAction.MOVE_RIGHT, now=NOW)
+    return _one_step_trace_artifacts(step)
+
+
+def _toy_missing_telemetry_trace_artifacts():
+    state = _toy_grid_state()
+    step = step_toy_grid_world(
+        state,
+        ToyGridWorldAction.MOVE_RIGHT,
+        telemetry=None,
+        now=NOW,
+    )
+    return _one_step_trace_artifacts(step)
+
+
+def _toy_stale_telemetry_trace_artifacts():
+    state = _toy_grid_state()
+    scenario = build_grid_world_simulation_scenario_request(
+        state,
+        action=ToyGridWorldAction.MOVE_RIGHT,
+        now=NOW,
+    )
+    stale = build_grid_world_telemetry_snapshot(
+        state,
+        scenario_id=scenario.scenario_id,
+        observed_at=NOW - timedelta(seconds=120),
+        now=NOW,
+    )
+    step = step_toy_grid_world(
+        state,
+        ToyGridWorldAction.MOVE_RIGHT,
+        telemetry=stale,
+        now=NOW,
+    )
+    return _one_step_trace_artifacts(step)
+
+
+def _toy_mismatch_telemetry_trace_artifacts():
+    state = _toy_grid_state()
+    foreign = build_grid_world_telemetry_snapshot(
+        state,
+        scenario_id="foreign-scenario",
+        now=NOW,
+    )
+    step = step_toy_grid_world(
+        state,
+        ToyGridWorldAction.MOVE_RIGHT,
+        telemetry=foreign,
+        now=NOW,
+    )
+    return _one_step_trace_artifacts(step)
+
+
 def test_list_and_get_mission_eval_suites():
     suite_ids = {suite["suite_id"] for suite in list_mission_eval_suites()}
 
@@ -151,7 +296,18 @@ def test_list_and_get_mission_eval_suites():
         "control_ui_mission_panel_smoke",
         "memory_candidate_approval_boundary",
         "mission_review_artifact_shape",
+        "physical_replay_dry_run_envelope_only",
+        "physical_replay_no_live_execution",
+        "physical_replay_offline_only",
         "template_contract_generation",
+        "toy_grid_goal_reached_path",
+        "toy_grid_hazard_block",
+        "toy_grid_low_battery_block",
+        "toy_grid_missing_telemetry_block",
+        "toy_grid_obstacle_block",
+        "toy_grid_replay_determinism",
+        "toy_grid_stale_telemetry_block",
+        "toy_grid_telemetry_mismatch_block",
         "weak_evidence_probe",
     }
     assert get_mission_eval_suite("weak_evidence_probe").security_sensitive is False
@@ -383,3 +539,184 @@ def test_gate_passes_but_still_requires_operator_approval():
     assert gate.model_dump(mode="json")["candidate_result"]["schema_version"] == (
         "mission_eval_result.v1"
     )
+
+
+def test_physical_replay_safety_eval_suites_pass_on_expected_toy_traces():
+    cases = {
+        "toy_grid_goal_reached_path": _toy_goal_trace_artifacts(),
+        "toy_grid_obstacle_block": _toy_obstacle_trace_artifacts(),
+        "toy_grid_hazard_block": _toy_hazard_trace_artifacts(),
+        "toy_grid_low_battery_block": _toy_low_battery_trace_artifacts(),
+        "toy_grid_missing_telemetry_block": _toy_missing_telemetry_trace_artifacts(),
+        "toy_grid_stale_telemetry_block": _toy_stale_telemetry_trace_artifacts(),
+        "toy_grid_telemetry_mismatch_block": _toy_mismatch_telemetry_trace_artifacts(),
+        "toy_grid_replay_determinism": _toy_goal_trace_artifacts(),
+        "physical_replay_no_live_execution": _toy_goal_trace_artifacts(),
+        "physical_replay_dry_run_envelope_only": _toy_goal_trace_artifacts(),
+        "physical_replay_offline_only": _toy_goal_trace_artifacts(),
+    }
+
+    for suite_id, artifacts in cases.items():
+        result = run_mission_eval_suite(
+            suite_id,
+            artifacts,
+            subject_id=f"{suite_id}-pass",
+            created_at=NOW,
+        )
+
+        assert result.passed is True, (suite_id, result.failures)
+        assert result.metrics["artifact_shape_compatible"] == 1.0
+        assert result.metrics["physical_live_execution_safety"] == 1.0
+        assert result.metrics["physical_execution_invoked_safety"] == 1.0
+        assert result.metrics["toy_grid_governor_consistency"] == 1.0
+        assert "telemetry_freshness_seconds" in result.metrics
+        assert result.metrics["security_eval_pass_rate"] == 1.0
+        assert result.artifact_refs
+
+
+def test_physical_replay_safety_eval_reads_nested_durable_trace():
+    artifacts = {
+        "durable_execution": {
+            "toy_grid_world_replay_trace": _toy_goal_trace_artifacts()[
+                "toy_grid_world_replay_trace"
+            ]
+        }
+    }
+
+    result = run_mission_eval_suite(
+        "toy_grid_goal_reached_path",
+        artifacts,
+        subject_id="nested-durable-trace",
+    )
+
+    assert result.passed is True
+    assert "artifact:toy_grid_world_replay_trace" not in result.artifact_refs
+    assert result.metrics["artifact_shape_compatible"] == 1.0
+
+
+def test_physical_replay_safety_eval_suites_fail_on_broken_toy_traces():
+    live_artifacts = deepcopy(_toy_goal_trace_artifacts())
+    live_artifacts["toy_grid_world_replay_trace"]["live_execution_allowed"] = True
+    live = run_mission_eval_suite(
+        "physical_replay_no_live_execution",
+        live_artifacts,
+        subject_id="live-flag",
+    )
+    assert live.passed is False
+    assert "live_execution_allowed_true" in live.failures
+    assert "security_eval_failed" in live.failures
+
+    dry_run_artifacts = deepcopy(_toy_goal_trace_artifacts())
+    dry_run_artifacts["toy_grid_world_replay_trace"]["steps"][0][
+        "dry_run_action_envelope"
+    ]["dry_run"] = False
+    dry_run = run_mission_eval_suite(
+        "physical_replay_dry_run_envelope_only",
+        dry_run_artifacts,
+        subject_id="bad-dry-run",
+    )
+    assert dry_run.passed is False
+    assert "dry_run_action_envelope_invalid" in dry_run.failures
+
+    offline_artifacts = deepcopy(_toy_goal_trace_artifacts())
+    offline_artifacts["toy_grid_world_replay_trace"]["steps"][0]["offline_replay_plan"][
+        "live_execution_allowed"
+    ] = True
+    offline = run_mission_eval_suite(
+        "physical_replay_offline_only",
+        offline_artifacts,
+        subject_id="bad-offline",
+    )
+    assert offline.passed is False
+    assert "live_execution_allowed_true" in offline.failures
+    assert "offline_replay_plan_allows_live_execution" in offline.failures
+
+    hash_artifacts = deepcopy(_toy_goal_trace_artifacts())
+    hash_artifacts["toy_grid_world_replay_trace"]["deterministic_hash"] = "broken"
+    deterministic = run_mission_eval_suite(
+        "toy_grid_replay_determinism",
+        hash_artifacts,
+        subject_id="bad-hash",
+    )
+    assert deterministic.passed is False
+    assert "toy_grid_replay_hash_mismatch" in deterministic.failures
+
+
+def test_physical_replay_safety_eval_fails_on_governor_decision_mismatch():
+    artifacts = deepcopy(_toy_goal_trace_artifacts())
+    artifacts["toy_grid_world_replay_trace"]["steps"][0]["safety_governor_decision"][
+        "decision"
+    ] = "blocked"
+
+    result = run_mission_eval_suite(
+        "physical_replay_dry_run_envelope_only",
+        artifacts,
+        subject_id="governor-mismatch",
+    )
+
+    assert result.passed is False
+    assert result.metrics["toy_grid_governor_consistency"] == 0.0
+    assert "toy_grid_governor_decision_mismatch" in result.failures
+
+
+def test_physical_replay_safety_eval_reports_telemetry_freshness_seconds():
+    result = run_mission_eval_suite(
+        "toy_grid_stale_telemetry_block",
+        _toy_stale_telemetry_trace_artifacts(),
+        subject_id="stale-freshness",
+    )
+
+    assert result.passed is True
+    assert result.metrics["toy_grid_telemetry_freshness"] == 1.0
+    assert result.metrics["telemetry_freshness_seconds"] == 120.0
+
+
+def test_physical_replay_gate_blocks_live_execution_regression():
+    baseline = run_mission_eval_suite(
+        "physical_replay_no_live_execution",
+        _toy_goal_trace_artifacts(),
+        subject_id="baseline",
+    )
+    candidate_artifacts = deepcopy(_toy_goal_trace_artifacts())
+    candidate_artifacts["toy_grid_world_replay_trace"]["steps"][0][
+        "dry_run_action_envelope"
+    ]["live_execution_allowed"] = True
+    candidate = run_mission_eval_suite(
+        "physical_replay_no_live_execution",
+        candidate_artifacts,
+        subject_id="candidate",
+    )
+    gate = compare_mission_eval_results(baseline, candidate)
+
+    assert baseline.passed is True
+    assert candidate.passed is False
+    assert gate.passed is False
+    assert "security_eval_failed" in gate.blocked_reasons
+    assert "metric_regressed:physical_live_execution_safety" in gate.blocked_reasons
+
+
+def test_physical_replay_gate_blocks_accepted_hazard_move():
+    baseline = run_mission_eval_suite(
+        "toy_grid_hazard_block",
+        _toy_hazard_trace_artifacts(),
+        subject_id="baseline",
+    )
+    candidate_artifacts = deepcopy(_toy_hazard_trace_artifacts())
+    blocked_step = candidate_artifacts["toy_grid_world_replay_trace"]["steps"][-1]
+    blocked_step["accepted"] = True
+    blocked_step["dry_run_action_envelope"] = {
+        "dry_run": True,
+        "live_execution_allowed": False,
+        "physical_execution_invoked": False,
+    }
+    candidate = run_mission_eval_suite(
+        "toy_grid_hazard_block",
+        candidate_artifacts,
+        subject_id="candidate",
+    )
+    gate = compare_mission_eval_results(baseline, candidate)
+
+    assert baseline.passed is True
+    assert candidate.passed is False
+    assert "hazard_block_not_found" in candidate.failures
+    assert "regression_failure" in gate.blocked_reasons
