@@ -589,6 +589,12 @@ boiled-claw self-improvement-search \
 
 The physical AI slice is simulation-first by design:
 
+- `src/runtime/physical_mission_replay.py` provides a Mission OS artifact-only
+  replay path: `simulation_scenario_request.v1`,
+  `telemetry_health_snapshot.v1`, `safety_governor_decision.v1`,
+  `dry_run_action_envelope.v1`, and `offline_replay_plan.v1`. This path does
+  not call adapters, dispatch to ROS, invoke actuators, or perform operator
+  approval.
 - `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
 - `physical_ai_validation_status` returns the persisted validation state for a run id, can refresh queued runs from adapter status endpoints, and exposes `mission_contract`, `telemetry_health`, `verifier_result`, `action_envelope`, `governor_decision`, and `replay_plan`
 - `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges and returns the initial governor state that keeps dispatch operator-mediated by default
@@ -987,7 +993,8 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
   artifacts, plan-only mission-start reuse plans, and Control UI visibility for
   reuse-plan selections, exclusions, checks, and history.
 - Simulation-first physical AI artifacts: validation state, telemetry-aware
-  verifier results, safety-governed action envelopes, and offline replay plans.
+  verifier results, simulation scenario requests, telemetry snapshots,
+  safety-governed dry-run action envelopes, and offline replay plans.
 
 ### In Progress
 
@@ -999,7 +1006,7 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - Aggregate promotion gates across multiple eval suites and canary runs.
 - Deeper current-tab / desktop practical tasks for Sheets, Docs, SaaS
   extraction, and cross-app workflows.
-- Simulation-first physical replay PoCs that keep the same mission and
+- Adapter-backed simulation replay PoCs that keep the same mission and
   trajectory vocabulary before any live robotics claims.
 
 ## References

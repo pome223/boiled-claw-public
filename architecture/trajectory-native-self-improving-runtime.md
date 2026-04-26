@@ -313,9 +313,14 @@ computer-use trajectory
   -> simulation scenario request
   -> verifier result + telemetry health
   -> safety governor decision
-  -> ROS2 dry-run action envelope
+  -> dry-run action envelope
   -> offline replay plan
 ```
+
+The first implementation slice for this path is artifact-only. It defines
+versioned simulation scenario, telemetry snapshot, safety governor, dry-run
+action envelope, offline replay plan, and physical mission review artifacts
+without adapter dispatch, actuator execution, or completed operator approval.
 
 Representative contract:
 

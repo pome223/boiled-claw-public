@@ -47,7 +47,10 @@ plan -> execute -> verify -> repair -> record trajectory -> improve
    Physical work stays simulation-first. Mission contracts, telemetry health,
    action envelopes, governor decisions, verifier reports, and replay plans are
    represented as durable artifacts before any restricted physical proof of
-   concept is attempted.
+   concept is attempted. The first Mission OS physical replay slice is
+   artifact-only: it can produce simulation scenario requests, telemetry health
+   snapshots, blocked-or-dry-run safety decisions, dry-run action envelopes, and
+   offline replay plans without adapter dispatch or actuator execution.
 
 ## Control Flow
 
@@ -262,7 +265,10 @@ API, and no `missions` table.
 boiled-claw already has the main contract surfaces: task objects, audit events,
 approvals, trajectories, scheduler state, durable execution artifacts, live
 supervisor resume, typed mission abort conditions, and simulation-first physical
-runtime artifacts.
+runtime artifacts. Physical replay now has an artifact-only Mission OS path for
+simulation scenario requests, telemetry health snapshots, safety governor
+decisions, dry-run action envelopes, and offline replay plans; it does not apply
+those artifacts to live hardware.
 
 The system is still a reference implementation. The live mission runtime is
 active for control supervisors, but the project does not claim a distributed
