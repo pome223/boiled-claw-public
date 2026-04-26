@@ -223,8 +223,24 @@ It makes the benchmark-gate decision inspectable, but it does not create
 approved memory, skills, capabilities, policies, code patches, runtime reuse,
 UI behavior, `/missions`, or a `missions` table.
 
-Non-goals for this layer: no memory promotion, no approved improvements, no
-canary benchmark execution, no `/missions` API, and no `missions` table.
+Approved promotion artifacts are the next artifact-only layer. An
+approval-ready `promotion_package.v1` can become one of four typed artifacts
+after explicit operator approval:
+
+- `approved_improvement_memory.v1`: retrieval-only improvement knowledge.
+- `approved_skill.v1`: a bounded reusable recipe.
+- `capability_patch.v1`: a typed capability proposal that still requires
+  runtime registration before use.
+- `policy_patch.v1`: a safety or scope policy proposal.
+
+The approval path preserves source package refs, benchmark refs, security eval
+refs, approval metadata, expiry/invalidation metadata, and target-specific
+schema fields. Listing helpers can filter usable approved artifacts by type and
+ignore rejected or expired records. This still does not wire approved artifacts
+into planning, recovery, runtime registration, or mission reuse.
+
+Non-goals for this layer: no automatic promotion, no runtime reuse, no canary
+benchmark execution, no UI changes, no `/missions` API, and no `missions` table.
 
 ## Current Maturity
 

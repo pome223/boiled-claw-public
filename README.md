@@ -188,7 +188,8 @@ What exists today:
 - Live `control_supervisor` missions with Mission Contract, task graph,
   scheduler queue, heartbeat, checkpoint, resume, and typed recovery decisions.
 - Mission scorecards, post-mission review, approval-gated memory candidates,
-  mission templates, deterministic mission eval suites, and promotion packages.
+  mission templates, deterministic mission eval suites, promotion packages, and
+  artifact-only approved promotion paths.
 - Current-tab Google Sheets vertical slice with destination-bound evidence and
   Control UI visibility.
 - Simulation-first physical runtime artifacts for validation, telemetry,
@@ -197,7 +198,6 @@ What exists today:
 Near-term work is focused on the promotion loop:
 
 - Aggregate promotion packages across canary benchmark suites.
-- Separate approved memory, skill, capability, and policy promotion paths.
 - Add mission reuse planning with visible provenance.
 - Keep physical work simulation-first until replay and eval gates are mature.
 
@@ -982,7 +982,8 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
   approvals, transcript persistence, cron, skills, MCP, and Docker runtime.
 - Mission Contract substrate: task graph, scheduler queue, checkpoints, resume
   state, recovery decisions, scorecard, post-mission review, templates, eval
-  suites, memory candidates, and promotion packages.
+  suites, memory candidates, promotion packages, and typed approved promotion
+  artifacts.
 - Simulation-first physical AI artifacts: validation state, telemetry-aware
   verifier results, safety-governed action envelopes, and offline replay plans.
 
@@ -990,7 +991,6 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 
 - Aggregate benchmark gates over promotion packages from mission improvement
   candidates.
-- Approved memory / skill / capability / policy promotion paths.
 - Mission reuse planning with visible provenance and expiry/invalidation checks.
 
 ### Planned

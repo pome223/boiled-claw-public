@@ -422,7 +422,7 @@ Likely touchpoints:
 
 Deliverables:
 
-- explicit artifact schemas for `approved_skill`, `capability_patch`, `approved_improvement_memory`, and `policy_patch`
+- explicit artifact schemas for `approved_skill`, `capability_patch`, `approved_improvement_memory`, and `policy_patch` (artifact-only first slice before runtime reuse)
 - candidate skill generation from failed trajectories
 - capability registration path for approved promotions
 - reuse hooks that prefer promoted skills over raw repair prompting
