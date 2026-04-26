@@ -812,6 +812,21 @@ textarea {
   word-break: break-word;
 }
 
+.toy-grid-svg-frame {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(7, 14, 24, 0.6);
+  padding: 10px;
+  overflow: auto;
+}
+
+.toy-grid-svg-frame img {
+  display: block;
+  width: min(100%, 520px);
+  height: auto;
+  image-rendering: pixelated;
+}
+
 .timeline-list {
   display: grid;
   gap: 8px;
