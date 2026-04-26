@@ -321,6 +321,10 @@ The first implementation slice for this path is artifact-only. It defines
 versioned simulation scenario, telemetry snapshot, safety governor, dry-run
 action envelope, offline replay plan, and physical mission review artifacts
 without adapter dispatch, actuator execution, or completed operator approval.
+A deterministic 2D grid-world toy simulator now exercises the same vocabulary
+locally: movement proposals become dry-run envelopes, simulator state becomes
+telemetry, blocked obstacles / hazards / low battery become safety governor
+decisions, and replay traces remain offline-only.
 
 Representative contract:
 

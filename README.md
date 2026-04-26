@@ -595,6 +595,11 @@ The physical AI slice is simulation-first by design:
   `dry_run_action_envelope.v1`, and `offline_replay_plan.v1`. This path does
   not call adapters, dispatch to ROS, invoke actuators, or perform operator
   approval.
+- `src/runtime/toy_grid_world.py` provides a deterministic 2D grid-world
+  simulator with an original retro top-down pixel SVG renderer. It supports
+  dry-run movement, obstacles, hazards, battery telemetry, safety governor
+  blocking, deterministic replay traces, and offline replay plans without
+  using external game assets or physical execution.
 - `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
 - `physical_ai_validation_status` returns the persisted validation state for a run id, can refresh queued runs from adapter status endpoints, and exposes `mission_contract`, `telemetry_health`, `verifier_result`, `action_envelope`, `governor_decision`, and `replay_plan`
 - `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges and returns the initial governor state that keeps dispatch operator-mediated by default
@@ -994,7 +999,8 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
   reuse-plan selections, exclusions, checks, and history.
 - Simulation-first physical AI artifacts: validation state, telemetry-aware
   verifier results, simulation scenario requests, telemetry snapshots,
-  safety-governed dry-run action envelopes, and offline replay plans.
+  safety-governed dry-run action envelopes, offline replay plans, and a
+  deterministic 2D grid-world toy simulator for replay experiments.
 
 ### In Progress
 

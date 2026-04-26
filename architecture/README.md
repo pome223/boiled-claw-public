@@ -50,7 +50,10 @@ plan -> execute -> verify -> repair -> record trajectory -> improve
    concept is attempted. The first Mission OS physical replay slice is
    artifact-only: it can produce simulation scenario requests, telemetry health
    snapshots, blocked-or-dry-run safety decisions, dry-run action envelopes, and
-   offline replay plans without adapter dispatch or actuator execution.
+   offline replay plans without adapter dispatch or actuator execution. A
+   deterministic 2D grid-world toy simulator now gives this path a local
+   testbed for obstacles, hazards, low battery, replay traces, and original
+   retro top-down SVG visualization.
 
 ## Control Flow
 
@@ -267,8 +270,8 @@ approvals, trajectories, scheduler state, durable execution artifacts, live
 supervisor resume, typed mission abort conditions, and simulation-first physical
 runtime artifacts. Physical replay now has an artifact-only Mission OS path for
 simulation scenario requests, telemetry health snapshots, safety governor
-decisions, dry-run action envelopes, and offline replay plans; it does not apply
-those artifacts to live hardware.
+decisions, dry-run action envelopes, offline replay plans, and a deterministic
+2D grid-world simulator; it does not apply those artifacts to live hardware.
 
 The system is still a reference implementation. The live mission runtime is
 active for control supervisors, but the project does not claim a distributed
