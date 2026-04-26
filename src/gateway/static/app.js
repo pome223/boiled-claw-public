@@ -642,6 +642,37 @@ function compactText(value, limit = 180) {
   return `${text.slice(0, limit - 1)}…`;
 }
 
+function safeToyGridSvgDataUrl(svg) {
+  const text = String(svg || "").trim();
+  if (!text || !text.startsWith("<svg") || !text.endsWith("</svg>")) return "";
+  const lowered = text.toLowerCase();
+  if (
+    lowered.includes("<script")
+    || lowered.includes("<foreignobject")
+    || lowered.includes("<iframe")
+    || lowered.includes("<object")
+    || lowered.includes("<embed")
+    || /(?:^|[\s<])on[a-z0-9_-]+\s*=/.test(lowered)
+    || /(?:^|\s)(?:xlink:href|href)\s*=/.test(lowered)
+    || lowered.includes("javascript:")
+  ) {
+    return "";
+  }
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(text)}`;
+}
+
+function renderSafeToyGridSvgPreview(svg) {
+  const dataUrl = safeToyGridSvgDataUrl(svg);
+  if (!dataUrl) {
+    return `<div class="muted">No safe SVG preview recorded.</div>`;
+  }
+  return [
+    `<div class="toy-grid-svg-frame">`,
+    `<img src="${escapeAttr(dataUrl)}" alt="Toy grid-world replay preview" loading="lazy">`,
+    `</div>`,
+  ].join("");
+}
+
 function isOpenTaskStatus(status) {
   const normalized = String(status || "").toLowerCase();
   return !["completed", "failed", "cancelled", "expired"].includes(normalized);
@@ -2053,6 +2084,142 @@ function renderLongRunningTaskState(task) {
   ].join("");
 }
 
+function renderToyGridReplayArtifacts(task) {
+  const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const durable = artifacts.durable_execution && typeof artifacts.durable_execution === "object"
+    ? artifacts.durable_execution
+    : {};
+  const nestedPhysical = artifacts.physical_replay && typeof artifacts.physical_replay === "object"
+    ? artifacts.physical_replay
+    : {};
+  const firstObject = (...values) => values.find((value) => value && typeof value === "object" && !Array.isArray(value)) || {};
+  const firstString = (...values) => {
+    const found = values.find((value) => typeof value === "string" && value.trim());
+    return found ? String(found) : "";
+  };
+  const replayTrace = firstObject(
+    artifacts.toy_grid_world_replay_trace,
+    durable.toy_grid_world_replay_trace,
+    nestedPhysical.toy_grid_world_replay_trace,
+    artifacts.toy_grid_replay_trace,
+    durable.toy_grid_replay_trace,
+  );
+  const initialState = firstObject(
+    artifacts.toy_grid_world_state,
+    durable.toy_grid_world_state,
+    replayTrace.initial_state,
+    nestedPhysical.toy_grid_world_state,
+  );
+  const finalState = firstObject(
+    replayTrace.final_state,
+    artifacts.toy_grid_world_final_state,
+    durable.toy_grid_world_final_state,
+    nestedPhysical.toy_grid_world_final_state,
+  );
+  const physicalReview = firstObject(
+    artifacts.physical_mission_review,
+    durable.physical_mission_review,
+    nestedPhysical.physical_mission_review,
+  );
+  const offlineReplayPlan = firstObject(
+    artifacts.offline_replay_plan,
+    durable.offline_replay_plan,
+    nestedPhysical.offline_replay_plan,
+    replayTrace.offline_replay_plan,
+  );
+  const svgPreview = firstString(
+    artifacts.toy_grid_world_svg,
+    artifacts.toy_grid_world_replay_svg,
+    durable.toy_grid_world_svg,
+    replayTrace.svg_preview,
+    replayTrace.metadata?.svg_preview,
+    finalState.svg_preview,
+    finalState.metadata?.svg_preview,
+  );
+  const hasToyReplay = [replayTrace, initialState, finalState, physicalReview, offlineReplayPlan].some((item) => Object.keys(item).length) || svgPreview;
+  if (!hasToyReplay) return "";
+
+  const steps = Array.isArray(replayTrace.steps) ? replayTrace.steps : [];
+  const actions = Array.isArray(replayTrace.actions) ? replayTrace.actions.map((item) => (
+    typeof item === "object" && item !== null ? (item.value || item.action || JSON.stringify(item)) : String(item)
+  )) : [];
+  const blockedReasons = steps
+    .map((step) => step && typeof step === "object" ? step.blocked_reason : "")
+    .filter(Boolean);
+  const statePosition = (state) => {
+    const payload = state && typeof state === "object" ? state : {};
+    const position = payload.agent_position && typeof payload.agent_position === "object"
+      ? payload.agent_position
+      : {};
+    if (position.x === undefined || position.y === undefined) return "-";
+    return `(${position.x}, ${position.y})`;
+  };
+  const renderStep = (step, index) => {
+    const item = step && typeof step === "object" ? step : {};
+    const telemetry = item.telemetry_health_snapshot && typeof item.telemetry_health_snapshot === "object"
+      ? item.telemetry_health_snapshot
+      : {};
+    const governor = item.safety_governor_decision && typeof item.safety_governor_decision === "object"
+      ? item.safety_governor_decision
+      : {};
+    const envelope = item.dry_run_action_envelope && typeof item.dry_run_action_envelope === "object"
+      ? item.dry_run_action_envelope
+      : {};
+    const plan = item.offline_replay_plan && typeof item.offline_replay_plan === "object"
+      ? item.offline_replay_plan
+      : {};
+    const nextState = item.next_state && typeof item.next_state === "object" ? item.next_state : {};
+    const metaBits = [
+      `telemetry=${telemetry.status || "-"}`,
+      `governor=${governor.decision || "-"}`,
+      item.blocked_reason ? `blocked=${item.blocked_reason}` : "",
+      envelope.envelope_id ? `envelope=${envelope.envelope_id}` : "",
+      plan.replay_plan_id ? `replay=${plan.replay_plan_id}` : "",
+    ].filter(Boolean);
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">Step ${escapeHtml(String(index + 1))}</div><div class="item-meta mono">${escapeHtml(item.action || "-")}</div></div>`,
+      statusTag(item.accepted ? "dry_run_allowed" : "blocked"),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(`final_position=${statePosition(nextState)}`)}</div>`,
+      `<div class="item-meta mono">${escapeHtml(metaBits.join(" · ") || "-")}</div>`,
+      `</div>`,
+    ].join("");
+  };
+  const finalStatus = replayTrace.final_status || finalState.status || physicalReview.final_status || "-";
+  const liveAllowed = replayTrace.live_execution_allowed === true
+    || offlineReplayPlan.live_execution_allowed === true
+    || steps.some((step) => step && step.live_execution_allowed === true);
+  const physicalInvoked = replayTrace.physical_execution_invoked === true
+    || offlineReplayPlan.physical_execution_invoked === true
+    || steps.some((step) => step && step.physical_execution_invoked === true);
+  const planRef = replayTrace.offline_replay_plan_ref
+    || (offlineReplayPlan.replay_plan_id ? `offline_replay_plan:${offlineReplayPlan.replay_plan_id}` : "-");
+  return [
+    `<div class="detail-section">`,
+    `<div class="k">Toy Grid Replay</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Trace</div><div>${statusTag(finalStatus)}</div><div class="item-meta mono">${escapeHtml(replayTrace.trace_id || replayTrace.schema_version || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Initial State</div><div class="mono">${escapeHtml(initialState.world_id || "-")}</div><div class="item-meta mono">${escapeHtml(`position=${statePosition(initialState)} · battery=${initialState.battery ?? "-"}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Final State</div><div class="mono">${escapeHtml(statePosition(finalState))}</div><div class="item-meta mono">${escapeHtml(`status=${finalStatus} · steps=${steps.length || replayTrace.steps?.length || 0}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Simulation Boundary</div><div>${statusTag("simulation_only")}</div><div class="item-meta mono">${escapeHtml(`live_execution_allowed=${String(liveAllowed)} · physical_execution_invoked=${String(physicalInvoked)}`)}</div></div>`,
+    `</div>`,
+    `<div class="k">Action Sequence</div>`,
+    `<div class="detail-card"><div class="item-detail mono">${escapeHtml(actions.join(" → ") || "-")}</div><div class="item-meta mono">${escapeHtml(`blocked_reasons=${blockedReasons.join(", ") || "-"}`)}</div></div>`,
+    `<div class="k">Step Results</div>`,
+    steps.length ? `<div class="detail-grid">${steps.map(renderStep).join("")}</div>` : `<div class="muted">No toy grid-world step results recorded.</div>`,
+    `<div class="k">Physical Replay Artifacts</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Physical Mission Review</div><div>${statusTag(physicalReview.final_status || "-")}</div><div class="item-meta mono">${escapeHtml(physicalReview.schema_version || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Offline Replay Plan</div><div>${statusTag(offlineReplayPlan.live_execution_allowed === false ? "offline_only" : "not_recorded")}</div><div class="item-meta mono">${escapeHtml(planRef)}</div></div>`,
+    `</div>`,
+    `<div class="k">SVG Preview</div>`,
+    renderSafeToyGridSvgPreview(svgPreview),
+    `</div>`,
+  ].join("");
+}
+
 function renderTaskDetail(task) {
   const relatedTasks = dashboardState.relatedTasks || [];
   const childTasks = dashboardState.childTasks || [];
@@ -2130,6 +2297,7 @@ function renderTaskDetail(task) {
     renderRelationChips("approval", relatedApprovals, "No linked approvals."),
     `</div>`,
     renderLongRunningTaskState(task),
+    renderToyGridReplayArtifacts(task),
     renderTaskTimeline(taskTimeline, taskTimelinePagination),
     `<div class="detail-section">`,
     `<div class="k">Audit Trail</div>`,
