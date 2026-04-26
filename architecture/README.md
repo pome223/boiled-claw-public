@@ -230,6 +230,26 @@ explicit metric for regression gates. These suites are artifact checks only;
 they do not add simulator execution endpoints, UI controls, ROS dispatch,
 actuator execution, `/missions`, or a `missions` table.
 
+Toy grid-world autonomy plans are the next plan-only layer. An
+`autonomy_plan.v1` records a deterministic bounded path over the 2D grid,
+including constraints, safety assumptions, predicted final position, and a
+blocked reason when no safe or budget-feasible path exists. The planner avoids
+obstacles and hazards, respects battery and step budgets, and keeps
+`execution_allowed=false` with operator approval required. It does not step the
+simulator, mutate state, invoke replay, register policies, dispatch ROS, or
+touch live hardware.
+
+Toy grid-world autonomous episodes are the first simulator-only movement layer.
+An `autonomous_episode.v1` consumes an `autonomy_plan.v1` inside the local toy
+grid-world only, emitting `autonomous_step.v1` records for each attempted move.
+Every step carries telemetry, a safety governor decision, and, when accepted,
+dry-run action envelope plus offline replay plan evidence. The episode stops on
+goal reached, blocked action, or step budget exhaustion, and records a
+`toy_grid_world_replay_trace.v1` for eval suites. It keeps
+`live_execution_allowed=false`, `physical_execution_invoked=false`, and
+operator approval required; it does not dispatch ROS, touch hardware, add UI
+controls, or integrate with runtime mission execution.
+
 Promotion packages are the artifact-only bridge from post-mission review to a
 future promotion pipeline. `mission_review.improvement_candidates` can be
 normalized into typed promotion candidates, mapped to required eval suites, and
