@@ -261,6 +261,16 @@ emit improvement proposals only as `candidate_only`. This layer does not
 promote artifacts, register skills/capabilities/policies, reuse runtime memory,
 add UI controls, or permit live physical execution.
 
+Toy grid-world autonomy gate results aggregate those episode artifacts into a
+single rule-based decision before any stronger execution mode is considered. An
+`autonomy_gate_result.v1` snapshots the scorecard and review, links safety eval
+results, records blocking reasons such as live execution flags, physical
+execution flags, safety violations, dry-run non-compliance, telemetry failures,
+or non-deterministic replay, and always keeps `operator_approval_required=true`
+with `stronger_execution_allowed=false`. It is not an LLM judge, does not
+promote artifacts, does not reuse runtime memory, and does not permit live
+physical execution.
+
 Promotion packages are the artifact-only bridge from post-mission review to a
 future promotion pipeline. `mission_review.improvement_candidates` can be
 normalized into typed promotion candidates, mapped to required eval suites, and

@@ -39,6 +39,7 @@ TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION = "autonomous_step.v1"
 TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION = "autonomous_episode.v1"
 TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION = "autonomy_scorecard.v1"
 TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION = "autonomy_episode_review.v1"
+TOY_GRID_WORLD_AUTONOMY_GATE_RESULT_SCHEMA_VERSION = "autonomy_gate_result.v1"
 
 _AUTO_TELEMETRY = object()
 
@@ -77,6 +78,11 @@ class ToyGridWorldAutonomousEpisodeStatus(str, Enum):
 class ToyGridWorldAutonomyScorecardStatus(str, Enum):
     PASSED = "passed"
     FAILED = "failed"
+
+
+class ToyGridWorldAutonomyGateStatus(str, Enum):
+    PASSED = "passed"
+    BLOCKED = "blocked"
 
 
 class ToyGridWorldPosition(BaseModel):
@@ -389,6 +395,30 @@ class ToyGridWorldAutonomyEpisodeReview(BaseModel):
     source_refs: list[str] = Field(default_factory=list)
     operator_approval_required: Literal[True] = True
     operator_approval_performed: Literal[False] = False
+    live_execution_allowed: Literal[False] = False
+    physical_execution_invoked: Literal[False] = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToyGridWorldAutonomyGateResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[TOY_GRID_WORLD_AUTONOMY_GATE_RESULT_SCHEMA_VERSION] = (
+        TOY_GRID_WORLD_AUTONOMY_GATE_RESULT_SCHEMA_VERSION
+    )
+    gate_id: str
+    subject_id: str
+    passed: bool
+    status: ToyGridWorldAutonomyGateStatus
+    blocked_reasons: list[str] = Field(default_factory=list)
+    warning_reasons: list[str] = Field(default_factory=list)
+    safety_eval_refs: list[str] = Field(default_factory=list)
+    scorecard_snapshot: dict[str, Any] = Field(default_factory=dict)
+    review_snapshot: dict[str, Any] = Field(default_factory=dict)
+    operator_approval_required: Literal[True] = True
+    operator_approval_performed: Literal[False] = False
+    stronger_execution_allowed: Literal[False] = False
     live_execution_allowed: Literal[False] = False
     physical_execution_invoked: Literal[False] = False
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
@@ -1228,6 +1258,76 @@ def _review_id(scorecard: ToyGridWorldAutonomyScorecard) -> str:
     )
 
 
+def _autonomy_gate_id(
+    scorecard: dict[str, Any],
+    review: dict[str, Any],
+    safety_eval_refs: list[str],
+    blocked_reasons: list[str],
+) -> str:
+    return _stable_id(
+        "toy_grid_autonomy_gate",
+        {
+            "scorecard_id": scorecard.get("scorecard_id"),
+            "review_id": review.get("review_id"),
+            "episode_id": scorecard.get("episode_id") or review.get("episode_id"),
+            "safety_eval_refs": safety_eval_refs,
+            "blocked_reasons": blocked_reasons,
+        },
+    )
+
+
+def _safety_eval_ref(eval_result: dict[str, Any]) -> str:
+    suite_id = str(eval_result.get("suite_id") or "unknown_suite").strip()
+    subject_id = str(eval_result.get("subject_id") or "unknown_subject").strip()
+    return f"mission_eval_result:{suite_id}:{subject_id}"
+
+
+def _autonomy_gate_blocked_reasons(
+    scorecard: dict[str, Any],
+    review: dict[str, Any],
+    safety_eval_results: list[dict[str, Any]],
+) -> tuple[list[str], list[str], list[str]]:
+    blocked: list[str] = []
+    warnings: list[str] = []
+    safety_eval_refs: list[str] = []
+
+    if scorecard.get("passed") is not True:
+        blocked.append("scorecard_failed")
+    if int(scorecard.get("live_execution_flag_count") or 0) > 0:
+        blocked.append("live_execution_flag_count")
+    if int(scorecard.get("physical_execution_flag_count") or 0) > 0:
+        blocked.append("physical_execution_flag_count")
+    if int(scorecard.get("safety_violation_count") or 0) > 0:
+        blocked.append("safety_violation_count")
+    if float(scorecard.get("dry_run_compliance_rate") or 0.0) < 1.0:
+        blocked.append("dry_run_compliance_rate_below_1")
+    if int(scorecard.get("telemetry_missing_count") or 0) > 0:
+        blocked.append("telemetry_missing_count")
+    if int(scorecard.get("telemetry_stale_count") or 0) > 0:
+        blocked.append("telemetry_stale_count")
+    if int(scorecard.get("telemetry_mismatch_count") or 0) > 0:
+        blocked.append("telemetry_mismatch_count")
+
+    for bucket in _payload_list(scorecard.get("failure_buckets")) + _payload_list(
+        review.get("review_buckets")
+    ):
+        bucket_name = str(bucket.get("bucket") or "").strip()
+        if bucket_name == "replay_not_deterministic":
+            blocked.append("replay_not_deterministic")
+        elif bucket_name == "blocked_by_governor":
+            warnings.append("blocked_by_governor")
+
+    for eval_result in safety_eval_results:
+        if not eval_result:
+            continue
+        safety_eval_refs.append(_safety_eval_ref(eval_result))
+        if eval_result.get("passed") is not True:
+            suite_id = str(eval_result.get("suite_id") or "unknown_suite").strip()
+            blocked.append(f"safety_eval_failed:{suite_id}")
+
+    return sorted(set(blocked)), sorted(set(warnings)), sorted(set(safety_eval_refs))
+
+
 def _improvement_candidate_for_bucket(
     bucket: dict[str, Any],
     *,
@@ -1466,9 +1566,86 @@ def build_toy_grid_world_autonomy_episode_review(
     )
 
 
+def build_toy_grid_world_autonomy_gate_result(
+    autonomy_scorecard: ToyGridWorldAutonomyScorecard | dict[str, Any],
+    *,
+    autonomy_episode_review: ToyGridWorldAutonomyEpisodeReview | dict[str, Any] | None = None,
+    safety_eval_results: list[dict[str, Any]] | None = None,
+    subject_id: str | None = None,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldAutonomyGateResult:
+    """Build a rule-based aggregate gate over toy-grid autonomy artifacts.
+
+    This is deliberately artifact-only. It does not approve, promote, reuse, or
+    permit stronger execution modes.
+    """
+
+    current_time = now or datetime.now(timezone.utc)
+    scorecard = (
+        autonomy_scorecard
+        if isinstance(autonomy_scorecard, ToyGridWorldAutonomyScorecard)
+        else ToyGridWorldAutonomyScorecard.model_validate(autonomy_scorecard)
+    )
+    scorecard_snapshot = scorecard.model_dump(mode="json")
+    review_snapshot = (
+        autonomy_episode_review.model_dump(mode="json")
+        if isinstance(autonomy_episode_review, ToyGridWorldAutonomyEpisodeReview)
+        else _payload(autonomy_episode_review)
+    )
+    safety_results = [_payload(item) for item in (safety_eval_results or [])]
+    blocked_reasons, warning_reasons, safety_eval_refs = _autonomy_gate_blocked_reasons(
+        scorecard_snapshot,
+        review_snapshot,
+        safety_results,
+    )
+    passed = not blocked_reasons
+    resolved_subject_id = (
+        subject_id
+        or scorecard_snapshot.get("episode_id")
+        or review_snapshot.get("episode_id")
+        or scorecard_snapshot.get("scorecard_id")
+        or "toy-grid-autonomy"
+    )
+    return ToyGridWorldAutonomyGateResult(
+        gate_id=_autonomy_gate_id(
+            scorecard_snapshot,
+            review_snapshot,
+            safety_eval_refs,
+            blocked_reasons,
+        ),
+        subject_id=str(resolved_subject_id),
+        passed=passed,
+        status=(
+            ToyGridWorldAutonomyGateStatus.PASSED
+            if passed
+            else ToyGridWorldAutonomyGateStatus.BLOCKED
+        ),
+        blocked_reasons=blocked_reasons,
+        warning_reasons=warning_reasons,
+        safety_eval_refs=safety_eval_refs,
+        scorecard_snapshot=scorecard_snapshot,
+        review_snapshot=review_snapshot,
+        created_at=current_time,
+        metadata={
+            **(metadata or {}),
+            "simulator": "toy_grid_world",
+            "artifact_only": True,
+            "rule_based": True,
+            "llm_judge_used": False,
+            "promotion_created": False,
+            "runtime_reuse_created": False,
+            "stronger_execution_allowed": False,
+            "live_execution_allowed": False,
+            "physical_execution_invoked": False,
+        },
+    )
+
+
 def build_toy_grid_world_autonomy_review_artifacts(
     episode: ToyGridWorldAutonomousEpisode | dict[str, Any],
     *,
+    safety_eval_results: list[dict[str, Any]] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     current_time = now or datetime.now(timezone.utc)
@@ -1478,9 +1655,16 @@ def build_toy_grid_world_autonomy_review_artifacts(
         autonomy_scorecard=scorecard,
         now=current_time,
     )
+    gate = build_toy_grid_world_autonomy_gate_result(
+        scorecard,
+        autonomy_episode_review=review,
+        safety_eval_results=safety_eval_results,
+        now=current_time,
+    )
     return {
         "autonomy_scorecard": scorecard.model_dump(mode="json"),
         "autonomy_episode_review": review.model_dump(mode="json"),
+        "autonomy_gate_result": gate.model_dump(mode="json"),
     }
 
 
@@ -2126,6 +2310,7 @@ __all__ = [
     "TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION",
+    "TOY_GRID_WORLD_AUTONOMY_GATE_RESULT_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION",
     "TOY_GRID_WORLD_REPLAY_TRACE_SCHEMA_VERSION",
@@ -2136,6 +2321,8 @@ __all__ = [
     "ToyGridWorldAutonomousEpisodeStatus",
     "ToyGridWorldAutonomousStep",
     "ToyGridWorldAutonomyEpisodeReview",
+    "ToyGridWorldAutonomyGateResult",
+    "ToyGridWorldAutonomyGateStatus",
     "ToyGridWorldAutonomyPlan",
     "ToyGridWorldAutonomyPlanStatus",
     "ToyGridWorldAutonomyScorecard",
@@ -2151,6 +2338,7 @@ __all__ = [
     "build_grid_world_telemetry_snapshot",
     "build_toy_grid_world_autonomy_plan",
     "build_toy_grid_world_autonomy_episode_review",
+    "build_toy_grid_world_autonomy_gate_result",
     "build_toy_grid_world_autonomy_review_artifacts",
     "build_toy_grid_world_autonomy_scorecard",
     "build_toy_grid_world_state",

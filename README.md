@@ -204,6 +204,8 @@ What exists today:
 - Mission scorecards, post-mission review, approval-gated memory candidates,
   mission templates, deterministic mission eval suites, promotion packages, and
   artifact-only approved promotion paths with mission-start reuse plans.
+- Toy grid-world plan-only autonomy, dry-run autonomous episodes, autonomy
+  scorecards/reviews, and rule-based autonomy gate results.
 - Current-tab Google Sheets vertical slice with destination-bound evidence and
   Control UI visibility.
 - Simulation-first physical runtime artifacts for validation, telemetry,
