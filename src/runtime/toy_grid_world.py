@@ -16,7 +16,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from src.runtime.mission_contract import build_mission_contract
+from src.runtime.mission_contract import MissionContract, build_mission_contract
 from src.runtime.physical_mission_replay import (
     DryRunActionEnvelope,
     OfflineReplayPlan,
@@ -34,6 +34,9 @@ from src.runtime.physical_mission_replay import (
 TOY_GRID_WORLD_STATE_SCHEMA_VERSION = "toy_grid_world_state.v1"
 TOY_GRID_WORLD_STEP_RESULT_SCHEMA_VERSION = "toy_grid_world_step_result.v1"
 TOY_GRID_WORLD_REPLAY_TRACE_SCHEMA_VERSION = "toy_grid_world_replay_trace.v1"
+TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION = "autonomy_plan.v1"
+TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION = "autonomous_step.v1"
+TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION = "autonomous_episode.v1"
 
 _AUTO_TELEMETRY = object()
 
@@ -54,6 +57,19 @@ class ToyGridWorldStatus(str, Enum):
     RUNNING = "running"
     GOAL_REACHED = "goal_reached"
     BLOCKED = "blocked"
+
+
+class ToyGridWorldAutonomyPlanStatus(str, Enum):
+    PLANNED = "planned"
+    BLOCKED = "blocked"
+
+
+class ToyGridWorldAutonomousEpisodeStatus(str, Enum):
+    GOAL_REACHED = "goal_reached"
+    BLOCKED = "blocked"
+    MAX_STEPS_EXHAUSTED = "max_steps_exhausted"
+    PLAN_BLOCKED = "plan_blocked"
+    PLAN_MISMATCH = "plan_mismatch"
 
 
 class ToyGridWorldPosition(BaseModel):
@@ -183,6 +199,131 @@ class ToyGridWorldReplayTrace(BaseModel):
         return [_action(item) for item in _as_list(value)]
 
 
+class ToyGridWorldAutonomyPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION] = (
+        TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION
+    )
+    plan_id: str
+    world_id: str
+    status: ToyGridWorldAutonomyPlanStatus
+    initial_state: ToyGridWorldState
+    actions: list[ToyGridWorldAction] = Field(default_factory=list)
+    predicted_final_position: ToyGridWorldPosition
+    predicted_status: ToyGridWorldStatus
+    max_step_budget: int
+    constraints_used: list[str] = Field(default_factory=list)
+    safety_assumptions: list[str] = Field(default_factory=list)
+    failure_reason: str = ""
+    execution_allowed: Literal[False] = False
+    operator_approval_required: Literal[True] = True
+    live_execution_allowed: Literal[False] = False
+    physical_execution_invoked: Literal[False] = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("actions", mode="before")
+    @classmethod
+    def _normalize_actions(cls, value: Any) -> list[ToyGridWorldAction]:
+        return [_action(item) for item in _as_list(value)]
+
+    @model_validator(mode="after")
+    def _validate_failure_reason(self) -> "ToyGridWorldAutonomyPlan":
+        if self.status == ToyGridWorldAutonomyPlanStatus.BLOCKED and not self.failure_reason:
+            raise ToyGridWorldError("blocked autonomy plan must include failure_reason")
+        if self.status == ToyGridWorldAutonomyPlanStatus.PLANNED and self.failure_reason:
+            raise ToyGridWorldError("planned autonomy plan must not include failure_reason")
+        return self
+
+
+class ToyGridWorldAutonomousStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION] = (
+        TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION
+    )
+    step_index: int
+    action: ToyGridWorldAction
+    accepted: bool
+    blocked_reason: str = ""
+    previous_state: ToyGridWorldState
+    next_state: ToyGridWorldState
+    telemetry_health_snapshot: TelemetryHealthSnapshot
+    safety_governor_decision: SafetyGovernorDecisionArtifact
+    dry_run_action_envelope: DryRunActionEnvelope | None = None
+    offline_replay_plan: OfflineReplayPlan | None = None
+    step_result: ToyGridWorldStepResult
+    live_execution_allowed: Literal[False] = False
+    physical_execution_invoked: Literal[False] = False
+    operator_approval_required: Literal[True] = True
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("action", mode="before")
+    @classmethod
+    def _normalize_action(cls, value: Any) -> ToyGridWorldAction:
+        return _action(value)
+
+    @model_validator(mode="after")
+    def _validate_step_boundary(self) -> "ToyGridWorldAutonomousStep":
+        if self.step_result.action != self.action:
+            raise ToyGridWorldError("autonomous step action must match step_result")
+        if self.step_result.accepted is not self.accepted:
+            raise ToyGridWorldError("autonomous step accepted flag must match step_result")
+        if self.step_result.blocked_reason != self.blocked_reason:
+            raise ToyGridWorldError("autonomous step blocked_reason must match step_result")
+        if self.step_result.safety_governor_decision.decision != (
+            self.safety_governor_decision.decision
+        ):
+            raise ToyGridWorldError("autonomous step governor must match step_result")
+        expected_decision = (
+            SafetyGovernorStatus.DRY_RUN_ALLOWED
+            if self.accepted
+            else SafetyGovernorStatus.BLOCKED
+        )
+        if self.safety_governor_decision.decision != expected_decision:
+            raise ToyGridWorldError("autonomous step must match governor decision")
+        if self.accepted:
+            if self.dry_run_action_envelope is None:
+                raise ToyGridWorldError("accepted autonomous step requires dry_run_action_envelope")
+            if self.offline_replay_plan is None:
+                raise ToyGridWorldError("accepted autonomous step requires offline_replay_plan")
+        else:
+            if self.dry_run_action_envelope is not None:
+                raise ToyGridWorldError("blocked autonomous step cannot include action envelope")
+            if self.offline_replay_plan is not None:
+                raise ToyGridWorldError("blocked autonomous step cannot include replay plan")
+        return self
+
+
+class ToyGridWorldAutonomousEpisode(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION] = (
+        TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION
+    )
+    episode_id: str
+    world_id: str
+    plan_id: str
+    mission_contract_id: str = ""
+    status: ToyGridWorldAutonomousEpisodeStatus
+    initial_state: ToyGridWorldState
+    autonomy_plan: ToyGridWorldAutonomyPlan
+    steps: list[ToyGridWorldAutonomousStep] = Field(default_factory=list)
+    final_state: ToyGridWorldState
+    final_status: ToyGridWorldStatus
+    replay_trace: ToyGridWorldReplayTrace
+    summary: dict[str, Any] = Field(default_factory=dict)
+    execution_allowed: Literal[False] = False
+    operator_approval_required: Literal[True] = True
+    operator_approval_performed: Literal[False] = False
+    live_execution_allowed: Literal[False] = False
+    physical_execution_invoked: Literal[False] = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 def _as_list(value: Any) -> list[Any]:
     return value if isinstance(value, list) else []
 
@@ -247,6 +388,248 @@ def _grid_world_source_refs(state: ToyGridWorldState) -> list[str]:
     return [f"toy_grid_world:{state.world_id}", f"toy_grid_world_step:{state.step_count}"]
 
 
+def _planner_constraints() -> list[str]:
+    return [
+        "avoid_obstacles",
+        "avoid_hazards",
+        "stay_in_bounds",
+        "respect_low_battery_threshold",
+        "respect_max_step_budget",
+        "plan_only_no_simulator_step",
+    ]
+
+
+def _planner_safety_assumptions(state: ToyGridWorldState) -> list[str]:
+    return [
+        "plan_only_does_not_mutate_state",
+        "plan_must_be_checked_by_safety_governor_before_execution",
+        "dry_run_episode_runner_must_verify_telemetry_before_each_step",
+        f"battery_threshold:{state.low_battery_threshold}",
+        f"initial_battery:{state.battery}",
+    ]
+
+
+def _free_grid_keys(state: ToyGridWorldState) -> set[tuple[int, int]]:
+    blocked = {_position_key(item) for item in state.obstacles}
+    hazardous = {_position_key(item) for item in state.hazards}
+    return {
+        (x, y)
+        for y in range(state.height)
+        for x in range(state.width)
+        if (x, y) not in blocked and (x, y) not in hazardous
+    }
+
+
+def _position_from_key(key: tuple[int, int]) -> ToyGridWorldPosition:
+    return ToyGridWorldPosition(x=key[0], y=key[1])
+
+
+def _plan_path(
+    state: ToyGridWorldState,
+    *,
+    max_step_budget: int,
+) -> list[ToyGridWorldAction] | None:
+    start = _position_key(state.agent_position)
+    goal = _position_key(state.goal_position)
+    if start == goal:
+        return []
+    free = _free_grid_keys(state)
+    if start not in free or goal not in free:
+        return None
+    frontier: list[tuple[tuple[int, int], list[ToyGridWorldAction]]] = [(start, [])]
+    seen = {start}
+    action_order = [
+        ToyGridWorldAction.MOVE_RIGHT,
+        ToyGridWorldAction.MOVE_DOWN,
+        ToyGridWorldAction.MOVE_LEFT,
+        ToyGridWorldAction.MOVE_UP,
+    ]
+    while frontier:
+        current, actions = frontier.pop(0)
+        if len(actions) >= max_step_budget:
+            continue
+        current_position = _position_from_key(current)
+        for action in action_order:
+            proposed = _next_position(current_position, action)
+            key = _position_key(proposed)
+            if key not in free or key in seen:
+                continue
+            next_actions = [*actions, action]
+            if key == goal:
+                return next_actions
+            seen.add(key)
+            frontier.append((key, next_actions))
+    return None
+
+
+def _predicted_final_position(
+    initial_position: ToyGridWorldPosition,
+    actions: list[ToyGridWorldAction],
+) -> ToyGridWorldPosition:
+    current = initial_position
+    for action in actions:
+        current = _next_position(current, action)
+    return current
+
+
+def _autonomy_plan_id(
+    state: ToyGridWorldState,
+    *,
+    actions: list[ToyGridWorldAction],
+    max_step_budget: int,
+    status: ToyGridWorldAutonomyPlanStatus,
+    failure_reason: str,
+) -> str:
+    return _stable_id(
+        "toy_grid_autonomy_plan",
+        {
+            "world_id": state.world_id,
+            "step_count": state.step_count,
+            "agent": state.agent_position.model_dump(mode="json"),
+            "goal": state.goal_position.model_dump(mode="json"),
+            "actions": [item.value for item in actions],
+            "max_step_budget": max_step_budget,
+            "status": status.value,
+            "failure_reason": failure_reason,
+        },
+    )
+
+
+def _replay_hash_payload(
+    initial_state: ToyGridWorldState,
+    actions: list[ToyGridWorldAction],
+    steps: list[ToyGridWorldStepResult],
+    final_state: ToyGridWorldState,
+) -> dict[str, Any]:
+    return {
+        "initial": initial_state.model_dump(mode="json"),
+        "actions": [item.value for item in actions],
+        "steps": [step.model_dump(mode="json") for step in steps],
+        "final": final_state.model_dump(mode="json"),
+    }
+
+
+def _deterministic_replay_hash(
+    initial_state: ToyGridWorldState,
+    actions: list[ToyGridWorldAction],
+    steps: list[ToyGridWorldStepResult],
+    final_state: ToyGridWorldState,
+) -> str:
+    return sha256(
+        json.dumps(
+            _replay_hash_payload(initial_state, actions, steps, final_state),
+            ensure_ascii=True,
+            sort_keys=True,
+            default=str,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _replay_trace_id(
+    state: ToyGridWorldState,
+    actions: list[ToyGridWorldAction],
+    deterministic_hash: str,
+) -> str:
+    return _stable_id(
+        "toy_grid_replay",
+        {
+            "world_id": state.world_id,
+            "actions": [item.value for item in actions],
+            "hash": deterministic_hash,
+        },
+    )
+
+
+def _episode_id(
+    *,
+    initial_state: ToyGridWorldState,
+    plan: ToyGridWorldAutonomyPlan,
+    status: ToyGridWorldAutonomousEpisodeStatus,
+    steps: list[ToyGridWorldAutonomousStep],
+    final_state: ToyGridWorldState,
+    mission_contract_id: str,
+) -> str:
+    return _stable_id(
+        "toy_grid_autonomous_episode",
+        {
+            "world_id": initial_state.world_id,
+            "plan_id": plan.plan_id,
+            "mission_contract_id": mission_contract_id,
+            "status": status.value,
+            "steps": [
+                {
+                    "index": step.step_index,
+                    "action": step.action.value,
+                    "accepted": step.accepted,
+                    "blocked_reason": step.blocked_reason,
+                }
+                for step in steps
+            ],
+            "final_state": final_state.model_dump(mode="json"),
+        },
+    )
+
+
+def _mission_contract_id(
+    mission_contract: MissionContract | dict[str, Any] | None,
+) -> str:
+    if mission_contract is None:
+        return ""
+    contract = (
+        mission_contract
+        if isinstance(mission_contract, MissionContract)
+        else MissionContract.model_validate(mission_contract)
+    )
+    return contract.contract_id
+
+
+def _state_matches_plan(
+    state: ToyGridWorldState,
+    plan: ToyGridWorldAutonomyPlan,
+) -> bool:
+    return state.model_dump(mode="json") == plan.initial_state.model_dump(mode="json")
+
+
+def _build_replay_trace_from_steps(
+    initial_state: ToyGridWorldState,
+    actions: list[ToyGridWorldAction],
+    steps: list[ToyGridWorldStepResult],
+    final_state: ToyGridWorldState,
+    *,
+    now: datetime,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldReplayTrace:
+    offline_ref = ""
+    for step in steps:
+        if step.offline_replay_plan is not None:
+            offline_ref = f"offline_replay_plan:{step.offline_replay_plan.replay_plan_id}"
+    deterministic_hash = _deterministic_replay_hash(
+        initial_state,
+        actions,
+        steps,
+        final_state,
+    )
+    return ToyGridWorldReplayTrace(
+        trace_id=_replay_trace_id(final_state, actions, deterministic_hash),
+        initial_state=initial_state,
+        actions=actions,
+        steps=steps,
+        final_state=final_state,
+        final_status=final_state.status,
+        deterministic_hash=deterministic_hash,
+        offline_replay_plan_ref=offline_ref,
+        created_at=now,
+        metadata={
+            **(metadata or {}),
+            "simulator": "toy_grid_world",
+            "artifact_only": True,
+            "operator_approval_required": True,
+            "live_execution_allowed": False,
+            "physical_execution_invoked": False,
+        },
+    )
+
+
 def build_toy_grid_world_state(
     *,
     width: int = 8,
@@ -290,6 +673,289 @@ def build_toy_grid_world_state(
         )
     except ValidationError as exc:
         raise ToyGridWorldError(str(exc)) from exc
+
+
+def build_toy_grid_world_autonomy_plan(
+    state: ToyGridWorldState | dict[str, Any],
+    *,
+    max_step_budget: int | None = None,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldAutonomyPlan:
+    """Build a deterministic plan-only path without stepping the simulator."""
+
+    current = (
+        state if isinstance(state, ToyGridWorldState) else ToyGridWorldState.model_validate(state)
+    )
+    current_time = now or datetime.now(timezone.utc)
+    remaining_step_budget = max(0, current.max_steps - current.step_count)
+    requested_budget = (
+        remaining_step_budget if max_step_budget is None else max(0, int(max_step_budget))
+    )
+    resolved_budget = min(requested_budget, remaining_step_budget)
+    constraints = _planner_constraints()
+    assumptions = _planner_safety_assumptions(current)
+    actions: list[ToyGridWorldAction] = []
+    status = ToyGridWorldAutonomyPlanStatus.BLOCKED
+    predicted_position = current.agent_position
+    predicted_status = ToyGridWorldStatus.BLOCKED
+    failure_reason = ""
+
+    if _position_key(current.agent_position) == _position_key(current.goal_position):
+        status = ToyGridWorldAutonomyPlanStatus.PLANNED
+        predicted_status = ToyGridWorldStatus.GOAL_REACHED
+    elif current.status != ToyGridWorldStatus.RUNNING:
+        failure_reason = "mission_not_running"
+    elif current.battery <= current.low_battery_threshold:
+        failure_reason = "low_battery"
+    elif resolved_budget <= 0:
+        failure_reason = "max_step_budget_exhausted"
+    else:
+        path = _plan_path(current, max_step_budget=resolved_budget)
+        if path is None:
+            unbounded_limit = max(0, len(_free_grid_keys(current)) - 1)
+            unbounded_path = _plan_path(current, max_step_budget=unbounded_limit)
+            failure_reason = (
+                "max_step_budget_exhausted"
+                if unbounded_path is not None and len(unbounded_path) > resolved_budget
+                else "no_safe_path"
+            )
+        elif len(path) > current.battery - current.low_battery_threshold:
+            failure_reason = "low_battery"
+        else:
+            actions = path
+            status = ToyGridWorldAutonomyPlanStatus.PLANNED
+            predicted_position = _predicted_final_position(current.agent_position, actions)
+            predicted_status = (
+                ToyGridWorldStatus.GOAL_REACHED
+                if _position_key(predicted_position) == _position_key(current.goal_position)
+                else ToyGridWorldStatus.RUNNING
+            )
+
+    return ToyGridWorldAutonomyPlan(
+        plan_id=_autonomy_plan_id(
+            current,
+            actions=actions,
+            max_step_budget=resolved_budget,
+            status=status,
+            failure_reason=failure_reason,
+        ),
+        world_id=current.world_id,
+        status=status,
+        initial_state=current,
+        actions=actions,
+        predicted_final_position=predicted_position,
+        predicted_status=predicted_status,
+        max_step_budget=resolved_budget,
+        constraints_used=constraints,
+        safety_assumptions=assumptions,
+        failure_reason=failure_reason,
+        created_at=current_time,
+        metadata={
+            **(metadata or {}),
+            "simulator": "toy_grid_world",
+            "artifact_only": True,
+            "plan_only": True,
+            "execution_allowed": False,
+            "operator_approval_required": True,
+            "live_execution_allowed": False,
+            "physical_execution_invoked": False,
+        },
+    )
+
+
+def _autonomous_step_from_result(
+    result: ToyGridWorldStepResult,
+    *,
+    step_index: int,
+) -> ToyGridWorldAutonomousStep:
+    return ToyGridWorldAutonomousStep(
+        step_index=step_index,
+        action=result.action,
+        accepted=result.accepted,
+        blocked_reason=result.blocked_reason,
+        previous_state=result.previous_state,
+        next_state=result.next_state,
+        telemetry_health_snapshot=result.telemetry_health_snapshot,
+        safety_governor_decision=result.safety_governor_decision,
+        dry_run_action_envelope=result.dry_run_action_envelope,
+        offline_replay_plan=result.offline_replay_plan,
+        step_result=result,
+        created_at=result.created_at,
+        metadata={
+            **result.metadata,
+            "simulator": "toy_grid_world",
+            "autonomous_episode_step": True,
+            "operator_approval_required": True,
+            "live_execution_allowed": False,
+            "physical_execution_invoked": False,
+        },
+    )
+
+
+def _episode_summary(
+    *,
+    status: ToyGridWorldAutonomousEpisodeStatus,
+    steps: list[ToyGridWorldAutonomousStep],
+    final_state: ToyGridWorldState,
+    replay_trace: ToyGridWorldReplayTrace,
+    stop_reason: str,
+) -> dict[str, Any]:
+    accepted_steps = [step for step in steps if step.accepted]
+    blocked_steps = [step for step in steps if not step.accepted]
+    return {
+        "episode_status": status.value,
+        "stop_reason": stop_reason,
+        "step_count": len(steps),
+        "accepted_steps": len(accepted_steps),
+        "blocked_steps": len(blocked_steps),
+        "goal_reached": final_state.status == ToyGridWorldStatus.GOAL_REACHED,
+        "final_status": final_state.status.value,
+        "final_position": final_state.agent_position.model_dump(mode="json"),
+        "replay_trace_ref": f"toy_grid_world_replay_trace:{replay_trace.trace_id}",
+        "operator_approval_required": True,
+        "operator_approval_performed": False,
+        "live_execution_allowed": False,
+        "physical_execution_invoked": False,
+    }
+
+
+def run_toy_grid_world_autonomous_episode(
+    initial_state: ToyGridWorldState | dict[str, Any],
+    autonomy_plan: ToyGridWorldAutonomyPlan | dict[str, Any],
+    *,
+    mission_contract: MissionContract | dict[str, Any] | None = None,
+    max_steps: int | None = None,
+    telemetry_sequence: list[TelemetryHealthSnapshot | dict[str, Any] | None] | None = None,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldAutonomousEpisode:
+    """Run a bounded autonomy plan inside the toy simulator only.
+
+    This consumes a plan and steps the local grid-world through the same
+    dry-run safety governor used by replay. It never enables live execution,
+    physical dispatch, ROS, or actuator control.
+    """
+
+    current = (
+        initial_state
+        if isinstance(initial_state, ToyGridWorldState)
+        else ToyGridWorldState.model_validate(initial_state)
+    )
+    plan = (
+        autonomy_plan
+        if isinstance(autonomy_plan, ToyGridWorldAutonomyPlan)
+        else ToyGridWorldAutonomyPlan.model_validate(autonomy_plan)
+    )
+    current_time = now or datetime.now(timezone.utc)
+    contract_id = _mission_contract_id(mission_contract)
+    telemetry_items = telemetry_sequence or []
+    steps: list[ToyGridWorldAutonomousStep] = []
+    executed_actions: list[ToyGridWorldAction] = []
+    final_state = current
+    status = ToyGridWorldAutonomousEpisodeStatus.MAX_STEPS_EXHAUSTED
+    stop_reason = "max_steps_exhausted"
+
+    if plan.status == ToyGridWorldAutonomyPlanStatus.BLOCKED:
+        status = ToyGridWorldAutonomousEpisodeStatus.PLAN_BLOCKED
+        stop_reason = plan.failure_reason or "plan_blocked"
+    elif not _state_matches_plan(current, plan):
+        status = ToyGridWorldAutonomousEpisodeStatus.PLAN_MISMATCH
+        stop_reason = "plan_initial_state_mismatch"
+    else:
+        resolved_max_steps = len(plan.actions)
+        if max_steps is not None:
+            resolved_max_steps = min(resolved_max_steps, max(0, int(max_steps)))
+        resolved_max_steps = min(resolved_max_steps, max(0, int(plan.max_step_budget)))
+        if not plan.actions and current.status == ToyGridWorldStatus.GOAL_REACHED:
+            status = ToyGridWorldAutonomousEpisodeStatus.GOAL_REACHED
+            stop_reason = "goal_reached"
+        for index, action in enumerate(plan.actions[:resolved_max_steps]):
+            telemetry = telemetry_items[index] if index < len(telemetry_items) else _AUTO_TELEMETRY
+            result = step_toy_grid_world(
+                final_state,
+                action,
+                telemetry=telemetry,
+                now=current_time + timedelta(seconds=index),
+            )
+            autonomous_step = _autonomous_step_from_result(result, step_index=index)
+            steps.append(autonomous_step)
+            executed_actions.append(action)
+            final_state = result.next_state
+            if not result.accepted:
+                status = ToyGridWorldAutonomousEpisodeStatus.BLOCKED
+                stop_reason = result.blocked_reason or "safety_governor_blocked"
+                break
+            if final_state.status == ToyGridWorldStatus.GOAL_REACHED:
+                status = ToyGridWorldAutonomousEpisodeStatus.GOAL_REACHED
+                stop_reason = "goal_reached"
+                break
+        else:
+            if len(steps) < len(plan.actions):
+                status = ToyGridWorldAutonomousEpisodeStatus.MAX_STEPS_EXHAUSTED
+                stop_reason = "max_steps_exhausted"
+            elif final_state.status == ToyGridWorldStatus.GOAL_REACHED:
+                status = ToyGridWorldAutonomousEpisodeStatus.GOAL_REACHED
+                stop_reason = "goal_reached"
+            else:
+                status = ToyGridWorldAutonomousEpisodeStatus.MAX_STEPS_EXHAUSTED
+                stop_reason = "plan_actions_exhausted_before_goal"
+
+    step_results = [step.step_result for step in steps]
+    replay_trace = _build_replay_trace_from_steps(
+        current,
+        executed_actions,
+        step_results,
+        final_state,
+        now=current_time,
+        metadata={
+            "autonomous_episode": True,
+            "plan_id": plan.plan_id,
+            "mission_contract_id": contract_id,
+        },
+    )
+    summary = _episode_summary(
+        status=status,
+        steps=steps,
+        final_state=final_state,
+        replay_trace=replay_trace,
+        stop_reason=stop_reason,
+    )
+    episode_id = _episode_id(
+        initial_state=current,
+        plan=plan,
+        status=status,
+        steps=steps,
+        final_state=final_state,
+        mission_contract_id=contract_id,
+    )
+    return ToyGridWorldAutonomousEpisode(
+        episode_id=episode_id,
+        world_id=current.world_id,
+        plan_id=plan.plan_id,
+        mission_contract_id=contract_id,
+        status=status,
+        initial_state=current,
+        autonomy_plan=plan,
+        steps=steps,
+        final_state=final_state,
+        final_status=final_state.status,
+        replay_trace=replay_trace,
+        summary=summary,
+        created_at=current_time,
+        metadata={
+            **(metadata or {}),
+            "simulator": "toy_grid_world",
+            "artifact_only": True,
+            "simulator_only": True,
+            "dry_run_only": True,
+            "execution_allowed": False,
+            "operator_approval_required": True,
+            "operator_approval_performed": False,
+            "live_execution_allowed": False,
+            "physical_execution_invoked": False,
+        },
+    )
 
 
 def build_grid_world_simulation_scenario_request(
@@ -681,33 +1347,20 @@ def run_toy_grid_world_replay(
         if current.status in {ToyGridWorldStatus.BLOCKED, ToyGridWorldStatus.GOAL_REACHED}:
             break
 
-    hash_payload = {
-        "initial": (
-            initial_state.model_dump(mode="json")
-            if isinstance(initial_state, ToyGridWorldState)
-            else initial_state
-        ),
-        "actions": [item.value for item in selected_actions],
-        "steps": [step.model_dump(mode="json") for step in steps],
-        "final": current.model_dump(mode="json"),
-    }
-    deterministic_hash = sha256(
-        json.dumps(hash_payload, ensure_ascii=True, sort_keys=True, default=str).encode("utf-8")
-    ).hexdigest()
+    resolved_initial = (
+        initial_state
+        if isinstance(initial_state, ToyGridWorldState)
+        else ToyGridWorldState.model_validate(initial_state)
+    )
+    deterministic_hash = _deterministic_replay_hash(
+        resolved_initial,
+        selected_actions,
+        steps,
+        current,
+    )
     return ToyGridWorldReplayTrace(
-        trace_id=_stable_id(
-            "toy_grid_replay",
-            {
-                "world_id": current.world_id,
-                "actions": [item.value for item in selected_actions],
-                "hash": deterministic_hash,
-            },
-        ),
-        initial_state=(
-            initial_state
-            if isinstance(initial_state, ToyGridWorldState)
-            else ToyGridWorldState.model_validate(initial_state)
-        ),
+        trace_id=_replay_trace_id(current, selected_actions, deterministic_hash),
+        initial_state=resolved_initial,
         actions=selected_actions,
         steps=steps,
         final_state=current,
@@ -806,10 +1459,18 @@ def render_toy_grid_world_svg(
 
 
 __all__ = [
+    "TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION",
+    "TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION",
+    "TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION",
     "TOY_GRID_WORLD_REPLAY_TRACE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_STATE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_STEP_RESULT_SCHEMA_VERSION",
     "ToyGridWorldAction",
+    "ToyGridWorldAutonomousEpisode",
+    "ToyGridWorldAutonomousEpisodeStatus",
+    "ToyGridWorldAutonomousStep",
+    "ToyGridWorldAutonomyPlan",
+    "ToyGridWorldAutonomyPlanStatus",
     "ToyGridWorldError",
     "ToyGridWorldPosition",
     "ToyGridWorldReplayTrace",
@@ -819,8 +1480,10 @@ __all__ = [
     "build_grid_world_safety_governor_decision",
     "build_grid_world_simulation_scenario_request",
     "build_grid_world_telemetry_snapshot",
+    "build_toy_grid_world_autonomy_plan",
     "build_toy_grid_world_state",
     "render_toy_grid_world_svg",
+    "run_toy_grid_world_autonomous_episode",
     "run_toy_grid_world_replay",
     "step_toy_grid_world",
 ]
