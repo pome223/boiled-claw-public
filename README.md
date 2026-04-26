@@ -5,7 +5,7 @@
 <h1 align="center">boiled-claw</h1>
 
 <p align="center">
-  Closed-loop agent runtime for browser-first work and simulation-first physical validation.
+  Mission-level control plane for browser-first, desktop, and simulation-first agent systems.
 </p>
 
 <p align="center">
@@ -49,6 +49,20 @@ decision, replay, benchmark gate, and operator approval.
 That shared vocabulary is practical: browser trajectories can become replayable
 evidence, recovery policies, and benchmark cases before the same contracts are
 exercised in simulation-first validation.
+
+## Mission-level autonomy runtime for heterogeneous agent systems
+
+boiled-claw treats a browser agent, a desktop agent, a simulator agent, a drone,
+and a humanoid as different execution surfaces under the same mission-level
+control plane. The common layer is not the actuator. It is the contract,
+evidence, telemetry, verifier verdict, safety governor decision, replay trace,
+eval gate, and operator approval record.
+
+That is the higher-level Mission OS bet: computer-use agents and physical agents
+should share the same policy-bounded mission vocabulary before they share any
+runtime execution path. The current implementation therefore stays
+browser-first and simulation-first while building the artifacts needed for
+heterogeneous autonomy later.
 
 ## Demo
 
