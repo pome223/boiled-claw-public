@@ -423,7 +423,7 @@ Likely touchpoints:
 Deliverables:
 
 - explicit artifact schemas for `approved_skill`, `capability_patch`, `approved_improvement_memory`, and `policy_patch` (artifact-only first slice before runtime reuse)
-- `reuse_plan.v1` artifact that records selected approved artifacts, exclusions, expiry checks, invalidation checks, and operator-visible provenance
+- `reuse_plan.v1` artifact that records selected approved artifacts, exclusions, expiry checks, invalidation checks, and operator-visible provenance, with optional plan-only attachment at `control_supervisor` mission start
 - candidate skill generation from failed trajectories
 - capability registration path for approved promotions
 - reuse hooks that prefer promoted skills over raw repair prompting

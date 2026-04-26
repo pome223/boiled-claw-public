@@ -374,6 +374,14 @@ def test_start_control_supervisor_endpoint_accepts_mission_contract(monkeypatch,
                     "completion_criteria": ["target cell evidence is visible"],
                     "evidence_requirements": ["post-action screenshot"],
                 },
+                "approved_promotion_artifacts": {
+                    "approved_promotions": [
+                        {
+                            "artifact_id": "memory-http-test",
+                            "promotion_target": "approved_improvement_memory",
+                        }
+                    ]
+                },
                 "duration_seconds": 3600,
                 "interval_seconds": 60,
             },
@@ -382,8 +390,17 @@ def test_start_control_supervisor_endpoint_accepts_mission_contract(monkeypatch,
     assert response.status_code == 200
     payload = response.json()
     assert captured["objective"] == "Keep the current-tab sheet healthy"
+    assert captured["approved_promotion_artifacts"] == {
+        "approved_promotions": [
+            {
+                "artifact_id": "memory-http-test",
+                "promotion_target": "approved_improvement_memory",
+            }
+        ]
+    }
     assert payload["mission_contract"]["contract_id"] == "mission-http-test"
     assert payload["task"]["metadata"]["mission_contract_id"] == "mission-http-test"
+    assert payload["reuse_plan"] is None
 
 
 def test_cancel_control_supervisor_endpoint_requires_running_handle(monkeypatch, tmp_path):
@@ -3286,7 +3303,8 @@ def _ws_receive_json_bounded(ws, timeout=_E2E_WS_RECEIVE_TIMEOUT):
     and waits on a ``queue.Queue`` with a timeout, so control always returns to
     the caller — even when the worker thread is still stuck in receive.
     """
-    import queue, threading
+    import queue
+    import threading
 
     q: queue.Queue = queue.Queue()
 

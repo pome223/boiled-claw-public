@@ -2,6 +2,7 @@ import asyncio
 import socket
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
@@ -352,6 +353,152 @@ async def test_e2e_control_supervisor_accepts_generated_mission_template_contrac
         "Write the local report",
         "Verify report evidence",
     ]
+
+
+def _approved_memory_payload(
+    artifact_id: str,
+    *,
+    content: str,
+    approval_status: str = "approved",
+    expires_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": "approved_improvement_memory.v1",
+        "artifact_id": artifact_id,
+        "source_package_id": f"{artifact_id}:package",
+        "candidate_id": f"{artifact_id}:candidate",
+        "candidate_type": "memory_rule",
+        "source_mission_task_id": "source-task",
+        "source_refs": ["mission_review:source-task"],
+        "approval_status": approval_status,
+        "approved_by": "operator",
+        "approved_at": "2026-01-01T00:00:00Z",
+        "approval_ref": "approval:e2e",
+        "invalidation_rule": "Invalidate when benchmark evidence is stale.",
+        "approval_requirements": {
+            "requires_operator_approval": True,
+            "requires_benchmark_gate": True,
+        },
+        "benchmark_refs": ["mission_eval_result:template_contract_generation:baseline"],
+        "security_refs": [],
+        "content": content,
+        "promotion_target": "approved_improvement_memory",
+        "memory_kind": "approved_improvement",
+        "failure_type": "weak_evidence",
+        **({"expires_at": expires_at} if expires_at is not None else {}),
+    }
+
+
+@pytest.mark.asyncio
+async def test_e2e_control_supervisor_records_reuse_plan_from_start_payload(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setenv("TASK_STORE_DB_PATH", str(tmp_path / "tasks.db"))
+    monkeypatch.setenv("MEMORY_DB_PATH", str(tmp_path / "memory.db"))
+    monkeypatch.setenv("AUDIT_LOG_PATH", str(tmp_path / "audit.log"))
+    monkeypatch.setenv(
+        "COMPUTER_TRAJECTORY_DB_PATH",
+        str(tmp_path / "computer_trajectories.db"),
+    )
+    monkeypatch.setenv(
+        "PHYSICAL_AI_VALIDATION_DB_PATH",
+        str(tmp_path / "physical_ai_validation.db"),
+    )
+    reset_settings()
+    reset_task_store()
+
+    contract = build_mission_contract_from_template(
+        "current_tab_research_to_report",
+        {
+            "topic": "Mission OS reuse plans",
+            "report_target": "reports/mission-reuse.md",
+        },
+    )
+    expired_at = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    child_goals: list[str] = []
+
+    async def _reuse_gateway_child(**kwargs):
+        child_goals.append(kwargs["goal"])
+        task = kwargs["parent_task_id"] + f"/reuse-child-{len(child_goals)}"
+        return (
+            ExecutionResult(
+                request_id=f"req-reuse-{len(child_goals)}",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="reuse node ok",
+                success=True,
+            ),
+            task,
+        )
+
+    server, server_task, base_url = await _start_gateway(_reuse_gateway_child)
+    try:
+        async with httpx.AsyncClient(base_url=base_url, timeout=10.0) as client:
+            response = await client.post(
+                "/tasks/supervisors/control-loop",
+                json={
+                    "user_id": "e2e_reuse",
+                    "mission_contract": contract.model_dump(mode="json"),
+                    "approved_promotion_artifacts": {
+                        "approved_promotions": [
+                            _approved_memory_payload(
+                                "memory-e2e-reuse-selected",
+                                content="Use Mission OS reuse plan evidence in browser agent reports.",
+                            ),
+                            _approved_memory_payload(
+                                "memory-e2e-reuse-rejected",
+                                content="Use Mission OS reuse plan evidence in browser agent reports.",
+                                approval_status="rejected",
+                            ),
+                            _approved_memory_payload(
+                                "memory-e2e-reuse-expired",
+                                content="Use Mission OS reuse plan evidence in browser agent reports.",
+                                expires_at=expired_at,
+                            ),
+                        ]
+                    },
+                    "duration_seconds": 60,
+                    "interval_seconds": 5,
+                },
+            )
+            response.raise_for_status()
+            accepted = response.json()
+            task_id = accepted["task"]["task_id"]
+            accepted_plan = accepted["reuse_plan"]
+            assert accepted_plan["schema_version"] == "reuse_plan.v1"
+            assert accepted_plan["mission_task_id"] == task_id
+            assert accepted_plan["selected_memories"][0]["artifact_id"] == (
+                "memory-e2e-reuse-selected"
+            )
+            accepted_excluded = {
+                item["artifact_id"]: item["reason"]
+                for item in accepted_plan["excluded_candidates"]
+            }
+            assert accepted_excluded["memory-e2e-reuse-rejected"] == "rejected"
+            assert accepted_excluded["memory-e2e-reuse-expired"] == "expired"
+
+            completed_task = await _wait_for_task_status(client, task_id, "completed")
+            task_plan = completed_task["artifacts"]["reuse_plan"]
+            durable_plan = completed_task["artifacts"]["durable_execution"]["reuse_plan"]
+            assert task_plan == accepted_plan
+            assert durable_plan == accepted_plan
+            assert task_plan["metadata"]["automatic_runtime_application"] is False
+
+            timeline_response = await client.get(f"/tasks/{task_id}/timeline")
+            timeline_response.raise_for_status()
+            timeline = timeline_response.json()
+            assert "mission_reuse_plan_recorded" in {
+                entry["event_type"] for entry in timeline["entries"]
+            }
+    finally:
+        await _stop_gateway(server, server_task)
+
+    assert child_goals
+    assert (
+        "Use Mission OS reuse plan evidence in browser agent reports"
+        not in child_goals[0]
+    )
 
 
 @pytest.mark.asyncio

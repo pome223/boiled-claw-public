@@ -350,6 +350,10 @@ HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
                     },
                 },
                 "constraints": {"type": "array"},
+                "approved_promotion_artifacts": {
+                    "description": "Optional approved promotion artifacts used to record an operator-visible reuse_plan.v1. Selected entries are not applied at runtime.",
+                    "oneOf": [{"type": "object"}, {"type": "array"}],
+                },
                 "duration_seconds": {"type": "integer"},
                 "interval_seconds": {"type": "integer"},
                 "maintenance_goal": {"type": "string"},
@@ -367,6 +371,7 @@ HTTP_ROUTE_SCHEMAS: dict[str, dict[str, Any]] = {
                 "ends_at": {"type": "number"},
                 "next_run_at": {"type": "number"},
                 "mission_contract": {"type": "object"},
+                "reuse_plan": {"type": "object"},
             },
         },
     },

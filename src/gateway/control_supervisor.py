@@ -39,6 +39,7 @@ from src.runtime.mission_contract import (
     MissionContract,
     normalize_mission_contract,
 )
+from src.runtime.mission_reuse import build_mission_reuse_plan
 from src.runtime.orchestration_policy import (
     append_scheduler_queue_entry,
     budget_exhaustion_reasons,
@@ -428,6 +429,7 @@ class SupervisorStartResult:
     ends_at: float
     next_run_at: float
     mission_contract: dict[str, Any] | None = None
+    reuse_plan: dict[str, Any] | None = None
 
 
 @dataclass
@@ -491,6 +493,7 @@ class ControlLoopSupervisor:
         request_id: Optional[str] = None,
         max_iterations: Optional[int] = None,
         mission_contract: MissionContract | dict[str, Any] | None = None,
+        approved_promotion_artifacts: dict[str, Any] | list[Any] | None = None,
     ) -> SupervisorStartResult:
         started_at = self._now()
         resolved_duration = max(1, int(duration_seconds))
@@ -580,6 +583,54 @@ class ControlLoopSupervisor:
             },
         )
         task_id = str(task["task_id"])
+        reuse_plan_payload: dict[str, Any] | None = None
+        if approved_promotion_artifacts is not None:
+            reuse_plan_payload = build_mission_reuse_plan(
+                resolved_contract,
+                approved_promotion_artifacts,
+                mission_task_id=task_id,
+                now=_utc_datetime(started_at),
+            ).model_dump(mode="json")
+            updated_task = self._update_task_record(
+                task_id,
+                artifacts={
+                    "reuse_plan": reuse_plan_payload,
+                    "durable_execution": {"reuse_plan": reuse_plan_payload},
+                },
+            )
+            if updated_task is not None:
+                task = updated_task
+            self._append_task_event_record(
+                task_id,
+                event_type="mission_reuse_plan_recorded",
+                status="running",
+                title="Mission reuse plan recorded",
+                payload={
+                    "summary": "Recorded operator-visible reuse_plan.v1 for mission start.",
+                    "reuse_plan": reuse_plan_payload,
+                    "selected_counts": {
+                        "memories": len(
+                            reuse_plan_payload.get("selected_memories") or []
+                        ),
+                        "skills": len(reuse_plan_payload.get("selected_skills") or []),
+                        "policies": len(
+                            reuse_plan_payload.get("selected_policies") or []
+                        ),
+                        "capabilities": len(
+                            reuse_plan_payload.get("selected_capabilities") or []
+                        ),
+                    },
+                    "excluded_count": len(
+                        reuse_plan_payload.get("excluded_candidates") or []
+                    ),
+                    "operator_visible": reuse_plan_payload.get("operator_visible"),
+                    "automatic_runtime_application": (
+                        (reuse_plan_payload.get("metadata") or {}).get(
+                            "automatic_runtime_application"
+                        )
+                    ),
+                },
+            )
         stop_requested = asyncio.Event()
         runner_task = asyncio.create_task(
             self._run_supervisor(
@@ -624,6 +675,7 @@ class ControlLoopSupervisor:
             ends_at=ends_at,
             next_run_at=started_at,
             mission_contract=mission_contract_payload,
+            reuse_plan=reuse_plan_payload,
         )
 
     async def request_stop(self, task_id: str) -> dict[str, Any] | None:
