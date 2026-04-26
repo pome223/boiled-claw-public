@@ -239,8 +239,17 @@ schema fields. Listing helpers can filter usable approved artifacts by type and
 ignore rejected or expired records. This still does not wire approved artifacts
 into planning, recovery, runtime registration, or mission reuse.
 
-Non-goals for this layer: no automatic promotion, no runtime reuse, no canary
-benchmark execution, no UI changes, no `/missions` API, and no `missions` table.
+Mission reuse plans close the artifact loop without changing runtime behavior.
+A `reuse_plan.v1` compares a new `MissionContract` against usable approved
+artifacts, selects relevant memories, skills, policy patches, and capability
+patches, and records why each artifact was selected or excluded. The plan
+preserves expiry checks, invalidation checks, policy checks, matched terms, and
+operator-visible provenance. Capability and policy patches are selected only as
+visible plan entries; they are not automatically registered or applied.
+
+Non-goals for this layer: no automatic promotion, no hidden runtime reuse, no
+canary benchmark execution, no UI changes, no `/missions` API, and no `missions`
+table.
 
 ## Current Maturity
 
