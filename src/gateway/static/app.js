@@ -1590,6 +1590,11 @@ function renderLongRunningTaskState(task) {
   const memoryPromotionCandidates = Array.isArray(artifacts.memory_promotion_candidates)
     ? artifacts.memory_promotion_candidates
     : (Array.isArray(durable.memory_promotion_candidates) ? durable.memory_promotion_candidates : []);
+  const reusePlan = artifacts.reuse_plan && typeof artifacts.reuse_plan === "object"
+    ? artifacts.reuse_plan
+    : (durable.reuse_plan && typeof durable.reuse_plan === "object" ? durable.reuse_plan : {});
+  const taskTimelineForMission = Array.isArray(dashboardState.taskTimeline) ? dashboardState.taskTimeline : [];
+  const reusePlanHistory = taskTimelineForMission.filter((entry) => entry && entry.event_type === "mission_reuse_plan_recorded");
   const resumeState = durable.resume_state && typeof durable.resume_state === "object"
     ? durable.resume_state
     : {};
@@ -1813,6 +1818,122 @@ function renderLongRunningTaskState(task) {
     `</div>`,
   ].join("");
 
+  const renderReuseSelection = (selection) => {
+    const item = selection && typeof selection === "object" ? selection : {};
+    const matchedTerms = Array.isArray(item.matched_terms) ? item.matched_terms : [];
+    const metaBits = [
+      item.promotion_target ? `target=${item.promotion_target}` : "",
+      item.application_mode ? `mode=${item.application_mode}` : "",
+      item.relevance_score !== undefined ? `score=${Number(item.relevance_score || 0).toFixed(3)}` : "",
+      item.expires_at ? `expires=${formatTimestamp(item.expires_at)}` : "",
+    ].filter(Boolean);
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(item.artifact_id || "selected artifact")}</div><div class="item-meta mono">${escapeHtml(item.candidate_id || item.source_package_id || "-")}</div></div>`,
+      statusTag(item.promotion_target || "selected"),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(compactText(item.reason || "-", 220))}</div>`,
+      metaBits.length ? `<div class="item-meta mono">${escapeHtml(metaBits.join(" · "))}</div>` : "",
+      matchedTerms.length ? `<div class="item-meta mono">${escapeHtml(`matched=${matchedTerms.join(", ")}`)}</div>` : "",
+      item.approval_ref ? `<div class="item-meta mono">${escapeHtml(`approval=${item.approval_ref}`)}</div>` : "",
+      renderRefs(item.source_refs, "source"),
+      `</div>`,
+    ].join("");
+  };
+
+  const renderReuseExcludedCandidate = (candidate) => {
+    const item = candidate && typeof candidate === "object" ? candidate : {};
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(item.artifact_id || item.candidate_id || "excluded candidate")}</div><div class="item-meta mono">${escapeHtml(item.promotion_target || "-")}</div></div>`,
+      statusTag(item.reason || "excluded"),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(compactText(item.details || item.reason || "-", 220))}</div>`,
+      `<div class="item-meta mono">${escapeHtml(item.candidate_id || "-")}</div>`,
+      renderRefs(item.source_refs, "source"),
+      `</div>`,
+    ].join("");
+  };
+
+  const renderReuseCheck = (check) => {
+    const item = check && typeof check === "object" ? check : {};
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(item.artifact_id || "reuse check")}</div><div class="item-meta mono">${escapeHtml(item.check || "-")}</div></div>`,
+      statusTag(item.passed ? "passed" : "blocked"),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(item.reason || "-")}</div>`,
+      `<div class="item-meta mono">${escapeHtml(formatTimestamp(item.checked_at))}</div>`,
+      `</div>`,
+    ].join("");
+  };
+
+  const renderReusePlanHistory = (entry) => {
+    const payload = entry.payload && typeof entry.payload === "object" ? entry.payload : {};
+    const selected = payload.selected_counts && typeof payload.selected_counts === "object" ? payload.selected_counts : {};
+    const counts = [
+      `memories=${selected.memories ?? 0}`,
+      `skills=${selected.skills ?? 0}`,
+      `policies=${selected.policies ?? 0}`,
+      `capabilities=${selected.capabilities ?? 0}`,
+      `excluded=${payload.excluded_count ?? 0}`,
+    ];
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(entry.title || "Mission reuse plan recorded")}</div><div class="item-meta mono">${escapeHtml(formatTimestamp(entry.timestamp))}</div></div>`,
+      statusTag(entry.status || "recorded"),
+      `</div>`,
+      `<div class="item-detail">${escapeHtml(payload.summary || entry.summary || "-")}</div>`,
+      `<div class="item-meta mono">${escapeHtml(counts.join(" · "))}</div>`,
+      payload.automatic_runtime_application === false ? `<div class="item-meta mono">automatic_runtime_application=false</div>` : "",
+      `</div>`,
+    ].join("");
+  };
+
+  const renderMissionReusePlan = () => {
+    if (!reusePlan || !Object.keys(reusePlan).length) return "";
+    const selectedMemories = Array.isArray(reusePlan.selected_memories) ? reusePlan.selected_memories : [];
+    const selectedSkills = Array.isArray(reusePlan.selected_skills) ? reusePlan.selected_skills : [];
+    const selectedPolicies = Array.isArray(reusePlan.selected_policies) ? reusePlan.selected_policies : [];
+    const selectedCapabilities = Array.isArray(reusePlan.selected_capabilities) ? reusePlan.selected_capabilities : [];
+    const excludedCandidates = Array.isArray(reusePlan.excluded_candidates) ? reusePlan.excluded_candidates : [];
+    const expiryChecks = Array.isArray(reusePlan.expiry_checks) ? reusePlan.expiry_checks : [];
+    const policyChecks = Array.isArray(reusePlan.policy_checks) ? reusePlan.policy_checks : [];
+    const planMetadata = reusePlan.metadata && typeof reusePlan.metadata === "object" ? reusePlan.metadata : {};
+    const counts = [
+      `memories=${selectedMemories.length}`,
+      `skills=${selectedSkills.length}`,
+      `policies=${selectedPolicies.length}`,
+      `capabilities=${selectedCapabilities.length}`,
+      `excluded=${excludedCandidates.length}`,
+    ].join(" · ");
+    return [
+      `<div class="detail-section">`,
+      `<div class="k">Reuse Plan</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Plan</div><div>${statusTag(reusePlan.operator_visible === false ? "hidden" : "operator_visible")}</div><div class="item-meta mono">${escapeHtml(reusePlan.schema_version || "-")}</div></div>`,
+      `<div class="detail-card"><div class="k">Mission</div><div class="mono">${escapeHtml(reusePlan.mission_task_id || task.task_id || "-")}</div><div class="item-meta mono">${escapeHtml(reusePlan.mission_contract_id || missionContract.contract_id || "-")}</div></div>`,
+      `<div class="detail-card"><div class="k">Selected</div><div>${escapeHtml(counts)}</div><div class="item-meta mono">${escapeHtml(`automatic_runtime_application=${String(planMetadata.automatic_runtime_application === true)}`)}</div></div>`,
+      `</div>`,
+      selectedMemories.length ? `<div class="k">Selected Memories</div><div class="detail-grid">${selectedMemories.map(renderReuseSelection).join("")}</div>` : "",
+      selectedSkills.length ? `<div class="k">Selected Skills</div><div class="detail-grid">${selectedSkills.map(renderReuseSelection).join("")}</div>` : "",
+      selectedPolicies.length ? `<div class="k">Selected Policies</div><div class="detail-grid">${selectedPolicies.map(renderReuseSelection).join("")}</div>` : "",
+      selectedCapabilities.length ? `<div class="k">Selected Capabilities</div><div class="detail-grid">${selectedCapabilities.map(renderReuseSelection).join("")}</div>` : "",
+      `<div class="k">Excluded Candidates</div>`,
+      excludedCandidates.length ? `<div class="detail-grid">${excludedCandidates.map(renderReuseExcludedCandidate).join("")}</div>` : `<div class="muted">No excluded reuse candidates.</div>`,
+      `<div class="k">Expiry Checks</div>`,
+      expiryChecks.length ? `<div class="detail-grid">${expiryChecks.map(renderReuseCheck).join("")}</div>` : `<div class="muted">No reuse expiry checks recorded.</div>`,
+      `<div class="k">Policy Checks</div>`,
+      policyChecks.length ? `<div class="detail-grid">${policyChecks.map(renderReuseCheck).join("")}</div>` : `<div class="muted">No reuse policy checks recorded.</div>`,
+      reusePlanHistory.length ? `<div class="k">Reuse Plan History</div><div class="detail-grid">${reusePlanHistory.map(renderReusePlanHistory).join("")}</div>` : "",
+      `</div>`,
+    ].join("");
+  };
+
   const renderMissionScorecard = () => {
     if (!missionScorecard || !Object.keys(missionScorecard).length) return "";
     const metadata = missionScorecard.metadata && typeof missionScorecard.metadata === "object" ? missionScorecard.metadata : {};
@@ -1922,6 +2043,7 @@ function renderLongRunningTaskState(task) {
     `</div>`,
     renderMissionScorecard(),
     renderMissionReview(),
+    renderMissionReusePlan(),
     `<div class="detail-section">`,
     `<div class="k">Memory Candidate State</div>`,
     memoryPromotionCandidates.length

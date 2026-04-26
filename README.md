@@ -150,7 +150,7 @@ The Gateway ships a browser-based chat, task dashboard, audit explorer, detail /
 
 ![boiled-claw Control UI example](assets/control-ui-demo.png)
 
-The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened. The Dashboard and Audit tabs then let you drill into task artifacts, inspect merged task timelines, jump into related audit events, replay failed control-loop runs, compare replays against the baseline task, and watch task / approval / audit updates arrive over the WebSocket without leaving the Control UI.
+The UI above shows the typical flow: a user request, router handoff, an approval checkpoint, recent task and approval state, an agent response, and the live event stream that explains what happened. The Dashboard and Audit tabs then let you drill into task artifacts, inspect mission runtime state, review reuse-plan selections and exclusions, inspect merged task timelines, jump into related audit events, replay failed control-loop runs, compare replays against the baseline task, and watch task / approval / audit updates arrive over the WebSocket without leaving the Control UI.
 
 ## Architecture Overview
 
@@ -984,7 +984,8 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 - Mission Contract substrate: task graph, scheduler queue, checkpoints, resume
   state, recovery decisions, scorecard, post-mission review, templates, eval
   suites, memory candidates, promotion packages, typed approved promotion
-  artifacts, and plan-only mission-start reuse plans.
+  artifacts, plan-only mission-start reuse plans, and Control UI visibility for
+  reuse-plan selections, exclusions, checks, and history.
 - Simulation-first physical AI artifacts: validation state, telemetry-aware
   verifier results, safety-governed action envelopes, and offline replay plans.
 
@@ -992,7 +993,6 @@ docker compose --profile dev run --rm boiled-claw-dev ruff check src/
 
 - Aggregate benchmark gates over promotion packages from mission improvement
   candidates.
-- Control UI display for reuse-plan history when needed.
 
 ### Planned
 
