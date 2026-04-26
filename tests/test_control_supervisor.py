@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -8,6 +8,13 @@ from src.gateway.control_supervisor import (
     ControlLoopSupervisor,
     _SupervisorHandle,
     build_maintenance_goal,
+)
+from src.runtime.approved_promotions import (
+    ApprovedImprovementMemoryArtifact,
+    ApprovedPromotionStatus,
+    ApprovedPromotionTarget,
+    ApprovedSkillArtifact,
+    CapabilityPatchArtifact,
 )
 from src.runtime.durable_execution_schema import (
     DurableTaskNodeStatus,
@@ -23,12 +30,83 @@ from src.runtime.mission_contract import (
 )
 from src.runtime.task_store import TaskStore
 
+NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
 
 def test_build_maintenance_goal_wraps_objective():
     goal = build_maintenance_goal("Keep the desktop media session healthy")
 
     assert "Maintain the following long-running objective" in goal
     assert "Keep the desktop media session healthy" in goal
+
+
+def _approved_payload(
+    *,
+    artifact_id: str,
+    target: ApprovedPromotionTarget,
+    content: str,
+):
+    return {
+        "artifact_id": artifact_id,
+        "source_package_id": f"{artifact_id}:package",
+        "candidate_id": f"{artifact_id}:candidate",
+        "candidate_type": "benchmark_case",
+        "source_mission_task_id": "source-task",
+        "source_refs": ["mission_review:source-task"],
+        "approval_status": ApprovedPromotionStatus.APPROVED,
+        "approved_by": "operator",
+        "approved_at": NOW,
+        "approval_ref": "approval:1",
+        "invalidation_rule": "Invalidate when benchmark evidence is stale.",
+        "approval_requirements": {
+            "requires_operator_approval": True,
+            "requires_benchmark_gate": True,
+        },
+        "benchmark_refs": ["mission_eval_result:template_contract_generation:baseline"],
+        "security_refs": [],
+        "content": content,
+        "promotion_target": target,
+    }
+
+
+def _approved_memory(artifact_id="memory-sheet"):
+    return ApprovedImprovementMemoryArtifact(
+        **_approved_payload(
+            artifact_id=artifact_id,
+            target=ApprovedPromotionTarget.APPROVED_IMPROVEMENT_MEMORY,
+            content="Use destination-bound Sheets evidence when writing browser agent reports.",
+        ),
+        memory_kind="approved_improvement",
+        failure_type="weak_evidence",
+    )
+
+
+def _rejected_skill(artifact_id="skill-rejected"):
+    return ApprovedSkillArtifact(
+        **{
+            **_approved_payload(
+                artifact_id=artifact_id,
+                target=ApprovedPromotionTarget.APPROVED_SKILL,
+                content="Reusable report writing recipe for source-linked browser research.",
+            ),
+            "approval_status": ApprovedPromotionStatus.REJECTED,
+        },
+        skill_name="approved/source-linked-report",
+        procedure=["collect sources", "write report", "verify evidence"],
+        inputs=["mission_contract", "verifier_verdict"],
+    )
+
+
+def _approved_capability(artifact_id="capability-sheet"):
+    return CapabilityPatchArtifact(
+        **_approved_payload(
+            artifact_id=artifact_id,
+            target=ApprovedPromotionTarget.CAPABILITY_PATCH,
+            content="Capability proposal for destination-bound sheet evidence capture.",
+        ),
+        capability_name="approved.destination_bound_sheet_evidence",
+        action_schema={"requires_destination_bound_verification": True},
+    )
 
 
 def _create_running_supervisor_task(
@@ -263,6 +341,134 @@ async def test_control_supervisor_persists_mission_contract_in_live_artifacts(tm
     assert queue_entry["metadata"]["mission_contract_id"] == "mission-live-test"
     assert queue_entry["metadata"]["abort_conditions"][0]["type"] == (
         MissionAbortConditionType.HUMAN_APPROVAL_REQUIRED.value
+    )
+
+
+@pytest.mark.asyncio
+async def test_control_supervisor_records_reuse_plan_at_mission_start(tmp_path):
+    store = TaskStore(str(tmp_path / "tasks.db"))
+    child_goals: list[str] = []
+    mission_contract = build_mission_contract(
+        contract_id="mission-reuse-start",
+        objective="Write browser agent Sheets evidence into a source-linked report",
+        allowed_actions=["current_tab.read", "file.write"],
+        forbidden_actions=["publish externally"],
+        completion_criteria=["source-linked report exists"],
+        evidence_requirements=["destination-bound sheet evidence"],
+    )
+    expired = _approved_memory("memory-expired").model_copy(
+        update={"expires_at": NOW - timedelta(seconds=1)}
+    )
+
+    def _create_task_record(**kwargs):
+        return store.create(**kwargs)
+
+    def _update_task_record(task_id, **kwargs):
+        return store.update(task_id, **kwargs)
+
+    def _append_task_event_record(task_id, **kwargs):
+        return store.append_event(task_id, **kwargs)
+
+    async def _emit_session_event(
+        session_id: str,
+        *,
+        source: str,
+        status: str,
+        message: str,
+        **kwargs,
+    ):
+        return None
+
+    async def _run_control_loop_with_task(**kwargs):
+        child_goals.append(kwargs["goal"])
+        child_task = store.create(
+            kind="control_loop",
+            title="iteration",
+            status="completed",
+            owner_session_id=kwargs["owner_session_id"],
+            owner_user_id=kwargs["user_id"],
+            parent_task_id=kwargs["parent_task_id"],
+            artifacts={"result": {"success": True, "final_text": "ok"}},
+        )
+        return (
+            ExecutionResult(
+                request_id="req-reuse",
+                session_id=kwargs["session_id"],
+                user_id=kwargs["user_id"],
+                final_text="ok",
+                success=True,
+            ),
+            child_task["task_id"],
+        )
+
+    supervisor = ControlLoopSupervisor(
+        run_control_loop_with_task=_run_control_loop_with_task,
+        emit_session_event=_emit_session_event,
+        create_task_record_fn=_create_task_record,
+        update_task_record_fn=_update_task_record,
+        append_task_event_record_fn=_append_task_event_record,
+        now_fn=lambda: NOW.timestamp(),
+    )
+
+    started = await supervisor.start(
+        user_id="alice",
+        owner_session_id="sess-owner",
+        objective="legacy objective should not win",
+        constraints=[],
+        duration_seconds=60,
+        interval_seconds=0,
+        source="test",
+        max_iterations=1,
+        mission_contract=mission_contract,
+        approved_promotion_artifacts={
+            "approved_promotions": [
+                _approved_memory().model_dump(mode="json"),
+                _approved_capability().model_dump(mode="json"),
+                _rejected_skill().model_dump(mode="json"),
+                expired.model_dump(mode="json"),
+            ]
+        },
+    )
+    await asyncio.gather(*(handle.task for handle in supervisor._handles.values()))
+
+    parent = store.get(started.task["task_id"])
+    assert parent is not None
+    reuse_plan = parent["artifacts"]["reuse_plan"]
+    assert reuse_plan["schema_version"] == "reuse_plan.v1"
+    assert reuse_plan["mission_task_id"] == started.task["task_id"]
+    assert reuse_plan["operator_visible"] is True
+    assert reuse_plan["metadata"]["automatic_runtime_application"] is False
+    assert reuse_plan["selected_memories"][0]["artifact_id"] == "memory-sheet"
+    assert reuse_plan["selected_capabilities"][0]["artifact_id"] == "capability-sheet"
+    assert (
+        reuse_plan["selected_capabilities"][0]["application_mode"]
+        == "operator_visible_plan_only"
+    )
+    excluded = {
+        item["artifact_id"]: item["reason"]
+        for item in reuse_plan["excluded_candidates"]
+    }
+    assert excluded["skill-rejected"] == "rejected"
+    assert excluded["memory-expired"] == "expired"
+    assert parent["artifacts"]["durable_execution"]["reuse_plan"] == reuse_plan
+    assert started.reuse_plan == reuse_plan
+
+    events = store.query_timeline(started.task["task_id"])["events"]
+    recorded = [
+        event
+        for event in events
+        if event["event_type"] == "mission_reuse_plan_recorded"
+    ]
+    assert recorded
+    assert recorded[0]["payload"]["operator_visible"] is True
+    assert recorded[0]["payload"]["automatic_runtime_application"] is False
+
+    assert child_goals
+    assert "Mission contract:" in child_goals[0]
+    assert "Use destination-bound Sheets evidence" not in child_goals[0]
+    assert (
+        "Capability proposal for destination-bound sheet evidence capture"
+        not in child_goals[0]
     )
 
 
@@ -669,6 +875,15 @@ async def test_control_supervisor_weak_evidence_waits_for_approval(tmp_path):
     assert parent["artifacts"]["mission_review"]["failure_buckets"] == [
         {"failure_type": "weak_evidence", "count": 1}
     ]
+    assert parent["artifacts"]["mission_review"]["memory_promotion_candidates"][0][
+        "approval_status"
+    ] == "candidate_only"
+    assert parent["artifacts"]["memory_promotion_candidates"][0][
+        "approval_status"
+    ] == "pending"
+    assert parent["artifacts"]["memory_promotion_candidates"][0][
+        "source_task_id"
+    ] == started.task["task_id"]
     assert "post_mission_review_recorded" in {
         event["event_type"]
         for event in store.query_timeline(started.task["task_id"], page_size=100)["events"]
@@ -2322,6 +2537,12 @@ async def test_control_supervisor_blocked_node_does_not_stop_independent_ready_n
     assert parent["artifacts"]["mission_memory_links"]["memory_promotion_candidates"][0][
         "type"
     ] == "failure_pattern"
+    assert parent["artifacts"]["memory_promotion_candidates"][0][
+        "approval_status"
+    ] == "pending"
+    assert parent["artifacts"]["mission_review"]["memory_promotion_candidates"][0][
+        "approval_status"
+    ] == "candidate_only"
     timeline = store.query_timeline(started.task["task_id"], page_size=100)
     events = timeline["events"]
     assert "post_mission_review_recorded" in {event["event_type"] for event in events}

@@ -226,6 +226,7 @@ def build_task_router(server: "GatewayServer") -> APIRouter:
             maintenance_goal=str(payload.maintenance_goal or "").strip() or None,
             request_id=None,
             mission_contract=mission_contract,
+            approved_promotion_artifacts=payload.approved_promotion_artifacts,
         )
         return {
             "accepted": True,
@@ -237,6 +238,7 @@ def build_task_router(server: "GatewayServer") -> APIRouter:
             "ends_at": result.ends_at,
             "next_run_at": result.next_run_at,
             "mission_contract": result.mission_contract,
+            "reuse_plan": result.reuse_plan,
         }
 
     @router.post("/tasks/{task_id}/cancel", response_model=TaskCancelResponse)

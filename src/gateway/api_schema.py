@@ -113,6 +113,7 @@ class ControlSupervisorRequest(BaseModel):
     session_id: str | None = None
     goal: str | None = None
     mission_contract: MissionContract | None = None
+    approved_promotion_artifacts: dict[str, Any] | list[Any] | None = None
     constraints: list[str] = Field(default_factory=list)
     duration_seconds: int = Field(default=3600, ge=60, le=86_400)
     interval_seconds: int = Field(default=60, ge=5, le=3_600)
@@ -131,6 +132,7 @@ class ControlSupervisorAcceptedResponse(BaseModel):
     ends_at: float
     next_run_at: float
     mission_contract: dict[str, Any] | None = None
+    reuse_plan: dict[str, Any] | None = None
 
 
 class TaskCancelResponse(BaseModel):

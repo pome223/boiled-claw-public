@@ -246,6 +246,10 @@ patches, and records why each artifact was selected or excluded. The plan
 preserves expiry checks, invalidation checks, policy checks, matched terms, and
 operator-visible provenance. Capability and policy patches are selected only as
 visible plan entries; they are not automatically registered or applied.
+When approved promotion artifacts are supplied at `control_supervisor` mission
+start, the Gateway records the generated `reuse_plan.v1` on task artifacts and
+`durable_execution` and emits a `mission_reuse_plan_recorded` timeline event.
+This remains a visibility path, not runtime reuse.
 
 Non-goals for this layer: no automatic promotion, no hidden runtime reuse, no
 canary benchmark execution, no UI changes, no `/missions` API, and no `missions`
