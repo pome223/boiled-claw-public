@@ -271,6 +271,59 @@ with `stronger_execution_allowed=false`. It is not an LLM judge, does not
 promote artifacts, does not reuse runtime memory, and does not permit live
 physical execution.
 
+Simulator adapter contracts are the first design slice toward a second
+simulator. A `simulator_adapter_contract.v1` is a static declaration that
+each adapter publishes about itself: which `state` / `action` / `telemetry` /
+`governor` / `episode` / `replay_trace` schema versions it speaks, which
+execution capabilities it does NOT support, and which mode it advertises. The
+toy-grid adapter contract pins `supports_live_execution=false`,
+`supports_physical_execution=false`, `supports_ros_dispatch=false`,
+`operator_approval_required=true`, and `adapter_mode=dry_run_only` at the
+type level so a contract that advertises stronger capabilities cannot be
+constructed through this slice. The toy-grid autonomy episode runner and
+the safety regression gate entry-point now consult the contract before
+running, fail closed on any mismatch via `SimulatorAdapterContractError`,
+and record the contract's `adapter_id` / `schema_version` /
+`simulator_kind` / `mode` in episode and gate metadata so any future UI /
+audit / scorecard can see which adapter contract a run was bound to.
+
+HIL telemetry-only contracts are a separate, read-only ingestion surface
+intended for real or real-equivalent hardware. *HIL means
+hardware-in-the-loop. In this slice it is telemetry-only and read-only.*
+A `hil_telemetry_contract.v1` advertises `supports_action_dispatch=false`,
+`supports_command_payload=false`, `supports_live_execution=false`,
+`supports_physical_execution=false`, `supports_ros_dispatch=false`,
+`operator_approval_required=true`, and `mode=telemetry_only` at the type
+level. The matching `hil_telemetry_envelope.v1` deliberately has no
+`action` / `command` / `actuator` / `dispatch` field and only carries
+scalar measurements (`float | int | bool | str`); unknown fields are
+rejected by Pydantic `extra="forbid"`. The ingestion function
+`ingest_hil_telemetry_envelope` adds a recursive, case-insensitive
+pre-check that fails closed on any command-like key
+(`action` / `command` / `actuator` / `dispatch` / `ros_topic` /
+`ros2_topic` / `execute` / `execute_now` / `live_execution_allowed` /
+`physical_execution_invoked`) appearing anywhere in the payload — top
+level, nested in `metadata` / `measurements`, or inside a list. The
+boundary is therefore physical, not flag-based: the simulator-adapter
+contract type and the HIL telemetry contract type are distinct, and the
+HIL telemetry path cannot accept an action-like payload by construction.
+
+The HIL evidence slice attaches accepted telemetry as read-only Mission OS
+artifacts. `hil_telemetry_evidence.v1` is built only after
+`ingest_hil_telemetry_envelope(...)` accepts the payload. It snapshots the
+envelope, records contract / envelope refs, measurement keys, freshness seconds,
+stale gate/review findings, and fixed no-action / no-command / no-ROS /
+no-live / no-physical flags. `attach_hil_telemetry_artifacts(...)` can merge
+`hil_telemetry_contract`, `hil_telemetry_envelope`, and
+`hil_telemetry_evidence` into an existing task without changing task status,
+approval state, promotion state, reuse state, UI behavior, ROS dispatch,
+actuator dispatch, or live execution. Command-like or malformed payloads reject
+before any task update. This slice still does not connect to real hardware, ROS,
+or any actuator. The Control UI can display the accepted HIL contract, envelope,
+evidence, freshness, findings, and fixed safety-boundary flags as read-only
+task detail context; it does not add approval, command, dispatch, or execution
+controls.
+
 Promotion packages are the artifact-only bridge from post-mission review to a
 future promotion pipeline. `mission_review.improvement_candidates` can be
 normalized into typed promotion candidates, mapped to required eval suites, and
