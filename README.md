@@ -210,6 +210,11 @@ What exists today:
   Control UI visibility.
 - Simulation-first physical runtime artifacts for validation, telemetry,
   action envelopes, governor decisions, and offline replay plans.
+- HIL telemetry-only evidence attachment for read-only hardware-in-the-loop
+  telemetry, with command-like payload rejection and no action, actuator, ROS,
+  or live-execution path. The Control UI renders accepted HIL telemetry
+  contract, envelope, evidence, freshness, findings, and safety-boundary flags
+  as read-only task detail artifacts.
 
 Near-term work is focused on the promotion loop:
 
@@ -616,6 +621,11 @@ The physical AI slice is simulation-first by design:
   dry-run movement, obstacles, hazards, battery telemetry, safety governor
   blocking, deterministic replay traces, and offline replay plans without
   using external game assets or physical execution.
+- `src/runtime/hil_telemetry_contract.py` and
+  `src/runtime/hil_telemetry_evidence.py` define a hardware-in-the-loop
+  telemetry-only contract plus read-only Mission OS evidence attachment. Valid
+  envelopes can be recorded on task artifacts with freshness and gate/review
+  findings, while command-like payloads are rejected before any task update.
 - `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
 - `physical_ai_validation_status` returns the persisted validation state for a run id, can refresh queued runs from adapter status endpoints, and exposes `mission_contract`, `telemetry_health`, `verifier_result`, `action_envelope`, `governor_decision`, and `replay_plan`
 - `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges and returns the initial governor state that keeps dispatch operator-mediated by default

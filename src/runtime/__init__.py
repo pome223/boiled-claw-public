@@ -139,6 +139,23 @@ from src.runtime.physical_mission_replay import (
     build_simulation_scenario_request,
     build_telemetry_health_snapshot,
 )
+from src.runtime.hil_telemetry_contract import (
+    HIL_TELEMETRY_CONTRACT_SCHEMA_VERSION,
+    HIL_TELEMETRY_ENVELOPE_SCHEMA_VERSION,
+    HilTelemetryContract,
+    HilTelemetryEnvelope,
+    HilTelemetryMode,
+    HilTelemetryRejected,
+    ingest_hil_telemetry_envelope,
+)
+from src.runtime.hil_telemetry_evidence import (
+    HIL_TELEMETRY_EVIDENCE_SCHEMA_VERSION,
+    HilTelemetryEvidence,
+    HilTelemetryEvidenceError,
+    HilTelemetryEvidenceStatus,
+    attach_hil_telemetry_artifacts,
+    build_hil_telemetry_evidence,
+)
 from src.runtime.toy_grid_world import (
     TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION,
     TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION,
@@ -336,6 +353,19 @@ __all__ = [
     "build_simulation_first_replay_artifacts",
     "build_simulation_scenario_request",
     "build_telemetry_health_snapshot",
+    "HIL_TELEMETRY_CONTRACT_SCHEMA_VERSION",
+    "HIL_TELEMETRY_ENVELOPE_SCHEMA_VERSION",
+    "HilTelemetryContract",
+    "HilTelemetryEnvelope",
+    "HilTelemetryMode",
+    "HilTelemetryRejected",
+    "ingest_hil_telemetry_envelope",
+    "HIL_TELEMETRY_EVIDENCE_SCHEMA_VERSION",
+    "HilTelemetryEvidence",
+    "HilTelemetryEvidenceError",
+    "HilTelemetryEvidenceStatus",
+    "attach_hil_telemetry_artifacts",
+    "build_hil_telemetry_evidence",
     "TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION",

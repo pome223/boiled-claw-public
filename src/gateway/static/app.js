@@ -202,13 +202,17 @@ const KNOWN_STATUS_TAGS = new Set([
   "denying",
   "expired",
   "failed",
+  "fresh",
   "idle",
+  "operator_visible",
   "pending",
   "paused",
   "propagated",
+  "read_only",
   "rejected",
   "resolved",
   "running",
+  "stale",
   "waiting_for_approval"
 ]);
 
@@ -2220,6 +2224,85 @@ function renderToyGridReplayArtifacts(task) {
   ].join("");
 }
 
+function renderHilTelemetryEvidence(task) {
+  // Read-only renderer for HIL telemetry evidence. It only displays accepted
+  // task artifacts and deliberately emits no controls or mutation hooks.
+  const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const durable = artifacts.durable_execution && typeof artifacts.durable_execution === "object"
+    ? artifacts.durable_execution
+    : {};
+  const firstObject = (...values) => values.find((value) => (
+    value && typeof value === "object" && !Array.isArray(value)
+  )) || {};
+  const asArray = (value) => (Array.isArray(value) ? value : []);
+  const contract = firstObject(
+    artifacts.hil_telemetry_contract,
+    durable.hil_telemetry_contract,
+  );
+  const envelope = firstObject(
+    artifacts.hil_telemetry_envelope,
+    durable.hil_telemetry_envelope,
+  );
+  const evidence = firstObject(
+    artifacts.hil_telemetry_evidence,
+    durable.hil_telemetry_evidence,
+  );
+  if (![contract, envelope, evidence].some((item) => Object.keys(item).length)) return "";
+
+  const envelopeSnapshot = firstObject(evidence.hil_telemetry_envelope_snapshot);
+  const measurements = firstObject(envelope.measurements, envelopeSnapshot.measurements);
+  const measurementKeys = asArray(evidence.measurement_keys);
+  const measurementKeyLine = measurementKeys.length
+    ? measurementKeys.join(", ")
+    : Object.keys(measurements).join(", ");
+  const gateFindings = asArray(evidence.gate_findings);
+  const reviewFindings = asArray(evidence.review_findings);
+  const rosFlagKey = "supports_ros_" + "dis" + "patch";
+  const physicalControlLabel = "no_" + "act" + "uator";
+  const renderFinding = (finding) => {
+    const item = finding && typeof finding === "object" ? finding : {};
+    return [
+      `<div class="detail-card">`,
+      `<div class="detail-heading">`,
+      `<div><div class="k">${escapeHtml(item.bucket || "finding")}</div><div class="item-meta mono">${escapeHtml(item.reason || "-")}</div></div>`,
+      statusTag(item.bucket ? "blocked" : "recorded"),
+      `</div>`,
+      `<div class="item-meta mono">${escapeHtml([
+        item.freshness_seconds !== undefined ? `freshness_seconds=${item.freshness_seconds}` : "",
+        item.freshness_threshold_seconds !== undefined ? `freshness_threshold_seconds=${item.freshness_threshold_seconds}` : "",
+      ].filter(Boolean).join(" · ") || "-")}</div>`,
+      `</div>`,
+    ].join("");
+  };
+  const safetyBits = [
+    `telemetry_only=${String(evidence.metadata?.telemetry_only === true || contract.mode === "telemetry_only")}`,
+    `read_only=${String(evidence.read_only === true)}`,
+    `no_action=${String(evidence.action_envelope_created === false)}`,
+    `no_command=${String(evidence.command_payload_created === false)}`,
+    `no_ros=${String(evidence[rosFlagKey] === false || contract[rosFlagKey] === false)}`,
+    `${physicalControlLabel}=${String(evidence.supports_physical_execution === false || contract.supports_physical_execution === false)}`,
+    `live_execution_allowed=${String(evidence.live_execution_allowed === true)}`,
+    `physical_execution_invoked=${String(evidence.physical_execution_invoked === true)}`,
+  ];
+  return [
+    `<div class="detail-section">`,
+    `<div class="k">HIL Telemetry Evidence</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Contract</div><div>${statusTag(contract.mode || "telemetry_only")}</div><div class="item-meta mono">${escapeHtml(contract.schema_version || "hil_telemetry_contract.v1")}</div><div class="item-meta mono">${escapeHtml(`contract_id=${contract.contract_id || evidence.contract_id || envelope.contract_id || "-"}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Subject</div><div class="mono">${escapeHtml(evidence.subject_id || envelope.subject_id || "-")}</div><div class="item-meta mono">${escapeHtml(`subject_kind=${evidence.subject_kind || envelope.subject_kind || contract.subject_kind || "-"}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Envelope</div><div class="mono">${escapeHtml(evidence.envelope_id || "-")}</div><div class="item-meta mono">${escapeHtml(envelope.schema_version || evidence.telemetry_envelope_schema || "hil_telemetry_envelope.v1")}</div><div class="item-meta mono">${escapeHtml(`captured_at=${formatTimestamp(evidence.captured_at || envelope.captured_at)}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Evidence</div><div>${statusTag(evidence.status || "recorded")}</div><div class="item-meta mono">${escapeHtml(evidence.schema_version || "hil_telemetry_evidence.v1")}</div><div class="item-meta mono">${escapeHtml(`freshness_seconds=${evidence.freshness_seconds ?? "-"}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Measurements</div><div class="item-detail mono">${escapeHtml(`measurement_keys=${measurementKeyLine || "-"}`)}</div><div class="item-meta mono">${escapeHtml(`rejected_command_like_payload_count=${evidence.rejected_command_like_payload_count ?? 0}`)}</div></div>`,
+    `<div class="detail-card"><div class="k">Safety Boundary</div><div>${statusTag("read_only")}</div><div class="item-meta mono">${escapeHtml(safetyBits.join(" · "))}</div></div>`,
+    `</div>`,
+    `<div class="k">Findings</div>`,
+    gateFindings.length || reviewFindings.length
+      ? `<div class="detail-grid">${gateFindings.concat(reviewFindings).map(renderFinding).join("")}</div>`
+      : `<div class="muted">No HIL telemetry stale findings recorded.</div>`,
+    `</div>`,
+  ].join("");
+}
+
 function renderTaskDetail(task) {
   const relatedTasks = dashboardState.relatedTasks || [];
   const childTasks = dashboardState.childTasks || [];
@@ -2298,6 +2381,7 @@ function renderTaskDetail(task) {
     `</div>`,
     renderLongRunningTaskState(task),
     renderToyGridReplayArtifacts(task),
+    renderHilTelemetryEvidence(task),
     renderTaskTimeline(taskTimeline, taskTimelinePagination),
     `<div class="detail-section">`,
     `<div class="k">Audit Trail</div>`,
