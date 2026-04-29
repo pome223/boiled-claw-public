@@ -12,7 +12,7 @@ boiled-claw は、OpenClaw の control plane / execution plane separation を Py
 - simulator / robotics runtime に伸ばせる physical-ready adapter surface
 - skills / bridges / browser-first tools をまとめる runtime substrate
 
-このドキュメントは現在実装されている構成を中心に説明します。physical AI 方向は forward path であり、現時点でフル robotics stack を提供するものではありません。
+このドキュメントは現在実装されている構成を中心に説明します。physical AI 方向は forward path であり、現時点でフル robotics stack を提供するものではありません。現時点の OSS v1.0 candidate としての境界は [architecture/oss-v1-readiness-boundary.md](architecture/oss-v1-readiness-boundary.md) にまとめています。
 
 ## Next Development Spine
 

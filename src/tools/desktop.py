@@ -146,7 +146,10 @@ def _resolve_dynamic(
     result: Any,
 ) -> str | dict[str, Any] | None:
     if callable(value):
-        return value(result)
+        try:
+            return value(result)
+        except Exception:
+            return None
     return value
 
 

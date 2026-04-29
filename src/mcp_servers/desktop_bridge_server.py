@@ -58,10 +58,24 @@ def create_server(
     )
 
     if is_loopback_host(host):
+        # Dockerized gateway clients reach the host-bound bridge via
+        # host.docker.internal while still remaining local to the machine.
+        allowed_loopback_hosts = [
+            "127.0.0.1:*",
+            "localhost:*",
+            "[::1]:*",
+            "host.docker.internal:*",
+        ]
+        allowed_loopback_origins = [
+            "http://127.0.0.1:*",
+            "http://localhost:*",
+            "http://[::1]:*",
+            "http://host.docker.internal:*",
+        ]
         transport_security = TransportSecuritySettings(
             enable_dns_rebinding_protection=True,
-            allowed_hosts=["127.0.0.1:*", "localhost:*", "[::1]:*"],
-            allowed_origins=["http://127.0.0.1:*", "http://localhost:*", "http://[::1]:*"],
+            allowed_hosts=allowed_loopback_hosts,
+            allowed_origins=allowed_loopback_origins,
         )
     else:
         transport_security = TransportSecuritySettings(

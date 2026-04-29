@@ -6,6 +6,7 @@ import pytest
 
 from src.desktop import (
     DesktopAxFindRequest,
+    DesktopAxSnapshotRequest,
     DesktopClickRequest,
     DesktopClearStopRequest,
     DesktopEmergencyStopRequest,
@@ -236,6 +237,36 @@ async def test_fake_desktop_client_waits_and_scrolls_when_capabilities_exist():
     assert waited_element.matched is True
     assert waited_element.target is not None
     assert scrolled.ok is True
+
+
+def test_desktop_models_coerce_integer_window_ids():
+    selector = DesktopElementSelector(window_id=3764)
+    wait_request = DesktopWaitWindowRequest(
+        request_id="req-wait-window",
+        session_id="sess",
+        user_id="user",
+        agent_name="pytest",
+        window_id=3764,
+    )
+    snapshot_request = DesktopAxSnapshotRequest(
+        request_id="req-ax",
+        session_id="sess",
+        user_id="user",
+        agent_name="pytest",
+        window_id=3764,
+    )
+    focus_request = DesktopFocusWindowRequest(
+        request_id="req-focus",
+        session_id="sess",
+        user_id="user",
+        agent_name="pytest",
+        window_id=3764,
+    )
+
+    assert selector.window_id == "3764"
+    assert wait_request.window_id == "3764"
+    assert snapshot_request.window_id == "3764"
+    assert focus_request.window_id == "3764"
 
 
 @pytest.mark.asyncio

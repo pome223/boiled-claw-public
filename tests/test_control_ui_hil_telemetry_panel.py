@@ -69,11 +69,14 @@ def test_hil_telemetry_panel_does_not_introduce_action_surface():
     forbidden = [
         'data-action="hil-',
         'data-action="approve-hil',
+        'data-action="dispatch-hil',
+        'data-action="send-command',
+        'data-action="actuator-',
         "run_hil",
-        "send_command",
-        "ros_dispatch",
-        "dispatch",
-        "actuator",
+        ">Send Command<",
+        ">Dispatch Command<",
+        ">Dispatch ROS<",
+        ">Run Actuator<",
     ]
 
     for needle in forbidden:

@@ -175,7 +175,76 @@ GOOGLE_API_KEY= python -m src.main 2>&1
 - `GOOGLE_API_KEY is not set` のエラーメッセージが表示されること（トレースバックではないこと）
 - chat がデフォルトで起動しようとしていることを確認
 
-### 7. AI CLI スキルの動作確認
+### 7. 新機能ユニットテスト
+
+最近追加された機能のユニットテストをまとめて実行する。
+gateway 不要・Docker 不要で、ホスト上の `.venv` だけで動く。
+
+#### 7-1. Computer use ツール（observe / click / fill / evaluate / trajectory）
+
+```bash
+.venv/bin/pytest tests/test_computer_tools.py -v 2>&1
+```
+
+- 全テストが PASSED であること（16 tests 想定）
+- 主要パス: surface 優先順位、recovery ループ、re-observe、trajectory 記録
+
+`tests/test_computer_evals.py` が存在する場合はそちらも実行する:
+
+```bash
+.venv/bin/pytest tests/test_computer_evals.py -v 2>&1
+```
+
+- partial pass / skipped evaluation / trajectory ordering がカバーされていること
+
+#### 7-2. Physical AI ツール（simulation / ROS2 action / dispatch）
+
+```bash
+.venv/bin/pytest tests/test_physical_ai_tools.py -v 2>&1
+```
+
+- 全テストが PASSED であること（6 tests 想定）
+- 主要パス: validated run 記録、"ready" status 拒否、unvalidated dispatch 拒否、store reload 後の dispatch 継続
+
+#### 7-3. Self-improvement ツール（canary / benchmark / package / cleanup）
+
+```bash
+.venv/bin/pytest tests/test_self_improvement_tools.py -v 2>&1
+```
+
+- 全テストが PASSED であること（5 tests 想定）
+- 主要パス: worktree 作成、benchmark 失敗報告、キャッシュ再利用、approved memory 記録、cleanup
+
+#### 7-4. Skills runtime（skill loading / execute）
+
+```bash
+.venv/bin/pytest tests/test_skills_runtime.py -v 2>&1
+```
+
+- 全テストが PASSED であること（2 tests 想定）
+- computer-use スキルのロードと instruction 取得がカバーされていること
+
+#### 7-5. Agent ツール登録確認
+
+```bash
+.venv/bin/pytest tests/test_agent.py -v 2>&1
+```
+
+- root_agent に以下のツールが全て登録されていること:
+  - `computer_observe`, `computer_evaluate`, `computer_click`, `computer_fill`, `computer_trajectory_recent`
+  - `physical_ai_submit_simulation`, `physical_ai_build_ros2_action`, `physical_ai_dispatch_ros2_action`
+  - `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`, `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
+
+#### 7-6. 全ユニットテスト一括実行（e2e 以外）
+
+```bash
+.venv/bin/pytest -q -m 'not e2e' 2>&1
+```
+
+- 全テストが PASSED であること
+- FAILED / ERROR があれば内容を報告する
+
+### 8. AI CLI スキルの動作確認
 
 外部 AI CLI 連携スキルのロードとユーティリティの動作を確認する。
 
@@ -205,7 +274,7 @@ asyncio.run(main())
 - 終了コード 0
 - 6 スキル全てが登録されていること: `coding-agent`, `e2e-test`, `code-review`, `multi-llm-judge`, `auto-fix`, `computer-use`
 
-#### 7-2. CLI 検出ユーティリティ
+#### 8-2. CLI 検出ユーティリティ
 
 ```bash
 python3 skills/_utils/run_ai_cli.py --detect 2>&1
@@ -214,7 +283,7 @@ python3 skills/_utils/run_ai_cli.py --detect 2>&1
 - 終了コード 0
 - 少なくとも 1 つの CLI が見つかること（環境依存; フル構成なら claude, codex, gemini の 3 つ）
 
-#### 7-3. 基本 CLI 呼び出し（利用可能な CLI ごと）
+#### 8-3. 基本 CLI 呼び出し（利用可能な CLI ごと）
 
 検出された各 CLI に対して、簡単なプロンプトで stdin 経由の応答を確認する:
 
@@ -227,7 +296,7 @@ python3 skills/_utils/run_ai_cli.py --cli gemini --prompt "Say only: ok" --timeo
 - 利用可能な CLI が終了コード 0 かつ stdout が空でないこと
 - 利用不可の CLI はスキップ（失敗ではない）
 
-#### 7-4. argv 構築ユニットテスト（CLI 不要）
+#### 8-4. argv 構築ユニットテスト（CLI 不要）
 
 外部 CLI を実際に呼ばず、`run_ai_cli.py` の引数組み立てだけを検証する。
 ネットワークや CLI の状態に依存しないため false negative が起きない:
@@ -265,7 +334,7 @@ print('PASS: all argv construction checks passed')
 - 終了コード 0
 - 全 5 パターンの assertion が通ること
 
-### 8. 結果サマリを出力
+### 9. 結果サマリを出力
 
 以下の形式で報告すること:
 
@@ -288,7 +357,14 @@ print('PASS: all argv construction checks passed')
 | CLI dry-run | OK / NG |
 | CLI status コマンド | OK / NG |
 | CLI デフォルト動作 | OK / NG |
-| AI スキルロード (5件) | OK / NG |
+| Computer use ツール (N tests) | PASS / FAIL |
+| Computer use evals (N tests) | PASS / FAIL / SKIP |
+| Physical AI ツール (N tests) | PASS / FAIL |
+| Self-improvement ツール (N tests) | PASS / FAIL |
+| Skills runtime (N tests) | PASS / FAIL |
+| Agent ツール登録 (N tests) | PASS / FAIL |
+| 全ユニットテスト (non-e2e) | PASS / FAIL |
+| AI スキルロード (6件) | OK / NG |
 | CLI 検出ユーティリティ | OK / NG (N件検出) |
 | Claude CLI 基本応答 | OK / NG / SKIP |
 | Codex CLI 基本応答 | OK / NG / SKIP |
@@ -297,6 +373,7 @@ print('PASS: all argv construction checks passed')
 
 （失敗がある場合は詳細と対処法を記載）
 （CLI 基本応答の SKIP は当該 CLI が未インストールの場合で、失敗とはみなさない）
+（Computer use evals の SKIP は test_computer_evals.py が未マージの場合で、失敗とはみなさない）
 ```
 
 すべて OK の場合のみ「push OK」と報告すること。

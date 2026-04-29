@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from types import SimpleNamespace
 import time
 
@@ -15,6 +16,7 @@ from src.desktop import (
 )
 from src.security.policy import SecurityPolicy
 from src.security.tool_policy import ToolPolicyEngine
+from src.runtime.state_keys import StateKeys
 from src.tools import browser as browser_module
 from src.tools import current_tab as current_tab_module
 from src.tools import desktop as desktop_module
@@ -1009,6 +1011,7 @@ async def test_current_tab_navigate_uses_host_bridge_when_enabled(monkeypatch):
 
     result = await current_tab_module.current_tab_navigate(
         "https://www.google.com/search?q=tokyo+pollen",
+        new_tab=True,
         tool_context=tool_context,
     )
 
@@ -1017,6 +1020,235 @@ async def test_current_tab_navigate_uses_host_bridge_when_enabled(monkeypatch):
     assert seen["approval_token"]
     assert emitted[0][1]["tool_name"] == "host.current_tab.navigate"
     assert emitted[1][1]["tool_name"] == "host.current_tab.navigate"
+
+
+@pytest.mark.asyncio
+async def test_current_tab_navigate_normalizes_bare_sheets_new(monkeypatch):
+    engine = ToolPolicyEngine()
+    seen = {}
+
+    async def notifier(payload):
+        engine.resolve_approval(payload["request_id"], True, "approved")
+
+    class FakeClient:
+        async def current_tab_navigate(self, request):
+            seen["url"] = request.url
+            from src.bridges.host_bridge_schema import HostCurrentTabNavigateResult
+
+            return HostCurrentTabNavigateResult(
+                ok=True,
+                tab_id=21,
+                window_id=4,
+                url=request.url,
+                title="Untitled spreadsheet - Google Sheets",
+            )
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(current_tab_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        current_tab_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(current_tab_module, "get_host_bridge_client", lambda: FakeClient())
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await current_tab_module.current_tab_navigate(
+        "sheets.new",
+        new_tab=True,
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["url"] == "https://sheets.new"
+
+
+@pytest.mark.asyncio
+async def test_current_tab_navigate_skips_extra_approval_for_approved_control_loop(
+    monkeypatch,
+):
+    engine = ToolPolicyEngine()
+    seen = {"notified": False}
+
+    async def notifier(_payload):
+        seen["notified"] = True
+
+    class FakeClient:
+        async def current_tab_navigate(self, request):
+            seen["approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostCurrentTabNavigateResult
+
+            return HostCurrentTabNavigateResult(
+                ok=True,
+                tab_id=31,
+                window_id=8,
+                url=request.url,
+                title="Sheet",
+            )
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(current_tab_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        current_tab_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(current_tab_module, "get_host_bridge_client", lambda: FakeClient())
+
+    tool_context = SimpleNamespace(
+        agent_name="executor",
+        session=SimpleNamespace(id="session-1"),
+        state={
+            StateKeys.APPROVAL_STATUS: "human_approved",
+            StateKeys.PLAN_APPROVED: {"required_capabilities": [{"name": "current_tab.navigate"}]},
+        },
+    )
+
+    result = await current_tab_module.current_tab_navigate(
+        "https://docs.google.com/spreadsheets/create",
+        new_tab=True,
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["approval_token"] is None
+    assert seen["notified"] is False
+
+
+@pytest.mark.asyncio
+async def test_current_tab_extract_text_skips_extra_approval_for_mapping_state(
+    monkeypatch,
+):
+    engine = ToolPolicyEngine()
+    seen = {"notified": False}
+
+    async def notifier(_payload):
+        seen["notified"] = True
+
+    class FakeState(Mapping):
+        def __init__(self, payload):
+            self._payload = dict(payload)
+
+        def __getitem__(self, key):
+            return self._payload[key]
+
+        def __iter__(self):
+            return iter(self._payload)
+
+        def __len__(self):
+            return len(self._payload)
+
+        def get(self, key, default=None):
+            return self._payload.get(key, default)
+
+    class FakeClient:
+        async def current_tab_extract_text(self, request):
+            seen["approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostCurrentTabExtractTextResult
+
+            return HostCurrentTabExtractTextResult(
+                ok=True,
+                selector=request.selector or "body",
+                text="hello",
+                length=5,
+            )
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(current_tab_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        current_tab_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(current_tab_module, "get_host_bridge_client", lambda: FakeClient())
+
+    tool_context = SimpleNamespace(
+        agent_name="executor",
+        session=SimpleNamespace(id="session-1"),
+        state=FakeState(
+            {
+                StateKeys.APPROVAL_STATUS: "human_approved",
+                StateKeys.PLAN_APPROVED: {
+                    "required_capabilities": [{"name": "current_tab.navigate"}]
+                },
+            }
+        ),
+    )
+
+    result = await current_tab_module.current_tab_extract_text(
+        selector="body",
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["approval_token"] is None
+    assert seen["notified"] is False
+
+
+@pytest.mark.asyncio
+async def test_current_tab_navigate_skips_extra_approval_for_executor_with_get_only_state(
+    monkeypatch,
+):
+    engine = ToolPolicyEngine()
+    seen = {"notified": False}
+
+    async def notifier(_payload):
+        seen["notified"] = True
+
+    class FakeState:
+        def __init__(self, payload):
+            self._payload = dict(payload)
+
+        def get(self, key, default=None):
+            return self._payload.get(key, default)
+
+    class FakeClient:
+        async def current_tab_navigate(self, request):
+            seen["approval_token"] = request.approval_token
+            from src.bridges.host_bridge_schema import HostCurrentTabNavigateResult
+
+            return HostCurrentTabNavigateResult(
+                ok=True,
+                tab_id=32,
+                window_id=9,
+                url=request.url,
+                title="Sheet",
+            )
+
+    engine.set_notifier(notifier)
+    monkeypatch.setattr(current_tab_module, "get_tool_policy_engine", lambda: engine)
+    monkeypatch.setattr(
+        current_tab_module,
+        "get_settings",
+        lambda: SimpleNamespace(host_bridge_enabled=True),
+    )
+    monkeypatch.setattr(current_tab_module, "get_host_bridge_client", lambda: FakeClient())
+
+    tool_context = SimpleNamespace(
+        agent_name="executor",
+        session=SimpleNamespace(id="session-1"),
+        state=FakeState(
+            {
+                StateKeys.PLAN_APPROVED: {
+                    "required_capabilities": [{"name": "current_tab.navigate"}]
+                },
+            }
+        ),
+    )
+
+    result = await current_tab_module.current_tab_navigate(
+        "https://docs.google.com/spreadsheets/create",
+        new_tab=True,
+        tool_context=tool_context,
+    )
+
+    assert result["success"] is True
+    assert seen["approval_token"] is None
+    assert seen["notified"] is False
 
 
 @pytest.mark.asyncio
@@ -1061,6 +1293,23 @@ async def test_desktop_view_windows_uses_desktop_client(monkeypatch):
     assert result["windows"][0]["app_name"] == "Safari"
     assert emitted[0][1]["tool_name"] == "desktop.view.windows"
     assert emitted[0][1]["metadata"]["executor"] == "local_desktop"
+
+
+@pytest.mark.asyncio
+async def test_desktop_view_frontmost_app_handles_missing_result(monkeypatch):
+    async def _execute_desktop_call(**kwargs):
+        return None, {"error": "desktop query failed"}
+
+    monkeypatch.setattr(desktop_module, "execute_desktop_call", _execute_desktop_call)
+
+    tool_context = SimpleNamespace(
+        agent_name="boiled_claw",
+        session=SimpleNamespace(id="session-1"),
+    )
+
+    result = await desktop_module.desktop_view_frontmost_app(tool_context=tool_context)
+
+    assert result["error"] == "desktop query failed"
 
 
 @pytest.mark.asyncio

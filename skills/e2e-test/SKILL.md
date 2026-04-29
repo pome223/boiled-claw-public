@@ -111,10 +111,76 @@ print('PASS: all argv construction checks passed')
 - Exit code `0`
 - All 5 assertions pass
 
+## Feature Unit Tests (no gateway required)
+
+These tests validate recently added tool modules. They run inside the Docker
+dev container or on the host `.venv` — no running gateway needed.
+
+### Computer Use Tools
+
+```bash
+pytest tests/test_computer_tools.py -v
+```
+
+- All tests pass (16+ tests expected)
+- Covers: surface priority, recovery loops, re-observe, trajectory capture,
+  evaluate checks, schema validation
+
+If `tests/test_computer_evals.py` exists:
+
+```bash
+pytest tests/test_computer_evals.py -v
+```
+
+- Covers: partial pass, skipped evaluation, trajectory ordering/filtering
+
+### Physical AI Tools
+
+```bash
+pytest tests/test_physical_ai_tools.py -v
+```
+
+- All tests pass (6+ tests expected)
+- Covers: validated run recording, "ready" status rejection, unvalidated
+  dispatch rejection, validation store persistence after reload
+
+### Self-Improvement Tools
+
+```bash
+pytest tests/test_self_improvement_tools.py -v
+```
+
+- All tests pass (5+ tests expected)
+- Covers: worktree creation, benchmark failure reporting, benchmark cache
+  reuse, approved memory recording, canary cleanup
+
+### Agent Tool Registration
+
+```bash
+pytest tests/test_agent.py -v
+```
+
+- root_agent registers all expected tools:
+  - `computer_observe`, `computer_evaluate`, `computer_click`, `computer_fill`,
+    `computer_trajectory_recent`
+  - `physical_ai_submit_simulation`, `physical_ai_build_ros2_action`,
+    `physical_ai_dispatch_ros2_action`
+  - `self_improvement_prepare_canary`, `self_improvement_run_benchmarks`,
+    `self_improvement_package_candidate`, `self_improvement_cleanup_canary`
+
+### Full Non-E2E Suite
+
+```bash
+pytest -q -m 'not e2e'
+```
+
+- All tests pass with exit code `0`
+
 ## Pass Criteria
 
 - `pytest` exits with code `0`
 - No test is skipped because the gateway is unreachable
 - If the quick smoke check is used, `/health` returns HTTP `200`
-- All 5 skills load via `ensure_skills_loaded()`
+- All 6 skills load via `ensure_skills_loaded()`
 - Utility argv construction test passes (no external CLI needed)
+- All feature unit tests (computer, physical AI, self-improvement, agent) pass

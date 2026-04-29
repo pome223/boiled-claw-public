@@ -1,6 +1,5 @@
 const DEFAULT_RELAY_URL = "ws://127.0.0.1:8768";
 const DEFAULT_RELAY_TOKEN = "";
-const DEFAULT_CONTROL_UI_ORIGIN = "";
 const RECONNECT_DELAY_MS = 2000;
 const KEEPALIVE_INTERVAL_MS = 20000;
 
@@ -9,20 +8,17 @@ let reconnectTimer = null;
 let keepaliveTimer = null;
 let relayConfig = {
   relayUrl: DEFAULT_RELAY_URL,
-  relayToken: DEFAULT_RELAY_TOKEN,
-  controlUiOrigin: DEFAULT_CONTROL_UI_ORIGIN
+  relayToken: DEFAULT_RELAY_TOKEN
 };
 
 async function loadRelayConfig() {
   const stored = await chrome.storage.local.get({
     relayUrl: DEFAULT_RELAY_URL,
-    relayToken: DEFAULT_RELAY_TOKEN,
-    controlUiOrigin: DEFAULT_CONTROL_UI_ORIGIN
+    relayToken: DEFAULT_RELAY_TOKEN
   });
   relayConfig = {
     relayUrl: String(stored.relayUrl || DEFAULT_RELAY_URL),
-    relayToken: String(stored.relayToken || DEFAULT_RELAY_TOKEN),
-    controlUiOrigin: String(stored.controlUiOrigin || DEFAULT_CONTROL_UI_ORIGIN).trim()
+    relayToken: String(stored.relayToken || DEFAULT_RELAY_TOKEN)
   };
   return relayConfig;
 }
@@ -68,63 +64,15 @@ async function getTargetTab(targetTabId) {
   return chrome.tabs.get(targetTabId);
 }
 
-function normalizeConfiguredOrigin(origin) {
-  const value = String(origin || "").trim();
-  if (!value) {
-    return "";
-  }
-  try {
-    const parsed = new URL(value);
-    return `${parsed.protocol}//${parsed.host}`;
-  } catch (_error) {
-    return value.replace(/\/+$/, "");
-  }
-}
-
-function isLoopbackHost(hostname) {
-  const lowered = String(hostname || "").toLowerCase();
-  return lowered === "localhost" || lowered === "127.0.0.1" || lowered === "::1" || lowered === "[::1]";
-}
-
-function isLoopbackChatUrl(url) {
-  try {
-    const parsed = new URL(String(url || ""));
-    return isLoopbackHost(parsed.hostname) && parsed.pathname.replace(/\/+$/, "") === "/chat";
-  } catch (_error) {
-    return false;
-  }
-}
-
-function matchesConfiguredControlUiOrigin(url, configuredOrigin) {
-  const normalizedOrigin = normalizeConfiguredOrigin(configuredOrigin);
-  if (!normalizedOrigin) {
-    return false;
-  }
-  try {
-    const parsed = new URL(String(url || ""));
-    const candidateOrigin = `${parsed.protocol}//${parsed.host}`;
-    return (
-      candidateOrigin === normalizedOrigin &&
-      parsed.pathname.replace(/\/+$/, "") === "/chat"
-    );
-  } catch (_error) {
-    return false;
-  }
-}
-
 function isControlUiTab(tab) {
   const url = String(tab?.url || "").toLowerCase();
   const title = String(tab?.title || "").toLowerCase();
-  return (
-    matchesConfiguredControlUiOrigin(url, relayConfig.controlUiOrigin) ||
-    isLoopbackChatUrl(url) ||
-    title.includes("boiled-claw control ui")
-  );
+  return url.includes("localhost:18789/chat") || title.includes("boiled-claw control ui");
 }
 
 function isExternalNavigationTarget(url) {
-  const value = String(url || "");
-  return Boolean(value) && !isControlUiTab({ url: value, title: "" });
+  const lowered = String(url || "").toLowerCase();
+  return !!lowered && !lowered.includes("localhost:18789/chat");
 }
 
 function waitForTabComplete(tabId, timeoutMs) {
@@ -268,19 +216,76 @@ async function handleRequest(message) {
     };
   }
 
+  if (action === "list_tabs") {
+    // Read-only tab enumeration. Unlike activate_tab / navigate, this has no
+    // side effects on focus or window state — used by the verification path to
+    // discover candidate destination tabs (e.g. the Google Sheets tab we
+    // opened earlier) without disturbing the currently-focused Control UI tab.
+    const allTabs = await chrome.tabs.query({});
+    return {
+      tabs: allTabs.map((t) => ({
+        tab_id: t.id,
+        window_id: t.windowId,
+        url: t.url || "",
+        title: t.title || "",
+        active: !!t.active,
+        index: typeof t.index === "number" ? t.index : null
+      }))
+    };
+  }
+
   if (action === "activate_tab") {
     if (!payload.tab_id) {
       throw new Error("tab_id is required");
     }
+    // Pre-check: verify the tab still exists and surface a descriptive error
+    // (with known-tab context) when it doesn't. Chrome's `tabs.update` on a
+    // missing id rejects with just "No tab with id: N" — useless for debugging
+    // when the underlying cause is e.g. a cross-window id mismatch or a tab
+    // closed between navigate and activate.
+    let existing;
+    try {
+      existing = await chrome.tabs.get(payload.tab_id);
+    } catch (getError) {
+      let knownTabsSummary = "";
+      try {
+        const allTabs = await chrome.tabs.query({});
+        knownTabsSummary = allTabs
+          .map((t) => `${t.id}@w${t.windowId}:${(t.url || t.title || "").slice(0, 60)}`)
+          .join(" | ");
+      } catch (_queryError) {
+        knownTabsSummary = "<chrome.tabs.query failed>";
+      }
+      throw new Error(
+        `activate_tab: target tab_id=${payload.tab_id} not found ` +
+        `(${getError instanceof Error ? getError.message : String(getError)}). ` +
+        `Known tabs: ${knownTabsSummary}`
+      );
+    }
     const updated = await chrome.tabs.update(payload.tab_id, { active: true });
-    if (updated.windowId) {
-      await chrome.windows.update(updated.windowId, { focused: true });
+    const effective = updated || existing;
+    if (effective && effective.windowId) {
+      try {
+        await chrome.windows.update(effective.windowId, { focused: true });
+      } catch (focusError) {
+        // Don't fail the whole activation just because the window focus
+        // request failed — surface it via the return so the caller can see
+        // focus_succeeded is not implicit.
+        return {
+          tab_id: effective.id,
+          window_id: effective.windowId,
+          url: effective.url || "",
+          title: effective.title || "",
+          window_focus_error:
+            focusError instanceof Error ? focusError.message : String(focusError)
+        };
+      }
     }
     return {
-      tab_id: updated.id,
-      window_id: updated.windowId,
-      url: updated.url || "",
-      title: updated.title || ""
+      tab_id: effective ? effective.id : payload.tab_id,
+      window_id: effective ? effective.windowId : null,
+      url: effective && effective.url ? effective.url : "",
+      title: effective && effective.title ? effective.title : ""
     };
   }
 
@@ -404,7 +409,7 @@ chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== "local") {
     return;
   }
-  if (!changes.relayUrl && !changes.relayToken && !changes.controlUiOrigin) {
+  if (!changes.relayUrl && !changes.relayToken) {
     return;
   }
   if (socket) {

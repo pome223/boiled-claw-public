@@ -1185,3 +1185,63 @@ textarea {
 }
 .text-danger { color: var(--err); }
 .text-success { color: var(--ok); }
+
+/* Autonomy artifact panels (read-only display of autonomy_* artifacts) */
+.autonomy-section {
+  border-left: 3px solid var(--blue);
+}
+.autonomy-reason-list {
+  margin: 4px 0 0 16px;
+  padding: 0;
+  font-size: 0.78rem;
+}
+.autonomy-reason {
+  list-style: disc;
+  margin: 2px 0;
+}
+.autonomy-reason-blocked {
+  color: var(--err);
+}
+.autonomy-reason-warning {
+  color: var(--warn);
+}
+.autonomy-safety-badges {
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.tag.autonomy-safety-ok {
+  border-color: rgba(53, 207, 154, 0.5);
+  color: var(--ok);
+  background: rgba(53, 207, 154, 0.12);
+}
+.tag.autonomy-safety-warn {
+  border-color: rgba(255, 207, 93, 0.5);
+  color: var(--warn);
+  background: rgba(255, 207, 93, 0.12);
+}
+.autonomy-candidate {
+  font-size: 0.78rem;
+  margin: 2px 0;
+}
+.autonomy-metric-deltas-wrapper {
+  margin-top: 8px;
+  overflow-x: auto;
+}
+.autonomy-metric-deltas {
+  font-size: 0.78rem;
+}
+.autonomy-metric-severity-blocking td {
+  border-left: 3px solid var(--err);
+}
+.autonomy-metric-severity-warning td {
+  border-left: 3px solid var(--warn);
+}
+.autonomy-metric-severity-info td {
+  border-left: 3px solid transparent;
+}
+.autonomy-hil-refs-card .autonomy-reason-list {
+  font-size: 0.78rem;
+}
+.hil-telemetry-review {
+  border-left: 3px solid var(--blue);
+}

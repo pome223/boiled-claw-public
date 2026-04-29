@@ -69,6 +69,15 @@ class TestDesktopBridgeTools:
         assert mcp.settings.host == "0.0.0.0"
         assert mcp.settings.transport_security.enable_dns_rebinding_protection is False
 
+    def test_create_server_allows_host_docker_internal_for_loopback_sse(self):
+        from src.mcp_servers.desktop_bridge_server import create_server
+
+        mcp = create_server(host="127.0.0.1", desktop_client=FakeDesktopClient())
+        security = mcp.settings.transport_security
+        assert security.enable_dns_rebinding_protection is True
+        assert "host.docker.internal:*" in security.allowed_hosts
+        assert "http://host.docker.internal:*" in security.allowed_origins
+
     @pytest.mark.asyncio
     async def test_capabilities_list(self, mcp):
         result = await mcp.call_tool("capabilities.list", {})

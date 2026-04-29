@@ -52,17 +52,25 @@ def build_websocket_router(server: "GatewayServer") -> APIRouter:
         session_id = session.id
 
         await server.manager.connect(websocket, session_id, user_id)
-        server.audit_logger.log(
-            event_type=AuditEventType.SESSION_START,
-            user_id=user_id,
-            session_id=session_id,
-            action="connect",
-            result="success",
-        )
 
         try:
+            # ``connected`` MUST be the first event a client receives on the
+            # WS so the typed protocol handshake is deterministic. Audit
+            # logging is intentionally deferred until after ``connected`` has
+            # been awaited because ``audit_logger.log`` schedules the
+            # ``audit.append`` notifier via ``loop.create_task``; if logged
+            # first, that task would race ahead of the explicit ``send_json``
+            # below and the client would observe ``audit.append`` before
+            # ``connected``. See issue #181.
             await server.manager.send_json(session_id, ev_connected(session_id, user_id))
             await server.manager.flush_pending(session_id)
+            server.audit_logger.log(
+                event_type=AuditEventType.SESSION_START,
+                user_id=user_id,
+                session_id=session_id,
+                action="connect",
+                result="success",
+            )
             asyncio.create_task(
                 get_scheduler().fire_system_event(
                     "connect",
