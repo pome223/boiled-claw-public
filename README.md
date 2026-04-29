@@ -215,18 +215,112 @@ What exists today:
   or live-execution path. The Control UI renders accepted HIL telemetry
   contract, envelope, evidence, freshness, findings, and safety-boundary flags
   as read-only task detail artifacts.
+- HIL telemetry review and mock-source fixtures that feed the same rule-based
+  autonomy gates without connecting to real hardware, ROS, MAVLink, PX4, or any
+  command channel.
+- Limited live physical action gate design artifacts that collect autonomy
+  gate refs, HIL telemetry review refs, emergency-stop evidence, rollback
+  plans, proposal-category action allowlists, responsibility acknowledgements,
+  audit refs, and an operator-review package while still keeping stronger
+  execution disallowed. The Control UI renders this gate and approval package
+  as read-only task detail artifacts.
+- Limited live action rehearsal artifacts that assemble the final dry-run
+  evidence package before any future operator-reviewed limited action can be
+  considered. Rehearsal readiness is still not dispatch or approval, and the
+  Control UI renders the package read-only.
+- 10th-stage readiness checks that read the rehearsal package and make the
+  remaining organization, hardware-owner, certified/autopilot-controller, and
+  emergency-stop-process preconditions explicit. A complete check can reach
+  `ready_for_organization_review`, while live action remains blocked. The
+  Control UI renders the checklist read-only.
 
-Near-term work is focused on the promotion loop:
+Near-term work is focused on documenting the current safety boundary and then
+designing stronger execution gates:
 
-- Aggregate promotion packages across canary benchmark suites.
-- Keep reuse plans operator-visible and plan-only until policy checks are mature
-  enough for live application.
-- Keep physical work simulation-first until replay and eval gates are mature.
+- Keep reuse plans, autonomy gates, and HIL telemetry reviews operator-visible
+  and evidence-backed.
+- Keep physical work simulation-first or telemetry-only until replay, eval,
+  review, and operator approval gates are mature.
+- Keep the limited live physical action gate as a schema / policy boundary
+  until emergency-stop, rollback, allowlist, audit, and responsibility evidence
+  are mature. It does not add dispatch or actuator implementation.
 
 See [architecture/README.md](architecture/README.md) for the short system
 overview and
 [architecture/trajectory-native-self-improving-runtime.md](architecture/trajectory-native-self-improving-runtime.md)
-for the deeper design.
+for the deeper design. The current release boundary is summarized in
+[architecture/oss-v1-readiness-boundary.md](architecture/oss-v1-readiness-boundary.md).
+
+## OSS v1.0 Candidate Boundary
+
+boiled-claw is now best read as a **mission-level autonomy runtime**, not a
+low-level controller. It does not replace browsers, operating systems, robot
+middleware, autopilots, or embedded controllers. It provides the mission
+contract, evidence, telemetry, verifier, replay, eval, review, gate, and
+operator-approval layer above those execution surfaces.
+
+This is a readiness boundary, not a final release claim: it demonstrates
+reproducible, read-only, evidence-backed artifact chains for evaluation-gated
+autonomy and telemetry-only HIL, not production physical autonomy or certified
+live robot control.
+
+For the full boundary note, see
+[architecture/oss-v1-readiness-boundary.md](architecture/oss-v1-readiness-boundary.md).
+
+Evaluation-gated autonomy has a closed toy-grid path:
+
+```text
+autonomy_plan.v1
+  -> autonomous_episode.v1
+  -> toy_grid_world_replay_trace.v1
+  -> mission eval suites
+  -> autonomy_scorecard.v1
+  -> autonomy_episode_review.v1
+  -> autonomy_gate_result.v1
+  -> autonomy_gate_comparison_result.v1
+  -> read-only Control UI
+```
+
+Telemetry-only HIL has a closed read-only path:
+
+```text
+hil_telemetry_contract.v1
+  -> hil_telemetry_envelope.v1
+  -> ingestion / command-like rejection
+  -> hil_telemetry_evidence.v1
+  -> task.artifacts
+  -> hil_telemetry_review.v1
+  -> autonomy_gate_result.v1
+  -> read-only Control UI
+```
+
+An OSS v1.0 candidate means:
+
+- Browser-first Mission OS is operational through mission contracts, durable
+  execution, recovery, review, eval, promotion packages, approved artifacts,
+  reuse plans, and Control UI visibility.
+- Toy-grid evaluation-gated autonomy is closed through plan-only planning,
+  dry-run episodes, replay traces, safety evals, scorecards, reviews, gates,
+  comparisons, and read-only UI.
+- Telemetry-only HIL is read-only, evidence-backed, review/gate-visible,
+  mock-source testable, and UI-visible.
+- Limited live physical action readiness is design-only: a complete
+  `limited_live_action_gate.v1` can become `operator_review_ready`, but
+  `stronger_execution_allowed`, `live_execution_allowed`, and
+  `physical_execution_invoked` remain false. The action allowlist describes
+  proposal categories only; it does not permit dispatch or actuator execution.
+- `limited_live_action_rehearsal.v1` can become
+  `ready_for_operator_review` only when the gate, approval package, HIL review,
+  emergency-stop evidence, rollback plan, responsibility acknowledgement, and
+  audit refs are present. It remains dry-run/evidence-only.
+- `tenth_stage_readiness_check.v1` can become
+  `ready_for_organization_review` only when the rehearsal package and external
+  organization / hardware-owner / certified-or-autopilot-controller /
+  emergency-stop-process refs are present. It still records
+  `live_action_status=blocked_for_live_action`.
+- No live robot control, actuator execution, ROS/MAVLink dispatch, autopilot
+  replacement, LLM judge in the gate path, or approval-free stronger execution
+  is provided by this boundary.
 
 ## Differentiating Features
 

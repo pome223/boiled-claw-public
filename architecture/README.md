@@ -75,6 +75,69 @@ flowchart TD
     M --> R
 ```
 
+## OSS v1.0 Candidate Boundary
+
+boiled-claw's current physical/autonomy posture is evaluation-gated and
+mission-level. The runtime is not a low-level controller, robot middleware,
+autopilot, operating system, or browser replacement. It is the policy-bounded
+control plane above heterogeneous execution surfaces: browser, desktop,
+simulator, and telemetry-only HIL.
+
+For the milestone-level summary, read
+[oss-v1-readiness-boundary.md](oss-v1-readiness-boundary.md).
+
+Two paths are now closed enough to describe as an OSS v1.0 candidate boundary:
+
+This is a readiness boundary rather than a final release claim. It means the
+reference architecture can reproduce and inspect evaluation-gated autonomy and
+telemetry-only HIL as artifact chains; it does not claim production physical
+autonomy or certified live robot control.
+
+```text
+toy-grid autonomy:
+  autonomy_plan.v1
+    -> autonomous_episode.v1
+    -> toy_grid_world_replay_trace.v1
+    -> mission eval suites
+    -> autonomy_scorecard.v1
+    -> autonomy_episode_review.v1
+    -> autonomy_gate_result.v1
+    -> autonomy_gate_comparison_result.v1
+    -> read-only Control UI
+
+telemetry-only HIL:
+  hil_telemetry_contract.v1
+    -> hil_telemetry_envelope.v1
+    -> fail-closed ingestion
+    -> hil_telemetry_evidence.v1
+    -> hil_telemetry_review.v1
+    -> autonomy_gate_result.v1
+    -> read-only Control UI
+```
+
+The safety boundary is deliberately stronger than "a flag says dry run." The
+schemas make command and action payloads unrepresentable in the HIL path,
+ingestion rejects command-like keys before task mutation, toy-grid motion stays
+inside a deterministic simulator, gates are rule-based rather than LLM-judged,
+and every stronger execution path remains blocked behind explicit operator
+approval and a future design contract.
+
+This boundary explicitly does **not** provide live robot control, actuator
+execution, ROS/MAVLink dispatch, autopilot replacement, hardware command
+channels, approval-free stronger execution, or autonomous code
+self-modification.
+
+The limited live physical action gate is therefore a design/schema artifact,
+not a dispatch path. `limited_live_action_gate.v1` gathers autonomy gate refs,
+HIL telemetry review refs, emergency-stop evidence, rollback plan refs, action
+allowlist refs, operator responsibility acknowledgements, audit refs, and a
+nested `limited_live_action_approval_package.v1`. If all preconditions are
+present the status can become `operator_review_ready`, but
+`stronger_execution_allowed=false`, `live_execution_allowed=false`,
+`physical_execution_invoked=false`, `command_payload_allowed=false`, and
+ROS/MAVLink/actuator dispatch flags remain false. The action allowlist is a set
+of proposal categories for human review, not a dispatch permission.
+
 ## Mission Contract v2 Example
 
 Mission work still enters through a `control_supervisor` task. The contract adds
@@ -323,6 +386,75 @@ or any actuator. The Control UI can display the accepted HIL contract, envelope,
 evidence, freshness, findings, and fixed safety-boundary flags as read-only
 task detail context; it does not add approval, command, dispatch, or execution
 controls.
+
+The HIL telemetry review layer is the gate / scorecard input contract above
+that evidence. A `hil_telemetry_review.v1` aggregates one or more
+`hil_telemetry_evidence.v1` artifacts into a single deterministic pass /
+block decision plus typed findings: stale evidence becomes
+`hil_telemetry_stale`, an evidence with no measurements becomes
+`hil_telemetry_malformed`, an empty input list under `required=true` becomes
+`hil_telemetry_missing`, and any non-zero count of payloads the ingestion
+path refused for command-like content becomes `command_payload_rejected`.
+Each finding carries a `bucket` / `reason` / `severity` and a structured
+`detail` so a future safety gate can read HIL telemetry health uniformly
+across subjects. The review pins `operator_approval_required=true`,
+`live_execution_allowed=false`, `physical_execution_invoked=false`, and
+`command_payload_allowed=false` at the type level via Pydantic `Literal`.
+This layer is artifact-only and rule-based: there is no LLM judge, no
+external hardware connection, no ROS / actuator / dispatch path, no
+mission API, no promotion, and no runtime reuse. Wiring the review into
+`autonomy_gate_result.v1` is a separate slice; this slice produces the
+contract that such a gate would read.
+
+The HIL mock telemetry source closes the chain end-to-end without
+touching real hardware. `build_mock_hil_telemetry_envelope`,
+`build_mock_hil_telemetry_chain`, and `attach_mock_hil_telemetry_chain`
+produce deterministic envelopes that go through the same
+`ingest_hil_telemetry_envelope` path as production: command-like keys
+are still refused (`HilTelemetryRejected` propagates before the chain
+returns), and the resulting `hil_telemetry_envelope` /
+`hil_telemetry_evidence` / `hil_telemetry_review` artifacts feed the
+existing autonomy gate wiring. The attach helper raises before any task
+update, so a rejected payload never pollutes `task.artifacts`. The mock
+source is fixture-grade: there is no runtime polling, no source
+identity registry, no live transport (no PX4 / MAVLink / ROS / SSE),
+and no actuator / dispatch surface. Its purpose is to give tests, demos,
+and operators a way to exercise the full read-only HIL chain
+deterministically while the boundary stays type-pinned to
+`telemetry_only`.
+
+The limited live action design layer sits after the HIL review and autonomy
+gate artifacts. It is a rule-based checklist for future operator review, not an
+execution grant: missing autonomy-gate, HIL-review, emergency-stop, rollback,
+allowlist, responsibility, or audit evidence blocks the gate with explicit
+`missing_precondition:*` reasons, and even a fully populated evidence package
+only prepares human review. No command payload, dispatch implementation,
+ROS/MAVLink path, or actuator surface is introduced by this layer.
+
+The Control UI can render `limited_live_action_gate.v1` and its nested
+`limited_live_action_approval_package.v1` as read-only task detail artifacts.
+Operators can inspect status, missing preconditions, evidence refs,
+proposal-category allowlist scope, approval-required flags, and the pinned
+no-live / no-physical / no-command / no-dispatch safety boundary without gaining
+any approval button or action control.
+
+`limited_live_action_rehearsal.v1` is the final dry-run / evidence package
+before any future limited live action can be considered. It bundles the gate,
+approval package, mission contract ref, HIL review ref, emergency-stop evidence,
+rollback plan, operator responsibility acknowledgement, and audit refs. Missing
+evidence blocks the rehearsal; a ready rehearsal still only means
+`ready_for_operator_review`, with live execution and physical invocation pinned
+to false. The Control UI renders this rehearsal package read-only and does not
+add approval, command, dispatch, or execution controls.
+
+`tenth_stage_readiness_check.v1` is the pre-10合目 checklist over that
+rehearsal package. It adds the external readiness refs that boiled-claw cannot
+itself satisfy: adopting organization, hardware owner, certified/autopilot
+controller, and emergency-stop process. A complete checklist can become
+`ready_for_organization_review`, but `live_action_status` remains
+`blocked_for_live_action` because approval is not performed and no dispatch
+implementation exists. The Control UI renders the checklist read-only and adds
+no approval, command, dispatch, or execution controls.
 
 Promotion packages are the artifact-only bridge from post-mission review to a
 future promotion pipeline. `mission_review.improvement_candidates` can be

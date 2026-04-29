@@ -100,6 +100,23 @@ def test_decision_from_payload_forces_control_loop_for_current_browser_spreadshe
     assert decision.specialist is None
 
 
+def test_decision_from_payload_forces_control_loop_for_current_browser_form_fill_request():
+    decision = decision_from_payload(
+        {
+            "target": "specialist",
+            "specialist": "current_tab_operator",
+            "handoff_mode": "direct",
+            "reason": "browser task",
+            "confidence": 0.91,
+            "dynamic_agent": {},
+        },
+        fallback_message="このブラウザのフォームに名前を入力して送信して",
+    )
+
+    assert decision.target == "control_loop"
+    assert decision.specialist is None
+
+
 def test_decision_from_payload_routes_current_browser_research_to_current_tab_operator():
     decision = decision_from_payload(
         {

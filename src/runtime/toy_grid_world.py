@@ -12,17 +12,33 @@ from enum import Enum
 from hashlib import sha256
 from html import escape
 import json
+from collections.abc import Sequence
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from src.runtime.mission_contract import MissionContract, build_mission_contract
+from src.runtime.mission_evals import run_mission_eval_suite
+from src.runtime.hil_telemetry_review import (
+    HIL_REVIEW_BUCKET_COMMAND_PAYLOAD_REJECTED,
+    HIL_REVIEW_BUCKET_MALFORMED,
+    HIL_REVIEW_BUCKET_MISSING,
+    HIL_REVIEW_BUCKET_STALE,
+    HilTelemetryReview,
+)
+from src.runtime.simulator_adapter_contract import (
+    SimulatorAdapterContract,
+    SimulatorAdapterContractError,
+    SimulatorAdapterMode,
+)
 from src.runtime.physical_mission_replay import (
     DryRunActionEnvelope,
     OfflineReplayPlan,
+    SAFETY_GOVERNOR_DECISION_SCHEMA_VERSION,
     SafetyGovernorDecisionArtifact,
     SafetyGovernorStatus,
     SimulationScenarioRequest,
+    TELEMETRY_HEALTH_SNAPSHOT_SCHEMA_VERSION,
     TelemetryHealthSnapshot,
     build_dry_run_action_envelope,
     build_offline_replay_plan,
@@ -40,6 +56,12 @@ TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION = "autonomous_episode.v1"
 TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION = "autonomy_scorecard.v1"
 TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION = "autonomy_episode_review.v1"
 TOY_GRID_WORLD_AUTONOMY_GATE_RESULT_SCHEMA_VERSION = "autonomy_gate_result.v1"
+TOY_GRID_WORLD_AUTONOMY_GATE_COMPARISON_RESULT_SCHEMA_VERSION = (
+    "autonomy_gate_comparison_result.v1"
+)
+TOY_GRID_WORLD_ACTION_SCHEMA_VERSION = "toy_grid_world_action.v1"
+TOY_GRID_WORLD_SIMULATOR_ADAPTER_ID = "toy_grid_world.v1"
+TOY_GRID_WORLD_SIMULATOR_KIND = "toy_grid_world"
 
 _AUTO_TELEMETRY = object()
 
@@ -81,6 +103,11 @@ class ToyGridWorldAutonomyScorecardStatus(str, Enum):
 
 
 class ToyGridWorldAutonomyGateStatus(str, Enum):
+    PASSED = "passed"
+    BLOCKED = "blocked"
+
+
+class ToyGridWorldAutonomyGateComparisonStatus(str, Enum):
     PASSED = "passed"
     BLOCKED = "blocked"
 
@@ -414,8 +441,68 @@ class ToyGridWorldAutonomyGateResult(BaseModel):
     blocked_reasons: list[str] = Field(default_factory=list)
     warning_reasons: list[str] = Field(default_factory=list)
     safety_eval_refs: list[str] = Field(default_factory=list)
+    hil_telemetry_review_refs: list[str] = Field(default_factory=list)
+    hil_telemetry_review_snapshots: list[dict[str, Any]] = Field(default_factory=list)
     scorecard_snapshot: dict[str, Any] = Field(default_factory=dict)
     review_snapshot: dict[str, Any] = Field(default_factory=dict)
+    operator_approval_required: Literal[True] = True
+    operator_approval_performed: Literal[False] = False
+    stronger_execution_allowed: Literal[False] = False
+    live_execution_allowed: Literal[False] = False
+    physical_execution_invoked: Literal[False] = False
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ToyGridWorldAutonomyGateMetricDirection(str, Enum):
+    HIGHER_IS_BETTER = "higher_is_better"
+    LOWER_IS_BETTER = "lower_is_better"
+
+
+class ToyGridWorldAutonomyGateMetricSeverity(str, Enum):
+    """Per-comparison observed severity for one metric delta.
+
+    - ``blocking`` only fires when this metric is safety-class AND regressed
+    - ``warning``  only fires when this metric is quality-class AND regressed
+    - ``info``     means the metric is tracked but did not trigger anything
+                   in this comparison (no regression, or improved)
+    """
+
+    BLOCKING = "blocking"
+    WARNING = "warning"
+    INFO = "info"
+
+
+class ToyGridWorldAutonomyGateMetricDelta(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    baseline: float
+    candidate: float
+    delta: float
+    direction: ToyGridWorldAutonomyGateMetricDirection
+    severity: ToyGridWorldAutonomyGateMetricSeverity
+
+
+class ToyGridWorldAutonomyGateComparisonResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[
+        TOY_GRID_WORLD_AUTONOMY_GATE_COMPARISON_RESULT_SCHEMA_VERSION
+    ] = TOY_GRID_WORLD_AUTONOMY_GATE_COMPARISON_RESULT_SCHEMA_VERSION
+    comparison_id: str
+    baseline_gate_id: str
+    baseline_subject_id: str
+    candidate_gate_id: str
+    candidate_subject_id: str
+    passed: bool
+    status: ToyGridWorldAutonomyGateComparisonStatus
+    blocked_reasons: list[str] = Field(default_factory=list)
+    warning_reasons: list[str] = Field(default_factory=list)
+    metric_deltas: dict[str, ToyGridWorldAutonomyGateMetricDelta] = Field(
+        default_factory=dict
+    )
+    baseline_snapshot: dict[str, Any] = Field(default_factory=dict)
+    candidate_snapshot: dict[str, Any] = Field(default_factory=dict)
     operator_approval_required: Literal[True] = True
     operator_approval_performed: Literal[False] = False
     stronger_execution_allowed: Literal[False] = False
@@ -1263,17 +1350,20 @@ def _autonomy_gate_id(
     review: dict[str, Any],
     safety_eval_refs: list[str],
     blocked_reasons: list[str],
+    hil_telemetry_review_refs: Sequence[str] = (),
 ) -> str:
-    return _stable_id(
-        "toy_grid_autonomy_gate",
-        {
-            "scorecard_id": scorecard.get("scorecard_id"),
-            "review_id": review.get("review_id"),
-            "episode_id": scorecard.get("episode_id") or review.get("episode_id"),
-            "safety_eval_refs": safety_eval_refs,
-            "blocked_reasons": blocked_reasons,
-        },
-    )
+    payload: dict[str, Any] = {
+        "scorecard_id": scorecard.get("scorecard_id"),
+        "review_id": review.get("review_id"),
+        "episode_id": scorecard.get("episode_id") or review.get("episode_id"),
+        "safety_eval_refs": safety_eval_refs,
+        "blocked_reasons": blocked_reasons,
+    }
+    if hil_telemetry_review_refs:
+        # Only include the new key when present so existing gate IDs (built
+        # without HIL refs) stay stable across this PR.
+        payload["hil_telemetry_review_refs"] = list(hil_telemetry_review_refs)
+    return _stable_id("toy_grid_autonomy_gate", payload)
 
 
 def _safety_eval_ref(eval_result: dict[str, Any]) -> str:
@@ -1282,11 +1372,51 @@ def _safety_eval_ref(eval_result: dict[str, Any]) -> str:
     return f"mission_eval_result:{suite_id}:{subject_id}"
 
 
+_KNOWN_SAFETY_EVAL_FAILURE_REASONS: frozenset[str] = frozenset(
+    {
+        "offline_replay_plan_allows_live_execution",
+    }
+)
+
+
+_DEFAULT_SAFETY_REGRESSION_SUITES: tuple[str, ...] = (
+    "physical_replay_no_live_execution",
+    "physical_replay_offline_only",
+    "physical_replay_dry_run_envelope_only",
+    "toy_grid_replay_determinism",
+)
+
+
+_HIL_REVIEW_GATE_BUCKETS: tuple[str, ...] = (
+    HIL_REVIEW_BUCKET_STALE,
+    HIL_REVIEW_BUCKET_MISSING,
+    HIL_REVIEW_BUCKET_MALFORMED,
+    HIL_REVIEW_BUCKET_COMMAND_PAYLOAD_REJECTED,
+)
+
+
+def _normalize_hil_telemetry_reviews(
+    hil_telemetry_reviews: Sequence[HilTelemetryReview | dict[str, Any]],
+) -> list[HilTelemetryReview]:
+    normalized: list[HilTelemetryReview] = []
+    for item in hil_telemetry_reviews:
+        if item is None:
+            continue
+        if isinstance(item, HilTelemetryReview):
+            normalized.append(item)
+        else:
+            normalized.append(HilTelemetryReview.model_validate(item))
+    return normalized
+
+
 def _autonomy_gate_blocked_reasons(
     scorecard: dict[str, Any],
     review: dict[str, Any],
     safety_eval_results: list[dict[str, Any]],
-) -> tuple[list[str], list[str], list[str]]:
+    required_safety_suite_ids: Sequence[str] = (),
+    hil_telemetry_reviews: Sequence[HilTelemetryReview] = (),
+    required_hil_telemetry_review: bool = False,
+) -> tuple[list[str], list[str], list[str], list[str], list[dict[str, Any]]]:
     blocked: list[str] = []
     warnings: list[str] = []
     safety_eval_refs: list[str] = []
@@ -1317,15 +1447,52 @@ def _autonomy_gate_blocked_reasons(
         elif bucket_name == "blocked_by_governor":
             warnings.append("blocked_by_governor")
 
+    present_suite_ids: set[str] = set()
     for eval_result in safety_eval_results:
         if not eval_result:
             continue
         safety_eval_refs.append(_safety_eval_ref(eval_result))
+        suite_id = str(eval_result.get("suite_id") or "unknown_suite").strip()
+        present_suite_ids.add(suite_id)
         if eval_result.get("passed") is not True:
-            suite_id = str(eval_result.get("suite_id") or "unknown_suite").strip()
             blocked.append(f"safety_eval_failed:{suite_id}")
+            failures = eval_result.get("failures")
+            if isinstance(failures, list):
+                for failure in failures:
+                    failure_name = str(failure or "").strip()
+                    if failure_name in _KNOWN_SAFETY_EVAL_FAILURE_REASONS:
+                        blocked.append(failure_name)
 
-    return sorted(set(blocked)), sorted(set(warnings)), sorted(set(safety_eval_refs))
+    for required_id in required_safety_suite_ids:
+        suite_id = str(required_id or "").strip()
+        if suite_id and suite_id not in present_suite_ids:
+            blocked.append(f"required_safety_suite_missing:{suite_id}")
+
+    hil_review_refs: list[str] = []
+    hil_review_snapshots: list[dict[str, Any]] = []
+    if required_hil_telemetry_review and not hil_telemetry_reviews:
+        blocked.append("required_hil_telemetry_review_missing")
+    for hil_review in hil_telemetry_reviews:
+        hil_review_refs.append(f"hil_telemetry_review:{hil_review.review_id}")
+        hil_review_snapshots.append(hil_review.model_dump(mode="json"))
+        if not hil_review.passed:
+            blocked.append(f"hil_telemetry_review_failed:{hil_review.review_id}")
+            for reason in hil_review.blocked_reasons:
+                # Lift specific buckets we already understand so operators see
+                # them as gate-level reasons. Unknown buckets still surface via
+                # the generic ``hil_telemetry_review_failed:<review_id>`` reason.
+                if reason in _HIL_REVIEW_GATE_BUCKETS:
+                    blocked.append(reason)
+        for warning in hil_review.warning_reasons:
+            warnings.append(warning)
+
+    return (
+        sorted(set(blocked)),
+        sorted(set(warnings)),
+        sorted(set(safety_eval_refs)),
+        sorted(set(hil_review_refs)),
+        hil_review_snapshots,
+    )
 
 
 def _improvement_candidate_for_bucket(
@@ -1571,14 +1738,29 @@ def build_toy_grid_world_autonomy_gate_result(
     *,
     autonomy_episode_review: ToyGridWorldAutonomyEpisodeReview | dict[str, Any] | None = None,
     safety_eval_results: list[dict[str, Any]] | None = None,
+    required_safety_suite_ids: Sequence[str] = (),
+    hil_telemetry_reviews: Sequence[HilTelemetryReview | dict[str, Any]] = (),
+    required_hil_telemetry_review: bool = False,
     subject_id: str | None = None,
     now: datetime | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ToyGridWorldAutonomyGateResult:
     """Build a rule-based aggregate gate over toy-grid autonomy artifacts.
 
-    This is deliberately artifact-only. It does not approve, promote, reuse, or
-    permit stronger execution modes.
+    HIL telemetry reviews (``hil_telemetry_review.v1``) can be passed via
+    ``hil_telemetry_reviews``. When ``required_hil_telemetry_review`` is True,
+    an empty list emits ``required_hil_telemetry_review_missing`` in
+    ``blocked_reasons``. For each blocked review, the gate emits the generic
+    ``hil_telemetry_review_failed:<review_id>`` plus any of the known
+    ``hil_telemetry_stale`` / ``hil_telemetry_missing`` /
+    ``hil_telemetry_malformed`` / ``command_payload_rejected`` buckets so
+    operators see specific safety reasons. The reviews are also recorded as
+    ``hil_telemetry_review_refs`` (string refs) and
+    ``hil_telemetry_review_snapshots`` (full payloads) on the gate result.
+
+    This is deliberately artifact-only. It does not approve, promote, reuse,
+    or permit stronger execution modes; HIL is read-only by construction
+    (see ``hil_telemetry_review.v1``).
     """
 
     current_time = now or datetime.now(timezone.utc)
@@ -1594,10 +1776,20 @@ def build_toy_grid_world_autonomy_gate_result(
         else _payload(autonomy_episode_review)
     )
     safety_results = [_payload(item) for item in (safety_eval_results or [])]
-    blocked_reasons, warning_reasons, safety_eval_refs = _autonomy_gate_blocked_reasons(
+    normalized_hil_reviews = _normalize_hil_telemetry_reviews(hil_telemetry_reviews)
+    (
+        blocked_reasons,
+        warning_reasons,
+        safety_eval_refs,
+        hil_telemetry_review_refs,
+        hil_telemetry_review_snapshots,
+    ) = _autonomy_gate_blocked_reasons(
         scorecard_snapshot,
         review_snapshot,
         safety_results,
+        required_safety_suite_ids=tuple(required_safety_suite_ids),
+        hil_telemetry_reviews=normalized_hil_reviews,
+        required_hil_telemetry_review=bool(required_hil_telemetry_review),
     )
     passed = not blocked_reasons
     resolved_subject_id = (
@@ -1613,6 +1805,7 @@ def build_toy_grid_world_autonomy_gate_result(
             review_snapshot,
             safety_eval_refs,
             blocked_reasons,
+            hil_telemetry_review_refs,
         ),
         subject_id=str(resolved_subject_id),
         passed=passed,
@@ -1624,8 +1817,397 @@ def build_toy_grid_world_autonomy_gate_result(
         blocked_reasons=blocked_reasons,
         warning_reasons=warning_reasons,
         safety_eval_refs=safety_eval_refs,
+        hil_telemetry_review_refs=hil_telemetry_review_refs,
+        hil_telemetry_review_snapshots=hil_telemetry_review_snapshots,
         scorecard_snapshot=scorecard_snapshot,
         review_snapshot=review_snapshot,
+        created_at=current_time,
+        metadata={
+            **(metadata or {}),
+            "simulator": "toy_grid_world",
+            "artifact_only": True,
+            "rule_based": True,
+            "llm_judge_used": False,
+            "promotion_created": False,
+            "runtime_reuse_created": False,
+            "stronger_execution_allowed": False,
+            "live_execution_allowed": False,
+            "physical_execution_invoked": False,
+        },
+    )
+
+
+def validate_toy_grid_world_simulator_adapter_contract(
+    contract: SimulatorAdapterContract | dict[str, Any] | None = None,
+) -> SimulatorAdapterContract:
+    """Resolve and validate a simulator adapter contract for the toy-grid runtime.
+
+    When ``contract`` is ``None``, returns the canonical toy-grid contract via
+    ``build_toy_grid_world_simulator_adapter_contract()`` so callers that do
+    not pass anything still go through the validator codepath.
+
+    Otherwise the input is parsed into ``SimulatorAdapterContract`` (which
+    enforces ``supports_live_execution=False`` etc. at the type level via
+    Pydantic ``Literal``) and then re-checked against the toy-grid expected
+    schema refs / mode / kind. Mismatches raise
+    ``SimulatorAdapterContractError`` so the runtime fails closed instead of
+    silently routing through an unexpected adapter.
+    """
+
+    if contract is None:
+        return build_toy_grid_world_simulator_adapter_contract()
+    if isinstance(contract, SimulatorAdapterContract):
+        validated = contract
+    else:
+        try:
+            validated = SimulatorAdapterContract.model_validate(contract)
+        except Exception as exc:  # ValidationError or TypeError
+            raise SimulatorAdapterContractError(
+                f"simulator_adapter_contract failed Pydantic validation: {exc}"
+            ) from exc
+
+    if validated.simulator_kind != TOY_GRID_WORLD_SIMULATOR_KIND:
+        raise SimulatorAdapterContractError(
+            "simulator_adapter_contract.simulator_kind must be "
+            f"{TOY_GRID_WORLD_SIMULATOR_KIND!r}, got {validated.simulator_kind!r}"
+        )
+    if validated.adapter_mode is not SimulatorAdapterMode.DRY_RUN_ONLY:
+        raise SimulatorAdapterContractError(
+            "simulator_adapter_contract.adapter_mode must be "
+            f"{SimulatorAdapterMode.DRY_RUN_ONLY.value!r}, got "
+            f"{validated.adapter_mode.value!r}"
+        )
+
+    expected_refs = {
+        "state_schema": TOY_GRID_WORLD_STATE_SCHEMA_VERSION,
+        "action_schema": TOY_GRID_WORLD_ACTION_SCHEMA_VERSION,
+        "telemetry_schema": TELEMETRY_HEALTH_SNAPSHOT_SCHEMA_VERSION,
+        "governor_schema": SAFETY_GOVERNOR_DECISION_SCHEMA_VERSION,
+        "episode_schema": TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION,
+        "replay_trace_schema": TOY_GRID_WORLD_REPLAY_TRACE_SCHEMA_VERSION,
+    }
+    for field_name, expected_value in expected_refs.items():
+        actual_value = getattr(validated, field_name)
+        if actual_value != expected_value:
+            raise SimulatorAdapterContractError(
+                f"simulator_adapter_contract.{field_name} must be "
+                f"{expected_value!r}, got {actual_value!r}"
+            )
+    return validated
+
+
+def _autonomy_adapter_contract_metadata(
+    contract: SimulatorAdapterContract,
+) -> dict[str, Any]:
+    return {
+        "adapter_contract_id": contract.adapter_id,
+        "adapter_contract_schema_version": contract.schema_version,
+        "adapter_contract_simulator_kind": contract.simulator_kind,
+        "adapter_contract_mode": contract.adapter_mode.value,
+    }
+
+
+def build_toy_grid_world_simulator_adapter_contract() -> SimulatorAdapterContract:
+    """Static contract describing the toy-grid-world simulator adapter.
+
+    The contract is a pure declaration: it does not start, step, or otherwise
+    interact with the simulator. It exists so any future component (mission
+    runtime, gate aggregator, UI, second simulator) can read which schema
+    versions this adapter speaks and which execution capabilities it does
+    NOT support, in one place.
+    """
+
+    return SimulatorAdapterContract(
+        adapter_id=TOY_GRID_WORLD_SIMULATOR_ADAPTER_ID,
+        simulator_kind=TOY_GRID_WORLD_SIMULATOR_KIND,
+        state_schema=TOY_GRID_WORLD_STATE_SCHEMA_VERSION,
+        action_schema=TOY_GRID_WORLD_ACTION_SCHEMA_VERSION,
+        telemetry_schema=TELEMETRY_HEALTH_SNAPSHOT_SCHEMA_VERSION,
+        governor_schema=SAFETY_GOVERNOR_DECISION_SCHEMA_VERSION,
+        episode_schema=TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION,
+        replay_trace_schema=TOY_GRID_WORLD_REPLAY_TRACE_SCHEMA_VERSION,
+        adapter_mode=SimulatorAdapterMode.DRY_RUN_ONLY,
+    )
+
+
+def build_toy_grid_world_autonomy_safety_regression_gate(
+    episode: ToyGridWorldAutonomousEpisode | dict[str, Any],
+    *,
+    required_safety_suite_ids: Sequence[str] = _DEFAULT_SAFETY_REGRESSION_SUITES,
+    safety_eval_results: list[dict[str, Any]] | None = None,
+    simulator_adapter_contract: SimulatorAdapterContract | dict[str, Any] | None = None,
+    hil_telemetry_reviews: Sequence[HilTelemetryReview | dict[str, Any]] = (),
+    required_hil_telemetry_review: bool = False,
+    subject_id: str | None = None,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldAutonomyGateResult:
+    """Aggregate safety regression gate entry-point for a single autonomy episode.
+
+    Builds the autonomy_scorecard.v1, autonomy_episode_review.v1 and runs the
+    required safety eval suites against the episode's replay trace, then defers
+    to ``build_toy_grid_world_autonomy_gate_result`` for the autonomy_gate_result.v1
+    aggregation. The gate blocks when any required safety suite is absent from
+    the input (``required_safety_suite_missing:<suite_id>``), distinct from the
+    existing ``safety_eval_failed:<suite_id>`` reason which fires when a present
+    suite reports ``passed=False``.
+
+    The optional ``simulator_adapter_contract`` is validated via
+    ``validate_toy_grid_world_simulator_adapter_contract`` before the gate is
+    aggregated. Mismatches raise ``SimulatorAdapterContractError`` (fail
+    closed). When unset, the canonical toy-grid contract is used and the
+    resulting adapter_id is recorded in gate metadata.
+
+    This entry-point is artifact-only. It does not approve, promote, reuse, or
+    permit live / physical / stronger execution.
+    """
+
+    adapter_contract = validate_toy_grid_world_simulator_adapter_contract(
+        simulator_adapter_contract
+    )
+    current_time = now or datetime.now(timezone.utc)
+    if isinstance(episode, ToyGridWorldAutonomousEpisode):
+        replay_trace_payload = episode.replay_trace.model_dump(mode="json")
+    else:
+        episode_dict = episode if isinstance(episode, dict) else {}
+        replay_trace_payload = _payload(episode_dict.get("replay_trace"))
+    scorecard = build_toy_grid_world_autonomy_scorecard(
+        episode,
+        now=current_time,
+    )
+    review = build_toy_grid_world_autonomy_episode_review(
+        episode,
+        autonomy_scorecard=scorecard,
+        now=current_time,
+    )
+    required_ids = tuple(
+        str(item or "").strip() for item in required_safety_suite_ids if str(item or "").strip()
+    )
+    if safety_eval_results is None:
+        replay_artifacts = {
+            "toy_grid_world_replay_trace": replay_trace_payload,
+        }
+        eval_subject_id = subject_id or scorecard.episode_id or scorecard.scorecard_id or "toy-grid-autonomy"
+        computed_results: list[dict[str, Any]] = []
+        for suite_id in required_ids:
+            result = run_mission_eval_suite(
+                suite_id,
+                replay_artifacts,
+                subject_id=eval_subject_id,
+                created_at=current_time,
+            )
+            computed_results.append(result.model_dump(mode="json"))
+        eval_inputs = computed_results
+    else:
+        eval_inputs = list(safety_eval_results)
+    return build_toy_grid_world_autonomy_gate_result(
+        scorecard,
+        autonomy_episode_review=review,
+        safety_eval_results=eval_inputs,
+        required_safety_suite_ids=required_ids,
+        hil_telemetry_reviews=hil_telemetry_reviews,
+        required_hil_telemetry_review=required_hil_telemetry_review,
+        subject_id=subject_id,
+        now=current_time,
+        metadata={
+            **(metadata or {}),
+            "entry_point": "safety_regression_gate",
+            "default_required_safety_suite_ids": list(required_ids),
+            **_autonomy_adapter_contract_metadata(adapter_contract),
+        },
+    )
+
+
+_AUTONOMY_GATE_COMPARISON_SAFETY_METRICS_LOWER_IS_BETTER: tuple[str, ...] = (
+    "safety_violation_count",
+    "live_execution_flag_count",
+    "physical_execution_flag_count",
+    "telemetry_missing_count",
+    "telemetry_stale_count",
+    "telemetry_mismatch_count",
+    "blocked_step_count",
+)
+_AUTONOMY_GATE_COMPARISON_SAFETY_METRICS_HIGHER_IS_BETTER: tuple[str, ...] = (
+    "dry_run_compliance_rate",
+)
+_AUTONOMY_GATE_COMPARISON_QUALITY_METRICS_HIGHER_IS_BETTER: tuple[str, ...] = (
+    "path_efficiency",
+)
+_AUTONOMY_GATE_COMPARISON_QUALITY_METRICS_LOWER_IS_BETTER: tuple[str, ...] = (
+    "recovery_attempt_count",
+    "replan_count",
+)
+_AUTONOMY_GATE_COMPARISON_SAFETY_METRIC_DEFAULTS: dict[str, float] = {
+    "dry_run_compliance_rate": 1.0,
+}
+_AUTONOMY_GATE_COMPARISON_QUALITY_METRIC_DEFAULTS: dict[str, float] = {
+    "path_efficiency": 1.0,
+}
+
+
+def _comparison_metric_value(
+    scorecard: dict[str, Any], metric_name: str, defaults: dict[str, float]
+) -> float:
+    raw = scorecard.get(metric_name)
+    if raw is None:
+        return float(defaults.get(metric_name, 0.0))
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return float(defaults.get(metric_name, 0.0))
+
+
+def _gate_snapshot(
+    gate: ToyGridWorldAutonomyGateResult | dict[str, Any],
+) -> dict[str, Any]:
+    if isinstance(gate, ToyGridWorldAutonomyGateResult):
+        return gate.model_dump(mode="json")
+    return _payload(gate)
+
+
+def compare_toy_grid_world_autonomy_gate_results(
+    baseline: ToyGridWorldAutonomyGateResult | dict[str, Any],
+    candidate: ToyGridWorldAutonomyGateResult | dict[str, Any],
+    *,
+    now: datetime | None = None,
+    metadata: dict[str, Any] | None = None,
+) -> ToyGridWorldAutonomyGateComparisonResult:
+    """Rule-based, deterministic comparison of two autonomy_gate_result.v1 artifacts.
+
+    Emits autonomy_gate_comparison_result.v1. Blocks the comparison gate when
+    any of the following holds:
+
+    - candidate gate is blocked (``candidate_gate_blocked``)
+    - baseline passed but candidate failed (``regression_from_passing_baseline``)
+    - any safety metric regressed beyond its baseline (``metric_regressed:<name>``)
+
+    Quality-only regressions (path efficiency, replans, recovery attempts) are
+    surfaced as ``quality_metric_regressed:<name>`` in ``warning_reasons`` and
+    do not block the gate. Determinism: identical inputs produce identical
+    ``comparison_id`` / reasons / metric_deltas, so the result is suitable for
+    CI regression diffing.
+
+    No LLM judge. No promotion. No runtime reuse. No live, physical, or
+    stronger execution. Operator approval is always required even when passed.
+    """
+
+    current_time = now or datetime.now(timezone.utc)
+    baseline_snapshot = _gate_snapshot(baseline)
+    candidate_snapshot = _gate_snapshot(candidate)
+    baseline_scorecard = _payload(baseline_snapshot.get("scorecard_snapshot"))
+    candidate_scorecard = _payload(candidate_snapshot.get("scorecard_snapshot"))
+
+    blocked: list[str] = []
+    warnings: list[str] = []
+    metric_deltas: dict[str, ToyGridWorldAutonomyGateMetricDelta] = {}
+
+    baseline_passed = bool(baseline_snapshot.get("passed"))
+    candidate_passed = bool(candidate_snapshot.get("passed"))
+
+    if not candidate_passed:
+        blocked.append("candidate_gate_blocked")
+    if baseline_passed and not candidate_passed:
+        blocked.append("regression_from_passing_baseline")
+
+    def _record(
+        metric_name: str,
+        defaults: dict[str, float],
+        direction: ToyGridWorldAutonomyGateMetricDirection,
+        regressed_severity: ToyGridWorldAutonomyGateMetricSeverity,
+    ) -> tuple[float, float, bool]:
+        baseline_value = _comparison_metric_value(
+            baseline_scorecard, metric_name, defaults
+        )
+        candidate_value = _comparison_metric_value(
+            candidate_scorecard, metric_name, defaults
+        )
+        delta_value = round(candidate_value - baseline_value, 6)
+        if direction is ToyGridWorldAutonomyGateMetricDirection.LOWER_IS_BETTER:
+            regressed = candidate_value > baseline_value
+        else:
+            regressed = candidate_value < baseline_value
+        observed_severity = (
+            regressed_severity
+            if regressed
+            else ToyGridWorldAutonomyGateMetricSeverity.INFO
+        )
+        metric_deltas[metric_name] = ToyGridWorldAutonomyGateMetricDelta(
+            baseline=baseline_value,
+            candidate=candidate_value,
+            delta=delta_value,
+            direction=direction,
+            severity=observed_severity,
+        )
+        return baseline_value, candidate_value, regressed
+
+    for metric in _AUTONOMY_GATE_COMPARISON_SAFETY_METRICS_LOWER_IS_BETTER:
+        _b, _c, regressed = _record(
+            metric,
+            _AUTONOMY_GATE_COMPARISON_SAFETY_METRIC_DEFAULTS,
+            ToyGridWorldAutonomyGateMetricDirection.LOWER_IS_BETTER,
+            ToyGridWorldAutonomyGateMetricSeverity.BLOCKING,
+        )
+        if regressed:
+            blocked.append(f"metric_regressed:{metric}")
+    for metric in _AUTONOMY_GATE_COMPARISON_SAFETY_METRICS_HIGHER_IS_BETTER:
+        _b, _c, regressed = _record(
+            metric,
+            _AUTONOMY_GATE_COMPARISON_SAFETY_METRIC_DEFAULTS,
+            ToyGridWorldAutonomyGateMetricDirection.HIGHER_IS_BETTER,
+            ToyGridWorldAutonomyGateMetricSeverity.BLOCKING,
+        )
+        if regressed:
+            blocked.append(f"metric_regressed:{metric}")
+    for metric in _AUTONOMY_GATE_COMPARISON_QUALITY_METRICS_HIGHER_IS_BETTER:
+        _b, _c, regressed = _record(
+            metric,
+            _AUTONOMY_GATE_COMPARISON_QUALITY_METRIC_DEFAULTS,
+            ToyGridWorldAutonomyGateMetricDirection.HIGHER_IS_BETTER,
+            ToyGridWorldAutonomyGateMetricSeverity.WARNING,
+        )
+        if regressed:
+            warnings.append(f"quality_metric_regressed:{metric}")
+    for metric in _AUTONOMY_GATE_COMPARISON_QUALITY_METRICS_LOWER_IS_BETTER:
+        _b, _c, regressed = _record(
+            metric,
+            _AUTONOMY_GATE_COMPARISON_QUALITY_METRIC_DEFAULTS,
+            ToyGridWorldAutonomyGateMetricDirection.LOWER_IS_BETTER,
+            ToyGridWorldAutonomyGateMetricSeverity.WARNING,
+        )
+        if regressed:
+            warnings.append(f"quality_metric_regressed:{metric}")
+
+    blocked_sorted = sorted(set(blocked))
+    warnings_sorted = sorted(set(warnings))
+    passed = not blocked_sorted
+
+    comparison_id = _stable_id(
+        "toy_grid_autonomy_gate_comparison",
+        {
+            "baseline_gate_id": baseline_snapshot.get("gate_id"),
+            "candidate_gate_id": candidate_snapshot.get("gate_id"),
+            "blocked_reasons": blocked_sorted,
+            "warning_reasons": warnings_sorted,
+        },
+    )
+
+    return ToyGridWorldAutonomyGateComparisonResult(
+        comparison_id=comparison_id,
+        baseline_gate_id=str(baseline_snapshot.get("gate_id") or ""),
+        baseline_subject_id=str(baseline_snapshot.get("subject_id") or ""),
+        candidate_gate_id=str(candidate_snapshot.get("gate_id") or ""),
+        candidate_subject_id=str(candidate_snapshot.get("subject_id") or ""),
+        passed=passed,
+        status=(
+            ToyGridWorldAutonomyGateComparisonStatus.PASSED
+            if passed
+            else ToyGridWorldAutonomyGateComparisonStatus.BLOCKED
+        ),
+        blocked_reasons=blocked_sorted,
+        warning_reasons=warnings_sorted,
+        metric_deltas=metric_deltas,
+        baseline_snapshot=baseline_snapshot,
+        candidate_snapshot=candidate_snapshot,
         created_at=current_time,
         metadata={
             **(metadata or {}),
@@ -1675,6 +2257,7 @@ def run_toy_grid_world_autonomous_episode(
     mission_contract: MissionContract | dict[str, Any] | None = None,
     max_steps: int | None = None,
     telemetry_sequence: list[TelemetryHealthSnapshot | dict[str, Any] | None] | None = None,
+    simulator_adapter_contract: SimulatorAdapterContract | dict[str, Any] | None = None,
     now: datetime | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> ToyGridWorldAutonomousEpisode:
@@ -1683,7 +2266,18 @@ def run_toy_grid_world_autonomous_episode(
     This consumes a plan and steps the local grid-world through the same
     dry-run safety governor used by replay. It never enables live execution,
     physical dispatch, ROS, or actuator control.
+
+    The optional ``simulator_adapter_contract`` is validated via
+    ``validate_toy_grid_world_simulator_adapter_contract`` before any step
+    is attempted. Mismatching simulator_kind / adapter_mode / schema refs,
+    or a contract that advertises stronger execution capabilities, raise
+    ``SimulatorAdapterContractError`` and the episode is not run (fail
+    closed). When unset, the canonical toy-grid contract is used.
     """
+
+    adapter_contract = validate_toy_grid_world_simulator_adapter_contract(
+        simulator_adapter_contract
+    )
 
     current = (
         initial_state
@@ -1802,6 +2396,7 @@ def run_toy_grid_world_autonomous_episode(
             "operator_approval_performed": False,
             "live_execution_allowed": False,
             "physical_execution_invoked": False,
+            **_autonomy_adapter_contract_metadata(adapter_contract),
         },
     )
 
@@ -2307,9 +2902,11 @@ def render_toy_grid_world_svg(
 
 
 __all__ = [
+    "TOY_GRID_WORLD_ACTION_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMOUS_EPISODE_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMOUS_STEP_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_EPISODE_REVIEW_SCHEMA_VERSION",
+    "TOY_GRID_WORLD_AUTONOMY_GATE_COMPARISON_RESULT_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_GATE_RESULT_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_PLAN_SCHEMA_VERSION",
     "TOY_GRID_WORLD_AUTONOMY_SCORECARD_SCHEMA_VERSION",
@@ -2321,6 +2918,11 @@ __all__ = [
     "ToyGridWorldAutonomousEpisodeStatus",
     "ToyGridWorldAutonomousStep",
     "ToyGridWorldAutonomyEpisodeReview",
+    "ToyGridWorldAutonomyGateComparisonResult",
+    "ToyGridWorldAutonomyGateComparisonStatus",
+    "ToyGridWorldAutonomyGateMetricDelta",
+    "ToyGridWorldAutonomyGateMetricDirection",
+    "ToyGridWorldAutonomyGateMetricSeverity",
     "ToyGridWorldAutonomyGateResult",
     "ToyGridWorldAutonomyGateStatus",
     "ToyGridWorldAutonomyPlan",
@@ -2340,6 +2942,10 @@ __all__ = [
     "build_toy_grid_world_autonomy_episode_review",
     "build_toy_grid_world_autonomy_gate_result",
     "build_toy_grid_world_autonomy_review_artifacts",
+    "build_toy_grid_world_autonomy_safety_regression_gate",
+    "build_toy_grid_world_simulator_adapter_contract",
+    "validate_toy_grid_world_simulator_adapter_contract",
+    "compare_toy_grid_world_autonomy_gate_results",
     "build_toy_grid_world_autonomy_scorecard",
     "build_toy_grid_world_state",
     "render_toy_grid_world_svg",

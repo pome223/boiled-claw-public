@@ -2088,6 +2088,175 @@ function renderLongRunningTaskState(task) {
   ].join("");
 }
 
+function renderAutonomyArtifacts(task) {
+  // Read-only renderer for autonomy_* artifacts. No execution / approval /
+  // promotion / runtime reuse actions are emitted from this surface.
+  const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const asObject = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+  const asArray = (value) => (Array.isArray(value) ? value : []);
+  const episode = asObject(artifacts.autonomous_episode);
+  const scorecard = asObject(artifacts.autonomy_scorecard);
+  const review = asObject(artifacts.autonomy_episode_review);
+  const gate = asObject(artifacts.autonomy_gate_result);
+  const comparison = asObject(artifacts.autonomy_gate_comparison_result);
+  const hasAny = [episode, scorecard, review, gate, comparison].some((item) => Object.keys(item).length);
+  if (!hasAny) return "";
+
+  const renderReasonList = (reasons, kind) => {
+    const list = asArray(reasons).filter((reason) => typeof reason === "string" && reason.length);
+    if (!list.length) return `<div class="muted">none</div>`;
+    const cls = kind === "blocked" ? "autonomy-reason autonomy-reason-blocked" : "autonomy-reason autonomy-reason-warning";
+    return `<ul class="autonomy-reason-list">${
+      list.map((reason) => `<li class="${cls}"><span class="mono">${escapeHtml(reason)}</span></li>`).join("")
+    }</ul>`;
+  };
+
+  const renderSafetyBadges = (source) => {
+    const parts = [];
+    const flag = (label, value, expected) => {
+      const ok = value === expected;
+      const cls = ok ? "tag autonomy-safety-ok" : "tag autonomy-safety-warn";
+      const valueText = value === undefined || value === null ? "?" : String(value);
+      parts.push(`<span class="${cls}">${escapeHtml(label)}=${escapeHtml(valueText)}</span>`);
+    };
+    flag("operator_approval_required", source.operator_approval_required, true);
+    flag("operator_approval_performed", source.operator_approval_performed, false);
+    flag("stronger_execution_allowed", source.stronger_execution_allowed, false);
+    flag("live_execution_allowed", source.live_execution_allowed, false);
+    flag("physical_execution_invoked", source.physical_execution_invoked, false);
+    return `<div class="chip-row autonomy-safety-badges">${parts.join("")}</div>`;
+  };
+
+  const renderEpisodeSection = () => {
+    if (!Object.keys(episode).length) return "";
+    const summary = asObject(episode.summary);
+    const replay = asObject(episode.replay_trace);
+    const goalReached = summary.goal_reached === true ? "yes" : summary.goal_reached === false ? "no" : "-";
+    return [
+      `<div class="detail-section autonomy-section autonomy-episode">`,
+      `<div class="k">Autonomy Episode</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Episode</div><div class="mono">${escapeHtml(episode.episode_id || "-")}</div><div class="item-meta mono">schema=${escapeHtml(episode.schema_version || "-")}</div></div>`,
+      `<div class="detail-card"><div class="k">World</div><div class="mono">${escapeHtml(episode.world_id || "-")}</div><div class="item-meta mono">plan=${escapeHtml(episode.plan_id || "-")}</div></div>`,
+      `<div class="detail-card"><div class="k">Final Status</div><div>${escapeHtml(String(episode.final_status || "-"))}</div><div class="item-meta">goal_reached=${escapeHtml(goalReached)}</div></div>`,
+      `<div class="detail-card"><div class="k">Steps</div><div>accepted=${escapeHtml(String(summary.accepted_steps ?? "-"))}/${escapeHtml(String(summary.total_steps ?? "-"))}</div><div class="item-meta">replans=${escapeHtml(String(summary.replans ?? "-"))} recovery=${escapeHtml(String(summary.recovery_attempts ?? "-"))}</div></div>`,
+      `<div class="detail-card"><div class="k">Replay Trace</div><div class="mono">${escapeHtml(replay.trace_id || summary.replay_trace_ref || "-")}</div><div class="item-meta mono">deterministic_hash=${escapeHtml((replay.deterministic_hash || "-").slice(0, 16))}</div></div>`,
+      `</div>`,
+      `</div>`,
+    ].join("");
+  };
+
+  const renderScorecardSection = () => {
+    if (!Object.keys(scorecard).length) return "";
+    const buckets = asArray(scorecard.failure_buckets);
+    const bucketsLine = buckets.length
+      ? buckets.map((item) => {
+          const obj = asObject(item);
+          return `<span class="tag">${escapeHtml(obj.bucket || "-")}×${escapeHtml(String(obj.count ?? 1))}</span>`;
+        }).join("")
+      : `<span class="muted">no failure buckets</span>`;
+    return [
+      `<div class="detail-section autonomy-section autonomy-scorecard">`,
+      `<div class="k">Autonomy Scorecard</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Status</div><div>${statusTag(scorecard.status || (scorecard.passed ? "passed" : "failed"))}</div><div class="item-meta">passed=${escapeHtml(String(scorecard.passed))}</div></div>`,
+      `<div class="detail-card"><div class="k">Safety Counts</div><div class="mono">live=${escapeHtml(String(scorecard.live_execution_flag_count ?? 0))} physical=${escapeHtml(String(scorecard.physical_execution_flag_count ?? 0))} safety=${escapeHtml(String(scorecard.safety_violation_count ?? 0))}</div><div class="item-meta mono">blocked_steps=${escapeHtml(String(scorecard.blocked_step_count ?? 0))}</div></div>`,
+      `<div class="detail-card"><div class="k">Telemetry</div><div class="mono">missing=${escapeHtml(String(scorecard.telemetry_missing_count ?? 0))} stale=${escapeHtml(String(scorecard.telemetry_stale_count ?? 0))} mismatch=${escapeHtml(String(scorecard.telemetry_mismatch_count ?? 0))}</div><div class="item-meta mono">freshness_seconds=${escapeHtml(String(scorecard.telemetry_freshness_seconds ?? "-"))}</div></div>`,
+      `<div class="detail-card"><div class="k">Quality</div><div class="mono">dry_run_compliance_rate=${escapeHtml(String(scorecard.dry_run_compliance_rate ?? "-"))}</div><div class="item-meta mono">path_efficiency=${escapeHtml(String(scorecard.path_efficiency ?? "-"))}</div></div>`,
+      `<div class="detail-card"><div class="k">Failure Buckets</div><div class="chip-row">${bucketsLine}</div></div>`,
+      `</div>`,
+      `</div>`,
+    ].join("");
+  };
+
+  const renderReviewSection = () => {
+    if (!Object.keys(review).length) return "";
+    const candidates = asArray(review.improvement_candidates);
+    const recommended = asArray(review.recommended_next_actions);
+    const candidateBadges = candidates.length
+      ? candidates.map((item) => {
+          const obj = asObject(item);
+          const candidateOnly = obj.approval_status === "candidate_only" ? `<span class="tag autonomy-safety-ok">candidate_only</span>` : "";
+          const requiresApproval = obj.requires_operator_approval === true ? `<span class="tag autonomy-safety-warn">requires_operator_approval</span>` : "";
+          return `<div class="autonomy-candidate"><span class="mono">${escapeHtml(asObject(obj.content).bucket || obj.type || "-")}</span> ${requiresApproval}${candidateOnly}</div>`;
+        }).join("")
+      : `<div class="muted">no improvement candidates</div>`;
+    return [
+      `<div class="detail-section autonomy-section autonomy-review">`,
+      `<div class="k">Autonomy Episode Review</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Review</div><div class="mono">${escapeHtml(review.review_id || "-")}</div><div class="item-meta">final_status=${escapeHtml(String(review.final_status || "-"))}</div></div>`,
+      `<div class="detail-card"><div class="k">Summary</div><div>${escapeHtml(String(review.summary || "-"))}</div></div>`,
+      `<div class="detail-card"><div class="k">Recommended Next Actions</div>${recommended.length ? `<ul class="autonomy-reason-list">${recommended.map((item) => `<li class="mono">${escapeHtml(String(item))}</li>`).join("")}</ul>` : `<div class="muted">none</div>`}</div>`,
+      `<div class="detail-card"><div class="k">Improvement Candidates (candidate_only)</div>${candidateBadges}</div>`,
+      `</div>`,
+      `</div>`,
+    ].join("");
+  };
+
+  const renderGateSection = () => {
+    if (!Object.keys(gate).length) return "";
+    const safetyEvalRefs = asArray(gate.safety_eval_refs);
+    const hilReviewRefs = asArray(gate.hil_telemetry_review_refs);
+    const hilReviewSnapshots = asArray(gate.hil_telemetry_review_snapshots);
+    return [
+      `<div class="detail-section autonomy-section autonomy-gate">`,
+      `<div class="k">Autonomy Gate Result</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Status</div><div>${statusTag(gate.status || (gate.passed ? "passed" : "blocked"))}</div><div class="item-meta">passed=${escapeHtml(String(gate.passed))} schema=${escapeHtml(gate.schema_version || "autonomy_gate_result.v1")}</div></div>`,
+      `<div class="detail-card"><div class="k">Subject</div><div class="mono">${escapeHtml(gate.subject_id || "-")}</div><div class="item-meta mono">gate_id=${escapeHtml(gate.gate_id || "-")}</div></div>`,
+      `<div class="detail-card autonomy-reasons-card"><div class="k">blocked_reasons</div>${renderReasonList(gate.blocked_reasons, "blocked")}</div>`,
+      `<div class="detail-card autonomy-reasons-card"><div class="k">warning_reasons</div>${renderReasonList(gate.warning_reasons, "warning")}</div>`,
+      `<div class="detail-card"><div class="k">Safety Eval Refs</div>${safetyEvalRefs.length ? `<ul class="autonomy-reason-list">${safetyEvalRefs.map((ref) => `<li class="mono">${escapeHtml(String(ref))}</li>`).join("")}</ul>` : `<div class="muted">none</div>`}</div>`,
+      `<div class="detail-card autonomy-hil-refs-card"><div class="k">hil_telemetry_review_refs</div>${hilReviewRefs.length ? `<ul class="autonomy-reason-list">${hilReviewRefs.map((ref) => `<li class="mono">${escapeHtml(String(ref))}</li>`).join("")}</ul>` : `<div class="muted">none</div>`}<div class="item-meta mono">hil_telemetry_review_snapshots=${escapeHtml(String(hilReviewSnapshots.length))}</div></div>`,
+      `<div class="detail-card autonomy-safety-card"><div class="k">Safety Boundary</div>${renderSafetyBadges(gate)}</div>`,
+      `</div>`,
+      `</div>`,
+    ].join("");
+  };
+
+  const renderComparisonSection = () => {
+    if (!Object.keys(comparison).length) return "";
+    const metricDeltas = asObject(comparison.metric_deltas);
+    const metricEntries = Object.entries(metricDeltas);
+    const metricRows = metricEntries.length
+      ? metricEntries.map(([name, raw]) => {
+          const value = asObject(raw);
+          const severity = String(value.severity || "info");
+          const direction = String(value.direction || "");
+          const severityClass = severity === "blocking"
+            ? "autonomy-metric-severity-blocking"
+            : severity === "warning"
+              ? "autonomy-metric-severity-warning"
+              : "autonomy-metric-severity-info";
+          return `<tr class="${severityClass}"><td class="mono">${escapeHtml(name)}</td><td class="mono">${escapeHtml(String(value.baseline ?? "-"))}</td><td class="mono">${escapeHtml(String(value.candidate ?? "-"))}</td><td class="mono">${escapeHtml(String(value.delta ?? "-"))}</td><td class="mono">${escapeHtml(direction || "-")}</td><td class="mono">${escapeHtml(severity)}</td></tr>`;
+        }).join("")
+      : `<tr><td colspan="6" class="muted">no metric deltas</td></tr>`;
+    return [
+      `<div class="detail-section autonomy-section autonomy-gate-comparison">`,
+      `<div class="k">Autonomy Gate Comparison</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Status</div><div>${statusTag(comparison.status || (comparison.passed ? "passed" : "blocked"))}</div><div class="item-meta">passed=${escapeHtml(String(comparison.passed))} schema=${escapeHtml(comparison.schema_version || "autonomy_gate_comparison_result.v1")}</div></div>`,
+      `<div class="detail-card"><div class="k">Comparison</div><div class="mono">${escapeHtml(comparison.comparison_id || "-")}</div><div class="item-meta mono">baseline_gate_id=${escapeHtml(comparison.baseline_gate_id || "-")}</div><div class="item-meta mono">candidate_gate_id=${escapeHtml(comparison.candidate_gate_id || "-")}</div></div>`,
+      `<div class="detail-card autonomy-reasons-card"><div class="k">blocked_reasons</div>${renderReasonList(comparison.blocked_reasons, "blocked")}</div>`,
+      `<div class="detail-card autonomy-reasons-card"><div class="k">warning_reasons</div>${renderReasonList(comparison.warning_reasons, "warning")}</div>`,
+      `<div class="detail-card autonomy-safety-card"><div class="k">Safety Boundary</div>${renderSafetyBadges(comparison)}</div>`,
+      `</div>`,
+      `<div class="autonomy-metric-deltas-wrapper"><table class="analytics-table autonomy-metric-deltas"><thead><tr><th>metric</th><th>baseline</th><th>candidate</th><th>delta</th><th>direction</th><th>severity</th></tr></thead><tbody>${metricRows}</tbody></table></div>`,
+      `</div>`,
+    ].join("");
+  };
+
+  return [
+    renderEpisodeSection(),
+    renderScorecardSection(),
+    renderReviewSection(),
+    renderGateSection(),
+    renderComparisonSection(),
+  ].join("");
+}
+
+
 function renderToyGridReplayArtifacts(task) {
   const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
   const durable = artifacts.durable_execution && typeof artifacts.durable_execution === "object"
@@ -2303,6 +2472,394 @@ function renderHilTelemetryEvidence(task) {
   ].join("");
 }
 
+// Known HIL telemetry review bucket / blocked-reason vocabulary surfaced by
+// this UI. Mirrors src/runtime/hil_telemetry_review.py constants and the
+// gate-level reason emitted by autonomy_gate_result.v1 when
+// required_hil_telemetry_review is set with no review attached. Listed
+// explicitly so rename refactors stay caught by the static UI bundle test:
+//   hil_telemetry_stale
+//   hil_telemetry_missing
+//   hil_telemetry_malformed
+//   command_payload_rejected
+//   required_hil_telemetry_review_missing
+function renderHilTelemetryReview(task) {
+  // Read-only renderer for hil_telemetry_review.v1 artifacts. Surfaces the
+  // gate-input view of HIL telemetry: bucket findings, blocked reasons,
+  // measurement keys, freshness, and rejection counts. No controls and no
+  // mutation hooks; HIL telemetry is read-only by construction.
+  const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const asObject = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+  const asArray = (value) => (Array.isArray(value) ? value : []);
+
+  // Accept either a single review under hil_telemetry_review or a list under
+  // hil_telemetry_reviews. Either form is read-only.
+  const collected = [];
+  const single = artifacts.hil_telemetry_review;
+  if (single && typeof single === "object" && !Array.isArray(single)) {
+    collected.push(single);
+  }
+  for (const item of asArray(artifacts.hil_telemetry_reviews)) {
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      collected.push(item);
+    }
+  }
+  if (!collected.length) return "";
+
+  const renderFinding = (finding) => {
+    const item = asObject(finding);
+    const severity = String(item.severity || "info");
+    const cls = severity === "blocking"
+      ? "autonomy-reason autonomy-reason-blocked"
+      : severity === "warning"
+        ? "autonomy-reason autonomy-reason-warning"
+        : "autonomy-reason";
+    const detail = asObject(item.detail);
+    const detailText = Object.entries(detail)
+      .map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : String(v)}`)
+      .join(" · ");
+    return [
+      `<li class="${cls}"><span class="mono">${escapeHtml(item.bucket || "-")}</span>`,
+      ` <span class="item-meta mono">${escapeHtml(item.reason || "-")}</span>`,
+      detailText ? ` <span class="item-meta mono">${escapeHtml(detailText)}</span>` : "",
+      ` <span class="tag autonomy-safety-${severity === "blocking" ? "warn" : severity === "warning" ? "warn" : "ok"}">severity=${escapeHtml(severity)}</span>`,
+      `</li>`,
+    ].join("");
+  };
+
+  const renderReview = (review) => {
+    const data = asObject(review);
+    const blocked = asArray(data.blocked_reasons);
+    const warnings = asArray(data.warning_reasons);
+    const findings = asArray(data.findings);
+    const measurementKeys = asArray(data.measurement_keys);
+    const contractIds = asArray(data.contract_ids);
+    const evidenceIds = asArray(data.evidence_ids);
+    const envelopeIds = asArray(data.envelope_ids);
+    const safetyBits = [
+      `operator_approval_required=${String(data.operator_approval_required === true)}`,
+      `operator_approval_performed=${String(data.operator_approval_performed === true)}`,
+      `live_execution_allowed=${String(data.live_execution_allowed === true)}`,
+      `physical_execution_invoked=${String(data.physical_execution_invoked === true)}`,
+      `command_payload_allowed=${String(data.command_payload_allowed === true)}`,
+    ];
+    return [
+      `<div class="detail-section hil-telemetry-review">`,
+      `<div class="k">HIL Telemetry Review</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Status</div><div>${statusTag(data.status || (data.passed ? "passed" : "blocked"))}</div><div class="item-meta mono">${escapeHtml(data.schema_version || "hil_telemetry_review.v1")}</div><div class="item-meta">passed=${escapeHtml(String(data.passed))} required=${escapeHtml(String(data.required === true))}</div></div>`,
+      `<div class="detail-card"><div class="k">Review</div><div class="mono">${escapeHtml(data.review_id || "-")}</div><div class="item-meta mono">contract_ids=${escapeHtml(contractIds.join(", ") || "-")}</div><div class="item-meta mono">evidence_ids=${escapeHtml(String(evidenceIds.length))} envelope_ids=${escapeHtml(String(envelopeIds.length))}</div></div>`,
+      `<div class="detail-card autonomy-reasons-card"><div class="k">blocked_reasons</div>${blocked.length ? `<ul class="autonomy-reason-list">${blocked.map((r) => `<li class="autonomy-reason autonomy-reason-blocked"><span class="mono">${escapeHtml(String(r))}</span></li>`).join("")}</ul>` : `<div class="muted">none</div>`}</div>`,
+      `<div class="detail-card autonomy-reasons-card"><div class="k">warning_reasons</div>${warnings.length ? `<ul class="autonomy-reason-list">${warnings.map((r) => `<li class="autonomy-reason autonomy-reason-warning"><span class="mono">${escapeHtml(String(r))}</span></li>`).join("")}</ul>` : `<div class="muted">none</div>`}</div>`,
+      `<div class="detail-card"><div class="k">Findings</div>${findings.length ? `<ul class="autonomy-reason-list">${findings.map(renderFinding).join("")}</ul>` : `<div class="muted">none</div>`}</div>`,
+      `<div class="detail-card"><div class="k">Measurements</div><div class="item-meta mono">measurement_keys=${escapeHtml(measurementKeys.join(", ") || "-")}</div><div class="item-meta mono">freshness_seconds_max=${escapeHtml(String(data.freshness_seconds_max ?? "-"))}</div><div class="item-meta mono">freshness_threshold_seconds=${escapeHtml(String(data.freshness_threshold_seconds ?? "-"))}</div><div class="item-meta mono">rejected_command_like_payload_count=${escapeHtml(String(data.rejected_command_like_payload_count ?? 0))}</div></div>`,
+      `<div class="detail-card autonomy-safety-card"><div class="k">Safety Boundary</div><div class="chip-row autonomy-safety-badges">${safetyBits.map((bit) => `<span class="tag autonomy-safety-${bit.endsWith("=true") && bit.startsWith("operator_approval_required") ? "ok" : bit.endsWith("=false") ? "ok" : "warn"}">${escapeHtml(bit)}</span>`).join("")}</div></div>`,
+      `</div>`,
+      `</div>`,
+    ].join("");
+  };
+
+  return collected.map(renderReview).join("");
+}
+
+function renderLimitedLiveActionGate(task) {
+  // Read-only renderer for limited_live_action_gate.v1 and
+  // limited_live_action_approval_package.v1. This panel exposes the future
+  // operator-review package and intentionally emits no approval, command, or
+  // execution controls.
+  const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const durable = artifacts.durable_execution && typeof artifacts.durable_execution === "object"
+    ? artifacts.durable_execution
+    : {};
+  const asObject = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+  const firstObject = (...values) => values.find((value) => (
+    value && typeof value === "object" && !Array.isArray(value)
+  )) || {};
+  const asArray = (value) => (Array.isArray(value) ? value : []);
+  const gate = firstObject(
+    artifacts.limited_live_action_gate,
+    durable.limited_live_action_gate,
+  );
+  const approvalPackage = firstObject(
+    artifacts.limited_live_action_approval_package,
+    durable.limited_live_action_approval_package,
+    gate.approval_package,
+  );
+  if (!Object.keys(gate).length && !Object.keys(approvalPackage).length) return "";
+
+  const renderReasonList = (reasons, kind) => {
+    const list = asArray(reasons).filter((reason) => typeof reason === "string" && reason.length);
+    if (!list.length) return `<div class="muted">none</div>`;
+    const cls = kind === "blocked" ? "autonomy-reason autonomy-reason-blocked" : "autonomy-reason autonomy-reason-warning";
+    return `<ul class="autonomy-reason-list">${
+      list.map((reason) => `<li class="${cls}"><span class="mono">${escapeHtml(reason)}</span></li>`).join("")
+    }</ul>`;
+  };
+  const renderRefs = (label, refs) => {
+    const values = asArray(refs).filter(Boolean).map(String);
+    return [
+      `<div class="detail-card">`,
+      `<div class="k">${escapeHtml(label)}</div>`,
+      values.length
+        ? `<ul class="autonomy-reason-list">${values.map((ref) => `<li class="mono">${escapeHtml(ref)}</li>`).join("")}</ul>`
+        : `<div class="muted">none</div>`,
+      `</div>`,
+    ].join("");
+  };
+  const renderSafetyBadges = (source) => {
+    const parts = [];
+    const flag = (label, value, expected) => {
+      const ok = value === expected;
+      const cls = ok ? "tag autonomy-safety-ok" : "tag autonomy-safety-warn";
+      const valueText = value === undefined || value === null ? "?" : String(value);
+      parts.push(`<span class="${cls}">${escapeHtml(label)}=${escapeHtml(valueText)}</span>`);
+    };
+    flag("operator_approval_required", source.operator_approval_required, true);
+    flag("operator_approval_performed", source.operator_approval_performed, false);
+    flag("stronger_execution_allowed", source.stronger_execution_allowed, false);
+    flag("live_execution_allowed", source.live_execution_allowed, false);
+    flag("physical_execution_invoked", source.physical_execution_invoked, false);
+    flag("command_payload_allowed", source.command_payload_allowed, false);
+    flag("dispatch_implementation_present", source.dispatch_implementation_present, false);
+    flag("ros_dispatch_allowed", source.ros_dispatch_allowed, false);
+    flag("mavlink_dispatch_allowed", source.mavlink_dispatch_allowed, false);
+    flag("actuator_execution_allowed", source.actuator_execution_allowed, false);
+    return `<div class="chip-row autonomy-safety-badges">${parts.join("")}</div>`;
+  };
+  const metadata = asObject(gate.metadata);
+  const approvalMetadata = asObject(approvalPackage.metadata);
+  const allowlistScope = metadata.action_allowlist_scope
+    || approvalMetadata.action_allowlist_scope
+    || "proposal_categories_only";
+  const requiredPreconditions = asArray(gate.required_preconditions);
+  const missingPreconditions = asArray(gate.missing_preconditions);
+  const requiredEvidenceRefs = asArray(approvalPackage.required_evidence_refs);
+  return [
+    `<div class="detail-section autonomy-section limited-live-action-gate">`,
+    `<div class="k">Limited Live Action Gate</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Gate</div><div>${statusTag(gate.status || (gate.passed ? "operator_review_ready" : "blocked"))}</div><div class="item-meta mono">${escapeHtml(gate.schema_version || "limited_live_action_gate.v1")}</div><div class="item-meta">passed=${escapeHtml(String(gate.passed))}</div></div>`,
+    `<div class="detail-card"><div class="k">Subject</div><div class="mono">${escapeHtml(gate.subject_id || approvalPackage.subject_id || "-")}</div><div class="item-meta mono">gate_id=${escapeHtml(gate.gate_id || "-")}</div><div class="item-meta mono">proposed_action_ref=${escapeHtml(gate.proposed_action_ref || approvalPackage.proposed_action_ref || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Action Allowlist Scope</div><div>${statusTag(allowlistScope)}</div><div class="item-meta mono">action_allowlist_scope=${escapeHtml(allowlistScope)}</div><div class="item-meta">proposal categories only; no execution grant</div></div>`,
+    `<div class="detail-card"><div class="k">Preconditions</div><div class="item-meta mono">required=${escapeHtml(String(requiredPreconditions.length))}</div><div class="item-meta mono">missing=${escapeHtml(missingPreconditions.join(", ") || "-")}</div></div>`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">blocked_reasons</div>${renderReasonList(gate.blocked_reasons, "blocked")}</div>`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">warning_reasons</div>${renderReasonList(gate.warning_reasons, "warning")}</div>`,
+    `<div class="detail-card autonomy-safety-card"><div class="k">Safety Boundary</div>${renderSafetyBadges(gate)}</div>`,
+    `</div>`,
+    `<div class="k">Evidence Refs</div>`,
+    `<div class="detail-grid">`,
+    renderRefs("autonomy_gate_result_refs", gate.autonomy_gate_result_refs),
+    renderRefs("hil_telemetry_review_refs", gate.hil_telemetry_review_refs),
+    renderRefs("emergency_stop_evidence_refs", gate.emergency_stop_evidence_refs),
+    renderRefs("rollback_plan_refs", gate.rollback_plan_refs),
+    renderRefs("action_allowlist_refs", gate.action_allowlist_refs),
+    renderRefs("responsibility_ack_refs", gate.responsibility_ack_refs),
+    renderRefs("audit_refs", gate.audit_refs),
+    `</div>`,
+    Object.keys(approvalPackage).length ? [
+      `<div class="k">Operator Review Package</div>`,
+      `<div class="detail-grid">`,
+      `<div class="detail-card"><div class="k">Package</div><div class="mono">${escapeHtml(approvalPackage.approval_package_id || "-")}</div><div class="item-meta mono">${escapeHtml(approvalPackage.schema_version || "limited_live_action_approval_package.v1")}</div></div>`,
+      `<div class="detail-card"><div class="k">Operator Role</div><div>${escapeHtml(approvalPackage.required_operator_role || "-")}</div><div class="item-meta">approval_performed=${escapeHtml(String(approvalPackage.operator_approval_performed))}</div></div>`,
+      `<div class="detail-card"><div class="k">Responsibility Summary</div><div class="item-detail">${escapeHtml(compactText(approvalPackage.responsibility_summary || "-", 260))}</div></div>`,
+      `<div class="detail-card"><div class="k">Required Evidence</div><div class="item-meta mono">required_evidence_refs=${escapeHtml(String(requiredEvidenceRefs.length))}</div><div class="item-meta mono">${escapeHtml(requiredEvidenceRefs.join(", ") || "-")}</div></div>`,
+      `<div class="detail-card autonomy-safety-card"><div class="k">Review Requirements</div><div class="chip-row autonomy-safety-badges">`,
+      `<span class="tag autonomy-safety-ok">emergency_stop_required=${escapeHtml(String(approvalPackage.emergency_stop_required === true))}</span>`,
+      `<span class="tag autonomy-safety-ok">rollback_plan_required=${escapeHtml(String(approvalPackage.rollback_plan_required === true))}</span>`,
+      `<span class="tag autonomy-safety-ok">action_allowlist_required=${escapeHtml(String(approvalPackage.action_allowlist_required === true))}</span>`,
+      `</div></div>`,
+      `</div>`,
+    ].join("") : "",
+    `</div>`,
+  ].join("");
+}
+
+function renderLimitedLiveActionRehearsal(task) {
+  // Read-only renderer for limited_live_action_rehearsal.v1. This is the final
+  // dry-run evidence package before a future operator review; it deliberately
+  // emits no approval, command, dispatch, or execution controls.
+  const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const durable = artifacts.durable_execution && typeof artifacts.durable_execution === "object"
+    ? artifacts.durable_execution
+    : {};
+  const asObject = (value) => (value && typeof value === "object" && !Array.isArray(value) ? value : {});
+  const firstObject = (...values) => values.find((value) => (
+    value && typeof value === "object" && !Array.isArray(value)
+  )) || {};
+  const asArray = (value) => (Array.isArray(value) ? value : []);
+  const rehearsal = firstObject(
+    artifacts.limited_live_action_rehearsal,
+    durable.limited_live_action_rehearsal,
+  );
+  if (!Object.keys(rehearsal).length) return "";
+
+  const renderReasonList = (reasons, kind) => {
+    const list = asArray(reasons).filter((reason) => typeof reason === "string" && reason.length);
+    if (!list.length) return `<div class="muted">none</div>`;
+    const cls = kind === "blocked" ? "autonomy-reason autonomy-reason-blocked" : "autonomy-reason autonomy-reason-warning";
+    return `<ul class="autonomy-reason-list">${
+      list.map((reason) => `<li class="${cls}"><span class="mono">${escapeHtml(reason)}</span></li>`).join("")
+    }</ul>`;
+  };
+  const renderRefs = (label, refs) => {
+    const values = asArray(refs).filter(Boolean).map(String);
+    return [
+      `<div class="detail-card">`,
+      `<div class="k">${escapeHtml(label)}</div>`,
+      values.length
+        ? `<ul class="autonomy-reason-list">${values.map((ref) => `<li class="mono">${escapeHtml(ref)}</li>`).join("")}</ul>`
+        : `<div class="muted">none</div>`,
+      `</div>`,
+    ].join("");
+  };
+  const renderSafetyBadges = (source) => {
+    const parts = [];
+    const flag = (label, value, expected) => {
+      const ok = value === expected;
+      const cls = ok ? "tag autonomy-safety-ok" : "tag autonomy-safety-warn";
+      const valueText = value === undefined || value === null ? "?" : String(value);
+      parts.push(`<span class="${cls}">${escapeHtml(label)}=${escapeHtml(valueText)}</span>`);
+    };
+    flag("operator_approval_required", source.operator_approval_required, true);
+    flag("operator_approval_performed", source.operator_approval_performed, false);
+    flag("stronger_execution_allowed", source.stronger_execution_allowed, false);
+    flag("live_execution_allowed", source.live_execution_allowed, false);
+    flag("physical_execution_invoked", source.physical_execution_invoked, false);
+    flag("command_payload_allowed", source.command_payload_allowed, false);
+    flag("dispatch_implementation_present", source.dispatch_implementation_present, false);
+    flag("ros_dispatch_allowed", source.ros_dispatch_allowed, false);
+    flag("mavlink_dispatch_allowed", source.mavlink_dispatch_allowed, false);
+    flag("actuator_execution_allowed", source.actuator_execution_allowed, false);
+    flag("rule_based", source.rule_based, true);
+    flag("llm_judge_used", source.llm_judge_used, false);
+    return `<div class="chip-row autonomy-safety-badges">${parts.join("")}</div>`;
+  };
+  const gateSnapshot = asObject(rehearsal.gate_snapshot);
+  const approvalSnapshot = asObject(rehearsal.approval_package_snapshot);
+  const metadata = asObject(rehearsal.metadata);
+  const evidenceRefs = asArray(rehearsal.evidence_refs);
+  const auditRefs = asArray(rehearsal.audit_refs);
+  return [
+    `<div class="detail-section autonomy-section limited-live-action-rehearsal">`,
+    `<div class="k">Limited Live Action Rehearsal</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Rehearsal</div><div>${statusTag(rehearsal.readiness_status || "blocked")}</div><div class="item-meta mono">${escapeHtml(rehearsal.schema_version || "limited_live_action_rehearsal.v1")}</div><div class="item-meta mono">rehearsal_id=${escapeHtml(rehearsal.rehearsal_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Mission</div><div class="mono">${escapeHtml(rehearsal.mission_contract_ref || "-")}</div><div class="item-meta mono">created_at=${escapeHtml(formatTimestamp(rehearsal.created_at))}</div></div>`,
+    `<div class="detail-card"><div class="k">Gate Package</div><div class="mono">${escapeHtml(rehearsal.limited_live_action_gate_ref || gateSnapshot.gate_id || "-")}</div><div class="item-meta mono">approval_package=${escapeHtml(rehearsal.limited_live_action_approval_package_ref || approvalSnapshot.approval_package_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">HIL Review</div><div class="mono">${escapeHtml(rehearsal.hil_telemetry_review_ref || "-")}</div><div class="item-meta mono">autonomy_gate=${escapeHtml(rehearsal.autonomy_gate_result_ref || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Emergency Stop</div><div class="mono">${escapeHtml(rehearsal.emergency_stop_evidence_ref || "-")}</div><div class="item-meta mono">rollback_plan=${escapeHtml(rehearsal.rollback_plan_ref || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Responsibility</div><div class="mono">${escapeHtml(rehearsal.operator_responsibility_ack_ref || "-")}</div><div class="item-meta mono">audit_refs=${escapeHtml(String(auditRefs.length))}</div></div>`,
+    `<div class="detail-card autonomy-safety-card"><div class="k">Safety Boundary</div>${renderSafetyBadges(rehearsal)}</div>`,
+    `<div class="detail-card"><div class="k">Rehearsal Metadata</div><div>${statusTag(metadata.rehearsal_only === true ? "rehearsal_only" : "recorded")}</div><div class="item-meta mono">${escapeHtml(`approval_created=${String(metadata.approval_created === true)} · promotion_created=${String(metadata.promotion_created === true)} · runtime_reuse_created=${String(metadata.runtime_reuse_created === true)}`)}</div></div>`,
+    `</div>`,
+    `<div class="k">Readiness Reasons</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">missing_preconditions</div>${renderReasonList(rehearsal.missing_preconditions, "blocked")}</div>`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">blocked_reasons</div>${renderReasonList(rehearsal.blocked_reasons, "blocked")}</div>`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">warning_reasons</div>${renderReasonList(rehearsal.warning_reasons, "warning")}</div>`,
+    `</div>`,
+    `<div class="k">Evidence Refs</div>`,
+    `<div class="detail-grid">`,
+    renderRefs("evidence_refs", evidenceRefs),
+    renderRefs("audit_refs", auditRefs),
+    `</div>`,
+    `</div>`,
+  ].join("");
+}
+
+function renderTenthStageReadinessCheck(task) {
+  // Read-only renderer for tenth_stage_readiness_check.v1. This is the
+  // pre-10合目 checklist; it can show organization-review readiness, but live
+  // action remains blocked and no approval / dispatch controls are emitted.
+  const artifacts = task && task.artifacts && typeof task.artifacts === "object" ? task.artifacts : {};
+  const durable = artifacts.durable_execution && typeof artifacts.durable_execution === "object"
+    ? artifacts.durable_execution
+    : {};
+  const firstObject = (...values) => values.find((value) => (
+    value && typeof value === "object" && !Array.isArray(value)
+  )) || {};
+  const asArray = (value) => (Array.isArray(value) ? value : []);
+  const readiness = firstObject(
+    artifacts.tenth_stage_readiness_check,
+    durable.tenth_stage_readiness_check,
+  );
+  if (!Object.keys(readiness).length) return "";
+
+  const renderReasonList = (reasons, kind) => {
+    const list = asArray(reasons).filter((reason) => typeof reason === "string" && reason.length);
+    if (!list.length) return `<div class="muted">none</div>`;
+    const cls = kind === "warning"
+      ? "autonomy-reason autonomy-reason-warning"
+      : "autonomy-reason autonomy-reason-blocked";
+    return `<ul class="autonomy-reason-list">${
+      list.map((reason) => `<li class="${cls}"><span class="mono">${escapeHtml(reason)}</span></li>`).join("")
+    }</ul>`;
+  };
+  const renderRefs = (label, refs) => {
+    const values = asArray(refs).filter(Boolean).map(String);
+    return [
+      `<div class="detail-card">`,
+      `<div class="k">${escapeHtml(label)}</div>`,
+      values.length
+        ? `<ul class="autonomy-reason-list">${values.map((ref) => `<li class="mono">${escapeHtml(ref)}</li>`).join("")}</ul>`
+        : `<div class="muted">none</div>`,
+      `</div>`,
+    ].join("");
+  };
+  const renderSafetyBadges = (source) => {
+    const parts = [];
+    const flag = (label, value, expected) => {
+      const ok = value === expected;
+      const cls = ok ? "tag autonomy-safety-ok" : "tag autonomy-safety-warn";
+      const valueText = value === undefined || value === null ? "?" : String(value);
+      parts.push(`<span class="${cls}">${escapeHtml(label)}=${escapeHtml(valueText)}</span>`);
+    };
+    flag("organization_review_required", source.organization_review_required, true);
+    flag("operator_approval_required", source.operator_approval_required, true);
+    flag("operator_approval_performed", source.operator_approval_performed, false);
+    flag("stronger_execution_allowed", source.stronger_execution_allowed, false);
+    flag("live_execution_allowed", source.live_execution_allowed, false);
+    flag("physical_execution_invoked", source.physical_execution_invoked, false);
+    flag("command_payload_allowed", source.command_payload_allowed, false);
+    flag("dispatch_implementation_present", source.dispatch_implementation_present, false);
+    flag("ros_dispatch_allowed", source.ros_dispatch_allowed, false);
+    flag("mavlink_dispatch_allowed", source.mavlink_dispatch_allowed, false);
+    flag("actuator_execution_allowed", source.actuator_execution_allowed, false);
+    flag("rule_based", source.rule_based, true);
+    flag("llm_judge_used", source.llm_judge_used, false);
+    return `<div class="chip-row autonomy-safety-badges">${parts.join("")}</div>`;
+  };
+  const auditRefs = asArray(readiness.audit_refs);
+  const evidenceRefs = asArray(readiness.evidence_refs);
+  return [
+    `<div class="detail-section autonomy-section tenth-stage-readiness-check">`,
+    `<div class="k">10th-Stage Readiness Check</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card"><div class="k">Checklist</div><div>${statusTag(readiness.readiness_status || "blocked")}</div><div class="item-meta mono">${escapeHtml(readiness.schema_version || "tenth_stage_readiness_check.v1")}</div><div class="item-meta mono">check_id=${escapeHtml(readiness.check_id || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Live Action Status</div><div>${statusTag(readiness.live_action_status || "blocked_for_live_action")}</div><div class="item-meta">organization review is not live execution</div></div>`,
+    `<div class="detail-card"><div class="k">Rehearsal</div><div class="mono">${escapeHtml(readiness.limited_live_action_rehearsal_ref || "-")}</div><div class="item-meta mono">mission=${escapeHtml(readiness.mission_contract_ref || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Organization</div><div class="mono">${escapeHtml(readiness.adopting_organization_ref || "-")}</div><div class="item-meta mono">hardware_owner=${escapeHtml(readiness.hardware_owner_ref || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Controller</div><div class="mono">${escapeHtml(readiness.certified_or_autopilot_controller_ref || "-")}</div><div class="item-meta mono">emergency_stop_process=${escapeHtml(readiness.emergency_stop_process_ref || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Emergency Stop</div><div class="mono">${escapeHtml(readiness.emergency_stop_evidence_ref || "-")}</div><div class="item-meta mono">rollback_plan=${escapeHtml(readiness.rollback_plan_ref || "-")}</div></div>`,
+    `<div class="detail-card"><div class="k">Responsibility</div><div class="mono">${escapeHtml(readiness.operator_responsibility_ack_ref || "-")}</div><div class="item-meta mono">audit_refs=${escapeHtml(String(auditRefs.length))}</div></div>`,
+    `<div class="detail-card autonomy-safety-card"><div class="k">Safety Boundary</div>${renderSafetyBadges(readiness)}</div>`,
+    `</div>`,
+    `<div class="k">Readiness Reasons</div>`,
+    `<div class="detail-grid">`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">missing_preconditions</div>${renderReasonList(readiness.missing_preconditions, "blocked")}</div>`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">blocked_reasons</div>${renderReasonList(readiness.blocked_reasons, "blocked")}</div>`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">live_action_blocked_reasons</div>${renderReasonList(readiness.live_action_blocked_reasons, "blocked")}</div>`,
+    `<div class="detail-card autonomy-reasons-card"><div class="k">warning_reasons</div>${renderReasonList(readiness.warning_reasons, "warning")}</div>`,
+    `</div>`,
+    `<div class="k">Evidence Refs</div>`,
+    `<div class="detail-grid">`,
+    renderRefs("evidence_refs", evidenceRefs),
+    renderRefs("audit_refs", auditRefs),
+    `</div>`,
+    `</div>`,
+  ].join("");
+}
+
+
 function renderTaskDetail(task) {
   const relatedTasks = dashboardState.relatedTasks || [];
   const childTasks = dashboardState.childTasks || [];
@@ -2381,7 +2938,12 @@ function renderTaskDetail(task) {
     `</div>`,
     renderLongRunningTaskState(task),
     renderToyGridReplayArtifacts(task),
+    renderAutonomyArtifacts(task),
     renderHilTelemetryEvidence(task),
+    renderHilTelemetryReview(task),
+    renderLimitedLiveActionGate(task),
+    renderLimitedLiveActionRehearsal(task),
+    renderTenthStageReadinessCheck(task),
     renderTaskTimeline(taskTimeline, taskTimelinePagination),
     `<div class="detail-section">`,
     `<div class="k">Audit Trail</div>`,

@@ -7,6 +7,8 @@ from src.runtime.task_keywords import (
     COMPUTER_USE_KEYWORDS,
     CURRENT_BROWSER_KEYWORDS,
     SPREADSHEET_KEYWORDS,
+    TEXT_ENTRY_KEYWORDS,
+    prefers_isolated_browser_for_goal,
 )
 
 VALID_TARGETS = {"root_agent", "control_loop", "specialist", "dynamic_agent"}
@@ -238,6 +240,7 @@ _SKILL_KEYWORDS = {
     "skill",
     "スキル",
 }
+
 
 
 @dataclass
@@ -512,6 +515,13 @@ def decision_from_payload(
             confidence=0.94,
         )
 
+    if _requires_isolated_browser_control_loop(fallback_message):
+        return RoutingDecision(
+            target="control_loop",
+            reason="visible text-entry request should use an isolated browser control loop",
+            confidence=0.94,
+        )
+
     if _requires_desktop_control_loop(fallback_message):
         return RoutingDecision(
             target="control_loop",
@@ -546,7 +556,11 @@ def targets_user_browser(text: str) -> bool:
 
 def _requires_current_browser_control_loop(text: str) -> bool:
     normalized = (text or "").strip().lower()
-    if not normalized or not targets_user_browser(normalized):
+    if (
+        not normalized
+        or not targets_user_browser(normalized)
+        or prefers_isolated_browser_for_goal(normalized)
+    ):
         return False
 
     has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
@@ -557,6 +571,20 @@ def _requires_current_browser_control_loop(text: str) -> bool:
     has_desktop = _contains_any(normalized, _DESKTOP_CONTROL_KEYWORDS | _DESKTOP_VIEW_KEYWORDS)
 
     return has_spreadsheet or has_research or has_longform or ((has_browser or has_desktop) and has_sequence)
+
+
+def _requires_isolated_browser_control_loop(text: str) -> bool:
+    normalized = (text or "").strip().lower()
+    if not normalized or not prefers_isolated_browser_for_goal(normalized):
+        return False
+
+    has_spreadsheet = _contains_any(normalized, SPREADSHEET_KEYWORDS)
+    has_text_entry = _contains_any(normalized, TEXT_ENTRY_KEYWORDS)
+    has_research = _contains_any(normalized, _RESEARCH_KEYWORDS)
+    has_longform = _contains_any(normalized, _LONGFORM_KEYWORDS)
+    has_sequence = _contains_any(normalized, _SEQUENCE_KEYWORDS)
+
+    return has_spreadsheet or has_text_entry or has_research or has_longform or has_sequence
 
 
 def _requires_desktop_control_loop(text: str) -> bool:
@@ -574,7 +602,11 @@ def _requires_desktop_control_loop(text: str) -> bool:
 
 def _is_current_tab_web_flow(text: str) -> bool:
     normalized = (text or "").strip().lower()
-    if not normalized or not targets_user_browser(normalized):
+    if (
+        not normalized
+        or not targets_user_browser(normalized)
+        or prefers_isolated_browser_for_goal(normalized)
+    ):
         return False
 
     if _is_control_ui_chat_flow(normalized):
@@ -594,6 +626,8 @@ def _is_current_tab_web_flow(text: str) -> bool:
 def _is_computer_use_specialist_flow(text: str) -> bool:
     normalized = (text or "").strip().lower()
     if not normalized:
+        return False
+    if prefers_isolated_browser_for_goal(normalized):
         return False
 
     has_current_browser = targets_user_browser(normalized)

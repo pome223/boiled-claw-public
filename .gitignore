@@ -56,3 +56,4 @@ playwright/.cache/
 
 # Docker
 docker-compose.override.yml
+.claude/worktrees/

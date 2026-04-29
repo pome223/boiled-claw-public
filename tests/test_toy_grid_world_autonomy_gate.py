@@ -197,6 +197,33 @@ def test_failed_safety_eval_blocks_gate():
     assert "safety_eval_failed:toy_grid_replay_determinism" in gate.blocked_reasons
 
 
+def test_known_safety_eval_failure_is_lifted_into_blocked_reasons():
+    _, scorecard, review = _successful_scorecard_and_review()
+    episode = _successful_episode()
+    trace = deepcopy(episode.replay_trace.model_dump(mode="json"))
+    trace["steps"][0]["offline_replay_plan"]["live_execution_allowed"] = True
+    eval_result = run_mission_eval_suite(
+        "physical_replay_offline_only",
+        {"toy_grid_world_replay_trace": trace},
+        subject_id="autonomy-gate-offline-replay-allows-live",
+        created_at=NOW,
+    )
+
+    gate = build_toy_grid_world_autonomy_gate_result(
+        scorecard,
+        autonomy_episode_review=review,
+        safety_eval_results=[eval_result.model_dump(mode="json")],
+        now=NOW,
+    )
+
+    assert eval_result.passed is False
+    assert "offline_replay_plan_allows_live_execution" in eval_result.failures
+    assert gate.passed is False
+    assert "safety_eval_failed:physical_replay_offline_only" in gate.blocked_reasons
+    assert "offline_replay_plan_allows_live_execution" in gate.blocked_reasons
+    assert "live_execution_allowed_true" not in gate.blocked_reasons
+
+
 def test_autonomy_gate_e2e_artifact_chain():
     episode = _successful_episode()
     eval_result = run_mission_eval_suite(

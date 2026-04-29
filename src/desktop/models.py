@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from src.bridges.common_schema import (
     BridgePingResult,
     CapabilityDescriptor,
@@ -23,6 +23,14 @@ class DesktopRequestBase(BaseModel):
     user_id: str = Field(min_length=1)
     agent_name: str = Field(min_length=1)
     approval_token: Optional[str] = None
+
+
+def _normalize_window_id_value(value: Any) -> Any:
+    if value is None or isinstance(value, str):
+        return value
+    if isinstance(value, int):
+        return str(value)
+    return value
 
 
 class DesktopRuntimeStatusRequest(DesktopRequestBase):
@@ -60,6 +68,11 @@ class DesktopElementSelector(BaseModel):
     identifier: Optional[str] = None
     value_contains: Optional[str] = None
     index: int = Field(default=0, ge=0)
+
+    @field_validator("window_id", mode="before")
+    @classmethod
+    def normalize_window_id(cls, value: Any) -> Any:
+        return _normalize_window_id_value(value)
 
     @model_validator(mode="after")
     def validate_selector(self) -> "DesktopElementSelector":
@@ -121,6 +134,11 @@ class DesktopWaitWindowRequest(DesktopRequestBase):
     timeout_seconds: float = Field(default=5.0, gt=0.0, le=120.0)
     poll_interval_seconds: float = Field(default=0.2, gt=0.0, le=5.0)
 
+    @field_validator("window_id", mode="before")
+    @classmethod
+    def normalize_window_id(cls, value: Any) -> Any:
+        return _normalize_window_id_value(value)
+
     @model_validator(mode="after")
     def validate_wait_target(self) -> "DesktopWaitWindowRequest":
         if self.app_name or self.window_id or self.title:
@@ -149,6 +167,11 @@ class DesktopFrontmostAppResult(BaseModel):
 class DesktopAxSnapshotRequest(DesktopRequestBase):
     app_name: Optional[str] = None
     window_id: Optional[str] = None
+
+    @field_validator("window_id", mode="before")
+    @classmethod
+    def normalize_window_id(cls, value: Any) -> Any:
+        return _normalize_window_id_value(value)
 
 
 class DesktopAxSnapshotResult(BaseModel):
@@ -197,6 +220,11 @@ class DesktopFocusWindowRequest(DesktopRequestBase):
     app_name: Optional[str] = None
     window_id: Optional[str] = None
     title: Optional[str] = None
+
+    @field_validator("window_id", mode="before")
+    @classmethod
+    def normalize_window_id(cls, value: Any) -> Any:
+        return _normalize_window_id_value(value)
 
     @model_validator(mode="after")
     def validate_focus_target(self) -> "DesktopFocusWindowRequest":
