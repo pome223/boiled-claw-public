@@ -86,6 +86,12 @@ simulator, and telemetry-only HIL.
 For the milestone-level summary, read
 [oss-v1-readiness-boundary.md](oss-v1-readiness-boundary.md).
 
+For a public, non-reproducible narrative of the private PX4/Gazebo drone
+delivery milestone, read
+[mission-os-px4-gazebo-delivery.md](mission-os-px4-gazebo-delivery.md). It
+publishes the Mission OS safety architecture and result shape without releasing
+the implementation, simulator setup, transport details, or smoke scripts.
+
 Two paths are now closed enough to describe as an OSS v1.0 candidate boundary:
 
 This is a readiness boundary rather than a final release claim. It means the
