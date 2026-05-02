@@ -216,6 +216,11 @@ What exists today:
   Control UI visibility.
 - Simulation-first physical runtime artifacts for validation, telemetry,
   action envelopes, governor decisions, and offline replay plans.
+- A private PX4/Gazebo drone delivery milestone has reached the
+  architecture/result stage: Mission OS manages an operator-approved,
+  simulation-only delivery flow from pickup -> enroute -> dropoff -> completed,
+  while implementation, transport details, simulator setup, and reproduction
+  steps remain private.
 - HIL telemetry-only evidence attachment for read-only hardware-in-the-loop
   telemetry, with command-like payload rejection and no action, actuator, ROS,
   or live-execution path. The Control UI renders accepted HIL telemetry
