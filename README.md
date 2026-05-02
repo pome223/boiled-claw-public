@@ -175,6 +175,12 @@ is a Japanese-first deep dive, while `architecture/` contains focused notes on
 routing, bridges, control-loop memory, Mission OS, and trajectory-native
 self-improvement.
 
+The public note
+[Mission OS for PX4/Gazebo Drone Delivery](architecture/mission-os-px4-gazebo-delivery.md)
+summarizes a private simulation-first drone delivery milestone at the
+architecture/result level. It intentionally does not publish the implementation,
+transport details, simulator setup, or reproduction steps.
+
 ## Current Direction
 
 boiled-claw is now moving from a closed-loop task runtime toward a **Mission OS**:
