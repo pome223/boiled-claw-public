@@ -181,6 +181,13 @@ summarizes a private simulation-first drone delivery milestone at the
 architecture/result level. It intentionally does not publish the implementation,
 transport details, simulator setup, or reproduction steps.
 
+Two follow-up public notes describe the next private milestone without exposing
+implementation details: [Mission OS Multi-Phase Delivery](architecture/mission-os-multi-phase-delivery.md)
+and [Mission OS Fleet Memory](architecture/mission-os-fleet-memory.md). They
+cover the shift from single-flight completion to multi-phase mission control and
+mission-to-mission feedback while preserving the rule that fleet memory is
+evidence, not authority.
+
 ## Current Direction
 
 boiled-claw is now moving from a closed-loop task runtime toward a **Mission OS**:
@@ -239,6 +246,16 @@ What exists today:
   emergency-stop-process preconditions explicit. A complete check can reach
   `ready_for_organization_review`, while live action remains blocked. The
   Control UI renders the checklist read-only.
+- A private PX4/Gazebo line has advanced from single-flight delivery evidence
+  to multi-phase mission control: mission contracts, phase state, health
+  snapshots, phase gates, replay timelines, and curated corpus cases can govern
+  a simulated delivery mission as a sequence of reviewable phases rather than a
+  single success flag.
+- The next private layer adds fleet memory and mission-to-mission feedback.
+  Past missions can become evidence for planning, gate strictness, and risk
+  scoring, but memory cannot directly dispatch, bypass approvals, grant stronger
+  execution, target hardware, upload missions, use unbounded streams, or mutate
+  the simulator.
 
 Near-term work is focused on documenting the current safety boundary and then
 designing stronger execution gates:
