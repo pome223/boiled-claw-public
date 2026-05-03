@@ -92,6 +92,14 @@ delivery milestone, read
 publishes the Mission OS safety architecture and result shape without releasing
 the implementation, simulator setup, transport details, or smoke scripts.
 
+For the next public-safe milestone notes, read
+[mission-os-multi-phase-delivery.md](mission-os-multi-phase-delivery.md) and
+[mission-os-fleet-memory.md](mission-os-fleet-memory.md). These notes describe
+the move from single-flight evidence to multi-phase mission control and then to
+mission-to-mission feedback. They keep the same publication boundary:
+principles and results are public, while implementation and reproduction
+details remain private.
+
 Two paths are now closed enough to describe as an OSS v1.0 candidate boundary:
 
 This is a readiness boundary rather than a final release claim. It means the
