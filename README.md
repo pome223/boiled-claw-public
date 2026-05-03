@@ -27,6 +27,23 @@ upstream-curated.
 > By using or running this code, you accept responsibility for any effects on
 > your machine, accounts, data, or connected services.
 
+## Public Documentation Boundary
+
+This public repository documents boiled-claw as an open reference runtime and
+publishes public-safe Mission OS principles and milestone results.
+
+It is intentionally not a reproduction guide for private simulation validation
+assets. Public docs should stay at the level of:
+
+- principles and architecture boundaries
+- reviewable milestone outcomes
+- safety policies and non-goals
+- operator-facing evidence concepts
+
+Public docs should not expose private runtime internals, exact validation
+chains, low-level transport details, simulator setup, private smoke procedures,
+raw logs, output paths, or implementation-adjacent artifact walkthroughs.
+
 ## Why boiled-claw
 
 The next important open agent framework will not be the biggest model wrapper.
@@ -198,75 +215,39 @@ promotion.
 The core loop is:
 
 ```text
-MissionContract
-  -> control_supervisor task
-  -> durable_execution
-  -> execute / verify / recover
-  -> mission_review
-  -> mission_eval_result
-  -> benchmark-gated promotion package
-  -> approved memory / skill / capability / policy
-  -> future mission reuse
+mission intent
+  -> evidence capture
+  -> gate or verifier decision
+  -> recovery or escalation policy
+  -> replayable task history
+  -> approval-gated promotion or reuse
 ```
 
 What exists today:
 
-- Browser-first recovery with trajectory capture and replay.
-- Live `control_supervisor` missions with Mission Contract, task graph,
-  scheduler queue, heartbeat, checkpoint, resume, and typed recovery decisions.
-- Mission scorecards, post-mission review, approval-gated memory candidates,
-  mission templates, deterministic mission eval suites, promotion packages, and
-  artifact-only approved promotion paths with mission-start reuse plans.
-- Toy grid-world plan-only autonomy, dry-run autonomous episodes, autonomy
-  scorecards/reviews, and rule-based autonomy gate results.
-- Current-tab Google Sheets vertical slice with destination-bound evidence and
-  Control UI visibility.
-- Simulation-first physical runtime artifacts for validation, telemetry,
-  action envelopes, governor decisions, and offline replay plans.
-- HIL telemetry-only evidence attachment for read-only hardware-in-the-loop
-  telemetry, with command-like payload rejection and no action, actuator, ROS,
-  or live-execution path. The Control UI renders accepted HIL telemetry
-  contract, envelope, evidence, freshness, findings, and safety-boundary flags
-  as read-only task detail artifacts.
-- HIL telemetry review and mock-source fixtures that feed the same rule-based
-  autonomy gates without connecting to real hardware, ROS, MAVLink, PX4, or any
-  command channel.
-- Limited live physical action gate design artifacts that collect autonomy
-  gate refs, HIL telemetry review refs, emergency-stop evidence, rollback
-  plans, proposal-category action allowlists, responsibility acknowledgements,
-  audit refs, and an operator-review package while still keeping stronger
-  execution disallowed. The Control UI renders this gate and approval package
-  as read-only task detail artifacts.
-- Limited live action rehearsal artifacts that assemble the final dry-run
-  evidence package before any future operator-reviewed limited action can be
-  considered. Rehearsal readiness is still not dispatch or approval, and the
-  Control UI renders the package read-only.
-- 10th-stage readiness checks that read the rehearsal package and make the
-  remaining organization, hardware-owner, certified/autopilot-controller, and
-  emergency-stop-process preconditions explicit. A complete check can reach
-  `ready_for_organization_review`, while live action remains blocked. The
-  Control UI renders the checklist read-only.
-- A private PX4/Gazebo line has advanced from single-flight delivery evidence
-  to multi-phase mission control: mission contracts, phase state, health
-  snapshots, phase gates, replay timelines, and curated corpus cases can govern
-  a simulated delivery mission as a sequence of reviewable phases rather than a
-  single success flag.
-- The next private layer adds fleet memory and mission-to-mission feedback.
-  Past missions can become evidence for planning, gate strictness, and risk
-  scoring, but memory cannot directly dispatch, bypass approvals, grant stronger
-  execution, target hardware, upload missions, use unbounded streams, or mutate
-  the simulator.
+- Browser-first recovery with trajectory capture, verification, and replay.
+- Long-running mission supervision that keeps intent, evidence, gates, recovery,
+  review, and reuse visible as task state.
+- Approval-gated improvement loops that benchmark candidates before promotion.
+- Plan-only autonomy and simulation-first validation surfaces that stay
+  evidence-backed and reviewable.
+- Current-tab practical tasks with destination-bound evidence and Control UI
+  visibility.
+- Read-only physical-adjacent telemetry and validation concepts that keep
+  action, actuator, hardware, and live execution paths closed.
+- Private simulation-first milestones that have moved from single-flight
+  delivery evidence to multi-phase mission control and fleet-memory feedback.
+  Public notes describe the architecture and result shape only.
 
 Near-term work is focused on documenting the current safety boundary and then
 designing stronger execution gates:
 
-- Keep reuse plans, autonomy gates, and HIL telemetry reviews operator-visible
-  and evidence-backed.
-- Keep physical work simulation-first or telemetry-only until replay, eval,
-  review, and operator approval gates are mature.
-- Keep the limited live physical action gate as a schema / policy boundary
-  until emergency-stop, rollback, allowlist, audit, and responsibility evidence
-  are mature. It does not add dispatch or actuator implementation.
+- Keep reuse plans, autonomy gates, and telemetry reviews operator-visible and
+  evidence-backed.
+- Keep physical-adjacent work simulation-first or telemetry-only until replay,
+  evaluation, review, and operator approval gates are mature.
+- Keep stronger execution as a policy boundary until emergency-stop, rollback,
+  allowlist, audit, and responsibility evidence are mature.
 
 See [architecture/README.md](architecture/README.md) for the short system
 overview and
@@ -283,64 +264,32 @@ contract, evidence, telemetry, verifier, replay, eval, review, gate, and
 operator-approval layer above those execution surfaces.
 
 This is a readiness boundary, not a final release claim: it demonstrates
-reproducible, read-only, evidence-backed artifact chains for evaluation-gated
-autonomy and telemetry-only HIL, not production physical autonomy or certified
-live robot control.
+read-only, evidence-backed Mission OS patterns for evaluation-gated autonomy
+and telemetry-only physical-adjacent review, not production physical autonomy
+or certified live robot control.
 
 For the full boundary note, see
 [architecture/oss-v1-readiness-boundary.md](architecture/oss-v1-readiness-boundary.md).
 
-Evaluation-gated autonomy has a closed toy-grid path:
-
-```text
-autonomy_plan.v1
-  -> autonomous_episode.v1
-  -> toy_grid_world_replay_trace.v1
-  -> mission eval suites
-  -> autonomy_scorecard.v1
-  -> autonomy_episode_review.v1
-  -> autonomy_gate_result.v1
-  -> autonomy_gate_comparison_result.v1
-  -> read-only Control UI
-```
-
-Telemetry-only HIL has a closed read-only path:
-
-```text
-hil_telemetry_contract.v1
-  -> hil_telemetry_envelope.v1
-  -> ingestion / command-like rejection
-  -> hil_telemetry_evidence.v1
-  -> task.artifacts
-  -> hil_telemetry_review.v1
-  -> autonomy_gate_result.v1
-  -> read-only Control UI
-```
+The public boundary is intentionally described as an overview, not a detailed
+schema chain. The private implementation can be stronger than what is described
+here; the public documentation intentionally remains less specific than the
+private validation assets.
 
 An OSS v1.0 candidate means:
 
 - Browser-first Mission OS is operational through mission contracts, durable
-  execution, recovery, review, eval, promotion packages, approved artifacts,
-  reuse plans, and Control UI visibility.
-- Toy-grid evaluation-gated autonomy is closed through plan-only planning,
-  dry-run episodes, replay traces, safety evals, scorecards, reviews, gates,
-  comparisons, and read-only UI.
-- Telemetry-only HIL is read-only, evidence-backed, review/gate-visible,
-  mock-source testable, and UI-visible.
-- Limited live physical action readiness is design-only: a complete
-  `limited_live_action_gate.v1` can become `operator_review_ready`, but
-  `stronger_execution_allowed`, `live_execution_allowed`, and
-  `physical_execution_invoked` remain false. The action allowlist describes
-  proposal categories only; it does not permit dispatch or actuator execution.
-- `limited_live_action_rehearsal.v1` can become
-  `ready_for_operator_review` only when the gate, approval package, HIL review,
-  emergency-stop evidence, rollback plan, responsibility acknowledgement, and
-  audit refs are present. It remains dry-run/evidence-only.
-- `tenth_stage_readiness_check.v1` can become
-  `ready_for_organization_review` only when the rehearsal package and external
-  organization / hardware-owner / certified-or-autopilot-controller /
-  emergency-stop-process refs are present. It still records
-  `live_action_status=blocked_for_live_action`.
+  execution, recovery, review, evaluation, approved reuse, and Control UI
+  visibility.
+- Evaluation-gated autonomy remains plan-only and dry-run oriented, with replay,
+  scorecard, review, gate, and comparison concepts visible to the operator.
+- Telemetry-only physical-adjacent review remains read-only, evidence-backed,
+  review/gate-visible, mock-source testable, and UI-visible.
+- Limited live physical action readiness remains design-only. The public docs
+  describe the policy boundary, not a dispatch recipe or actuator path.
+- Review readiness requires evidence for operator review, emergency-stop and
+  rollback planning, responsibility acknowledgement, auditability, and external
+  organizational ownership before any stronger execution could be considered.
 - No live robot control, actuator execution, ROS/MAVLink dispatch, autopilot
   replacement, LLM judge in the gate path, or approval-free stronger execution
   is provided by this boundary.
@@ -723,56 +672,28 @@ boiled-claw self-improvement-search \
   --approval-dependency approval-runtime-7
 ```
 
-### 9. Physical AI Adapters
+### 9. Simulation-First Physical-Adjacent Review
 
-The physical AI slice is simulation-first by design:
+The physical-adjacent slice is simulation-first by design. It is meant to test
+Mission OS contracts, evidence capture, review gates, and replay concepts before
+any stronger execution surface is considered.
 
-- `src/runtime/physical_mission_replay.py` provides a Mission OS artifact-only
-  replay path: `simulation_scenario_request.v1`,
-  `telemetry_health_snapshot.v1`, `safety_governor_decision.v1`,
-  `dry_run_action_envelope.v1`, and `offline_replay_plan.v1`. This path does
-  not call adapters, dispatch to ROS, invoke actuators, or perform operator
-  approval.
-- `src/runtime/toy_grid_world.py` provides a deterministic 2D grid-world
-  simulator with an original retro top-down pixel SVG renderer. It supports
-  dry-run movement, obstacles, hazards, battery telemetry, safety governor
-  blocking, deterministic replay traces, and offline replay plans without
-  using external game assets or physical execution.
-- `src/runtime/hil_telemetry_contract.py` and
-  `src/runtime/hil_telemetry_evidence.py` define a hardware-in-the-loop
-  telemetry-only contract plus read-only Mission OS evidence attachment. Valid
-  envelopes can be recorded on task artifacts with freshness and gate/review
-  findings, while command-like payloads are rejected before any task update.
-- `physical_ai_submit_simulation` submits validation jobs to Isaac Sim or OSMO-style adapters
-- `physical_ai_validation_status` returns the persisted validation state for a run id, can refresh queued runs from adapter status endpoints, and exposes `mission_contract`, `telemetry_health`, `verifier_result`, `action_envelope`, `governor_decision`, and `replay_plan`
-- `physical_ai_build_ros2_action` builds ROS2-friendly action envelopes for downstream bridges and returns the initial governor state that keeps dispatch operator-mediated by default
-- `physical_ai_dispatch_ros2_action` only allows real dispatch when a persisted validation run is explicitly marked as validated and the safety governor does not return `reject` or `safe_mode`
-- `physical_ai_replay_computer_trajectory` turns a recorded browser/desktop trajectory into a simulation request plus ROS2 dry-run candidate for PoC work, with a persistent offline replay plan attached
+At the public README level, the important boundary is:
 
-Optional `.env`:
+- validation can produce reviewable mission evidence
+- telemetry can be attached as read-only evidence
+- dry-run plans can be replayed and inspected
+- safety decisions remain operator-visible
+- action, actuator, hardware, mission-upload, and approval-free stronger
+  execution paths stay closed
 
-```bash
-PHYSICAL_AI_ISAAC_SIM_URL=http://127.0.0.1:9001/sim
-PHYSICAL_AI_ISAAC_SIM_STATUS_URL=http://127.0.0.1:9001/status
-PHYSICAL_AI_OSMO_URL=http://127.0.0.1:9002/workflows
-PHYSICAL_AI_OSMO_STATUS_URL=http://127.0.0.1:9002/status
-PHYSICAL_AI_ROS2_BRIDGE_URL=http://127.0.0.1:9003/dispatch
-PHYSICAL_AI_VALIDATION_DB_PATH=data/physical_ai_validation.db
-```
+The implementation has developer-facing modules and configuration surfaces, but
+this README intentionally does not document adapter endpoints, simulator setup,
+transport details, dispatch procedures, or private validation recipes.
 
-Validation runs are stored in SQLite so simulation approvals survive process restarts. Status values like `ready` are not treated as validated; real dispatch requires an explicit pass / validated signal.
-The physical contract is now explicit:
-
-- `mission_contract` keeps the objective, allowed actions, forbidden actions, abort conditions, and evidence-bearing completion criteria first-class
-- `verifier_result` carries `pass | fail | uncertain | unsafe` plus `telemetry_health` and evidence refs
-- `action_envelope` defines the bounded ROS2-facing action proposal, separate from low-level controller commands
-- `governor_decision` captures the safety decision as `allow | reject | require_operator | safe_mode`
-- `replay_plan` is offline-only, benchmark-required, safety-regression-required, and operator-approved before any promoted recovery is considered
-
-This is still a simulation-first design surface. It does not claim live self-modification during a mission, and it deliberately keeps direct motor / thrust / attitude control out of scope.
-
-For a simple Physical AI PoC, replay a failed `computer_*` trajectory into `physical_ai_replay_computer_trajectory`, let the adapter validate it in Isaac Sim / OSMO, and only then inspect or dispatch the ROS2 envelope.
-That replay flow now also returns a persistent `task_id` with simulation / ROS2 / dispatch artifacts attached.
+This is still a simulation-first design surface. It does not claim live
+self-modification during a mission, and it deliberately keeps direct motor,
+thrust, attitude, actuator, or hardware control out of scope.
 
 ### 10. Task Object Layer
 
