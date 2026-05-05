@@ -198,12 +198,14 @@ summarizes a private simulation-first drone delivery milestone at the
 architecture/result level. It intentionally does not publish the implementation,
 transport details, simulator setup, or reproduction steps.
 
-Two follow-up public notes describe the next private milestone without exposing
-implementation details: [Mission OS Multi-Phase Delivery](architecture/mission-os-multi-phase-delivery.md)
-and [Mission OS Fleet Memory](architecture/mission-os-fleet-memory.md). They
-cover the shift from single-flight completion to multi-phase mission control and
-mission-to-mission feedback while preserving the rule that fleet memory is
-evidence, not authority.
+Three follow-up public notes describe the next private milestones without
+exposing implementation details: [Mission OS Multi-Phase Delivery](architecture/mission-os-multi-phase-delivery.md),
+[Mission OS Fleet Memory](architecture/mission-os-fleet-memory.md), and
+[Mission OS Shared Observation](architecture/mission-os-shared-observation.md).
+They cover the shift from single-flight completion to multi-phase mission
+control, mission-to-mission feedback, and intra-mission observation sharing
+while preserving the rule that memory and shared observations are evidence, not
+authority.
 
 ## Current Direction
 
@@ -236,8 +238,15 @@ What exists today:
 - Read-only physical-adjacent telemetry and validation concepts that keep
   action, actuator, hardware, and live execution paths closed.
 - Private simulation-first milestones that have moved from single-flight
-  delivery evidence to multi-phase mission control and fleet-memory feedback.
-  Public notes describe the architecture and result shape only.
+  delivery evidence to multi-phase mission control, fleet-memory feedback, and
+  same-mission shared observation. Public notes describe the architecture and
+  result shape only.
+
+Current Mission OS safety principles:
+
+- Mission memory may inform future planning, but memory is never authority.
+- Vehicles may share observations, but shared observations are never command
+  authority.
 
 Near-term work is focused on documenting the current safety boundary and then
 designing stronger execution gates:

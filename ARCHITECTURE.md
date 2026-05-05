@@ -11,6 +11,7 @@ boiled-claw は、OpenClaw の control plane / execution plane separation を Py
 - trajectory-aware verify / repair / future self-improvement
 - simulator / robotics runtime に伸ばせる physical-ready adapter surface
 - skills / bridges / browser-first tools をまとめる runtime substrate
+- mission memory と shared observation を authority ではなく evidence として扱う Mission OS boundary
 
 このドキュメントは現在実装されている構成を中心に説明します。physical AI 方向は forward path であり、現時点でフル robotics stack を提供するものではありません。現時点の OSS v1.0 candidate としての境界は [architecture/oss-v1-readiness-boundary.md](architecture/oss-v1-readiness-boundary.md) にまとめています。
 

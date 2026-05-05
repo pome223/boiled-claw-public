@@ -93,12 +93,13 @@ publishes the Mission OS safety architecture and result shape without releasing
 the implementation, simulator setup, transport details, or smoke scripts.
 
 For the next public-safe milestone notes, read
-[mission-os-multi-phase-delivery.md](mission-os-multi-phase-delivery.md) and
-[mission-os-fleet-memory.md](mission-os-fleet-memory.md). These notes describe
-the move from single-flight evidence to multi-phase mission control and then to
-mission-to-mission feedback. They keep the same publication boundary:
-principles and results are public, while implementation and reproduction
-details remain private.
+[mission-os-multi-phase-delivery.md](mission-os-multi-phase-delivery.md),
+[mission-os-fleet-memory.md](mission-os-fleet-memory.md), and
+[mission-os-shared-observation.md](mission-os-shared-observation.md). These
+notes describe the move from single-flight evidence to multi-phase mission
+control, mission-to-mission feedback, and intra-mission shared observation.
+They keep the same publication boundary: principles and results are public,
+while implementation and reproduction details remain private.
 
 The current OSS boundary is intentionally narrow: boiled-claw exposes the
 Mission OS concepts and public-safe artifact philosophy, while keeping private
@@ -147,6 +148,7 @@ index and safety-boundary level. The detailed public-safe notes are:
 - [Mission OS for PX4/Gazebo Drone Delivery](mission-os-px4-gazebo-delivery.md)
 - [Mission OS Multi-Phase Delivery Milestone](mission-os-multi-phase-delivery.md)
 - [Mission OS Fleet Memory Milestone](mission-os-fleet-memory.md)
+- [Mission OS Shared Observation Milestone](mission-os-shared-observation.md)
 
 Those notes publish principles and results, not implementation recipes.
 
