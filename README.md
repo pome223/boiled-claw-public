@@ -198,14 +198,15 @@ summarizes a private simulation-first drone delivery milestone at the
 architecture/result level. It intentionally does not publish the implementation,
 transport details, simulator setup, or reproduction steps.
 
-Three follow-up public notes describe the next private milestones without
+Four follow-up public notes describe the next private milestones without
 exposing implementation details: [Mission OS Multi-Phase Delivery](architecture/mission-os-multi-phase-delivery.md),
 [Mission OS Fleet Memory](architecture/mission-os-fleet-memory.md), and
-[Mission OS Shared Observation](architecture/mission-os-shared-observation.md).
+[Mission OS Shared Observation](architecture/mission-os-shared-observation.md),
+and [Mission OS Advisory Recovery Context](architecture/mission-os-advisory-recovery-context.md).
 They cover the shift from single-flight completion to multi-phase mission
-control, mission-to-mission feedback, and intra-mission observation sharing
-while preserving the rule that memory and shared observations are evidence, not
-authority.
+control, mission-to-mission feedback, intra-mission observation sharing, and
+advisory recovery proposal context while preserving the rule that memory,
+shared observations, and advisory recovery context are evidence, not authority.
 
 ## Current Direction
 
