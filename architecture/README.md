@@ -96,12 +96,13 @@ For the next public-safe milestone notes, read
 [mission-os-multi-phase-delivery.md](mission-os-multi-phase-delivery.md),
 [mission-os-fleet-memory.md](mission-os-fleet-memory.md), and
 [mission-os-shared-observation.md](mission-os-shared-observation.md), and
-[mission-os-advisory-recovery-context.md](mission-os-advisory-recovery-context.md). These
-notes describe the move from single-flight evidence to multi-phase mission
-control, mission-to-mission feedback, intra-mission shared observation, and
-advisory recovery proposal context. They keep the same publication boundary:
-principles and results are public, while implementation and reproduction
-details remain private.
+[mission-os-advisory-recovery-context.md](mission-os-advisory-recovery-context.md), and
+[mission-os-prompt-to-sitl-delivery.md](mission-os-prompt-to-sitl-delivery.md).
+These notes describe the move from single-flight evidence to multi-phase mission
+control, mission-to-mission feedback, intra-mission shared observation, advisory
+recovery proposal context, and prompt-derived simulated delivery execution. They
+keep the same publication boundary: principles and results are public, while
+implementation and reproduction details remain private.
 
 The current OSS boundary is intentionally narrow: boiled-claw exposes the
 Mission OS concepts and public-safe artifact philosophy, while keeping private
