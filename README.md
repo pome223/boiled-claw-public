@@ -198,15 +198,17 @@ summarizes a private simulation-first drone delivery milestone at the
 architecture/result level. It intentionally does not publish the implementation,
 transport details, simulator setup, or reproduction steps.
 
-Four follow-up public notes describe the next private milestones without
+Five follow-up public notes describe the next private milestones without
 exposing implementation details: [Mission OS Multi-Phase Delivery](architecture/mission-os-multi-phase-delivery.md),
-[Mission OS Fleet Memory](architecture/mission-os-fleet-memory.md), and
+[Mission OS Fleet Memory](architecture/mission-os-fleet-memory.md),
 [Mission OS Shared Observation](architecture/mission-os-shared-observation.md),
-and [Mission OS Advisory Recovery Context](architecture/mission-os-advisory-recovery-context.md).
+[Mission OS Advisory Recovery Context](architecture/mission-os-advisory-recovery-context.md),
+and [Mission OS Prompt-to-SITL Delivery](architecture/mission-os-prompt-to-sitl-delivery.md).
 They cover the shift from single-flight completion to multi-phase mission
-control, mission-to-mission feedback, intra-mission observation sharing, and
-advisory recovery proposal context while preserving the rule that memory,
-shared observations, and advisory recovery context are evidence, not authority.
+control, mission-to-mission feedback, intra-mission observation sharing,
+advisory recovery proposal context, and prompt-derived simulated delivery
+execution while preserving the rule that memory, shared observations, advisory
+context, and observed simulated evidence are evidence, not command authority.
 
 ## Current Direction
 
@@ -239,8 +241,9 @@ What exists today:
 - Read-only physical-adjacent telemetry and validation concepts that keep
   action, actuator, hardware, and live execution paths closed.
 - Private simulation-first milestones that have moved from single-flight
-  delivery evidence to multi-phase mission control, fleet-memory feedback, and
-  same-mission shared observation. Public notes describe the architecture and
+  delivery evidence to multi-phase mission control, fleet-memory feedback,
+  same-mission shared observation, advisory recovery context, and
+  prompt-to-SITL delivery execution. Public notes describe the architecture and
   result shape only.
 
 Current Mission OS safety principles:
@@ -248,6 +251,8 @@ Current Mission OS safety principles:
 - Mission memory may inform future planning, but memory is never authority.
 - Vehicles may share observations, but shared observations are never command
   authority.
+- Mission Designer may drive simulated delivery execution, but observed
+  evidence is not command authority.
 
 Near-term work is focused on documenting the current safety boundary and then
 designing stronger execution gates:
